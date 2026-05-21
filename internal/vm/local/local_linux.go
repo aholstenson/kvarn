@@ -261,6 +261,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	// Forward serial console output.
 	go func() {
 		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if opts.OnConsoleOutput != nil {
