@@ -20,10 +20,12 @@ func DefaultModels() map[string]modelcfg.Entry {
 			ModelID:         "anthropic/claude-sonnet-4-6",
 			ThinkingTokens:  10000,
 			MaxOutputTokens: 16384,
+			MaxSteps:        100,
 		},
 		ModelSmall: {
 			ModelID:         "anthropic/claude-haiku-4-5",
 			MaxOutputTokens: 8192,
+			MaxSteps:        50,
 		},
 	}
 }

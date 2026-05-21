@@ -696,11 +696,16 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 		maxOut = 16384
 	}
 
+	maxSteps := sub.MaxSteps
+	if maxSteps == 0 {
+		maxSteps = 50
+	}
+
 	opts := []llms.GenerateOption{
 		llms.WithSystemPrompt(sub.SystemPrompt(t.toolkit.repoCtx)),
 		llms.WithMessages(llms.NewMessage(llms.RoleUser, llms.NewTextPart(input.Prompt))),
 		llms.WithTools(sub.Tools(deps)...),
-		llms.WithMaxSteps(sub.MaxSteps),
+		llms.WithMaxSteps(maxSteps),
 		llms.WithMaxOutputTokens(maxOut),
 	}
 	if sub.ThinkingTokens > 0 {

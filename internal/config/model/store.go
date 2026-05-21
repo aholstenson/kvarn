@@ -12,6 +12,7 @@ type Entry struct {
 	ModelID         string
 	ThinkingTokens  int // 0 = disabled
 	MaxOutputTokens int // 0 = use caller default
+	MaxSteps        int // 0 = use caller default
 }
 
 // RawEntry is the user-supplied override for a single model alias. Pointer
@@ -21,6 +22,7 @@ type RawEntry struct {
 	ModelID         string
 	ThinkingTokens  *int
 	MaxOutputTokens *int
+	MaxSteps        *int
 }
 
 // Store reads model-alias configuration from user config. An empty result
@@ -59,6 +61,9 @@ func Resolve(
 			}
 			if raw.MaxOutputTokens != nil {
 				entry.MaxOutputTokens = *raw.MaxOutputTokens
+			}
+			if raw.MaxSteps != nil {
+				entry.MaxSteps = *raw.MaxSteps
 			}
 		}
 		mgr.RegisterAlias(alias, entry.ModelID)

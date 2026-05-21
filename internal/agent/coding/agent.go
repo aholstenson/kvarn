@@ -73,12 +73,16 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 	if maxOut == 0 {
 		maxOut = 16384
 	}
+	maxSteps := mainCfg.MaxSteps
+	if maxSteps == 0 {
+		maxSteps = 50
+	}
 
 	opts := []llms.GenerateOption{
 		llms.WithSystemPrompt(systemPrompt),
 		llms.WithMessages(conversationHistory...),
 		llms.WithToolkits(toolkit),
-		llms.WithMaxSteps(50),
+		llms.WithMaxSteps(maxSteps),
 		llms.WithMaxOutputTokens(maxOut),
 	}
 	if mainCfg.ThinkingTokens > 0 {
