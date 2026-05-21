@@ -75,6 +75,29 @@ type vmInstance struct {
 	netCancel context.CancelFunc
 	netFiles  []*os.File
 	network   *link.Network
+	// waitDone is closed by the watcher goroutine after cmd.Wait() returns,
+	// ensuring QEMU is always reaped exactly once.
+	waitDone chan struct{}
+	waitErr  error
+}
+
+// cleanup releases per-VM resources. Safe to call from either Destroy or
+// the watcher goroutine after an unexpected QEMU exit, but only one of
+// them should call it for a given instance.
+func (inst *vmInstance) cleanup() {
+	if inst.netCancel != nil {
+		inst.netCancel()
+	}
+	if inst.network != nil {
+		inst.network.Close()
+	}
+	for _, f := range inst.netFiles {
+		f.Close()
+	}
+	os.Remove(inst.tmpDisk)
+	os.Remove(inst.tmpSeed)
+	os.Remove(inst.tmpVars)
+	os.Remove(inst.qmpSock)
 }
 
 func (p *Provider) Name() string { return "local" }
@@ -305,11 +328,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 
 	id := fmt.Sprintf("local-%d", time.Now().UnixNano())
 
-	p.mu.Lock()
-	if p.vms == nil {
-		p.vms = make(map[string]*vmInstance)
-	}
-	p.vms[id] = &vmInstance{
+	inst := &vmInstance{
 		cmd:       cmd,
 		qmpSock:   qmpSock,
 		tmpDisk:   tmpDisk,
@@ -318,8 +337,20 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 		netCancel: netCancel,
 		netFiles:  []*os.File{hostFile},
 		network:   network,
+		waitDone:  make(chan struct{}),
 	}
+
+	p.mu.Lock()
+	if p.vms == nil {
+		p.vms = make(map[string]*vmInstance)
+	}
+	p.vms[id] = inst
 	p.mu.Unlock()
+
+	// Reap QEMU exactly once. If it exits before Destroy is called we
+	// claim the instance from the map and run cleanup ourselves so we
+	// don't leak a zombie or its temp files.
+	go p.watchQEMU(id, inst)
 
 	slog.Info("local VM started", "vm", id, "cid", cid, "vsockPort", vsockPort)
 
@@ -349,34 +380,42 @@ func (p *Provider) Destroy(_ context.Context, id string) error {
 		slog.Warn("QMP shutdown failed, will force kill", "vm", id, "error", err)
 	}
 
-	// Wait up to 10s for graceful exit.
-	done := make(chan error, 1)
-	go func() { done <- inst.cmd.Wait() }()
-
+	// Wait up to 10s for graceful exit. The watcher goroutine owns
+	// cmd.Wait(); we only observe completion via waitDone.
 	select {
-	case <-done:
+	case <-inst.waitDone:
 		// Process exited.
 	case <-time.After(10 * time.Second):
 		slog.Warn("QEMU did not exit gracefully, killing", "vm", id)
 		inst.cmd.Process.Kill()
-		<-done
+		<-inst.waitDone
 	}
 
-	if inst.netCancel != nil {
-		inst.netCancel()
-	}
-	if inst.network != nil {
-		inst.network.Close()
-	}
-	for _, f := range inst.netFiles {
-		f.Close()
-	}
-	os.Remove(inst.tmpDisk)
-	os.Remove(inst.tmpSeed)
-	os.Remove(inst.tmpVars)
-	os.Remove(inst.qmpSock)
+	inst.cleanup()
 	slog.Info("local VM destroyed", "vm", id)
 	return nil
+}
+
+// watchQEMU reaps a running QEMU process and cleans up after an unexpected
+// exit. It must be started exactly once per registered vmInstance, after
+// the instance has been inserted into p.vms.
+func (p *Provider) watchQEMU(id string, inst *vmInstance) {
+	inst.waitErr = inst.cmd.Wait()
+	close(inst.waitDone)
+
+	// If the instance is still in the map, Destroy has not been called
+	// and ownership of cleanup falls to us.
+	p.mu.Lock()
+	_, stillRegistered := p.vms[id]
+	if stillRegistered {
+		delete(p.vms, id)
+	}
+	p.mu.Unlock()
+
+	if stillRegistered {
+		slog.Warn("QEMU exited unexpectedly", "vm", id, "error", inst.waitErr)
+		inst.cleanup()
+	}
 }
 
 // unixSocketpairStream returns a SOCK_STREAM AF_UNIX socket pair. One end
