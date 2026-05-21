@@ -1,21 +1,29 @@
 package coding
 
+import modelcfg "github.com/aholstenson/kvarn/internal/config/model"
+
 const (
-	// ModelMain is the alias for the primary coding-agent model. The
-	// top-level agent loop uses it, as do sub-agents that do not declare
-	// their own model.
+	// ModelMain is the alias for the primary coding-agent model used by
+	// the top-level agent loop.
 	ModelMain = "coding-agent"
 
-	// ModelSmall is the alias for a cheaper, faster model used by read-only
-	// sub-agents that don't need top-tier reasoning (e.g. Explore).
+	// ModelSmall is the alias for a cheaper, faster model used by sub-agents
+	// that do not need top-tier reasoning (e.g. Explore).
 	ModelSmall = "coding-agent-small"
 )
 
-// DefaultModels returns the built-in alias → provider/model-id mapping used
-// when models.toml does not override an entry.
-func DefaultModels() map[string]string {
-	return map[string]string{
-		ModelMain:  "anthropic/claude-sonnet-4-6",
-		ModelSmall: "anthropic/claude-haiku-4-5",
+// DefaultModels returns the built-in alias configuration used when agents.toml
+// does not override an entry.
+func DefaultModels() map[string]modelcfg.Entry {
+	return map[string]modelcfg.Entry{
+		ModelMain: {
+			ModelID:         "anthropic/claude-sonnet-4-6",
+			ThinkingTokens:  10000,
+			MaxOutputTokens: 16384,
+		},
+		ModelSmall: {
+			ModelID:         "anthropic/claude-haiku-4-5",
+			MaxOutputTokens: 8192,
+		},
 	}
 }

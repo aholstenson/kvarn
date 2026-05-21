@@ -30,7 +30,7 @@ type Cmd struct {
 	CredentialsFile string `help:"Path to credentials TOML file." default:""`
 	SecretsFile     string `help:"Path to per-project secrets TOML file." default:""`
 	ForgesFile      string `help:"Path to forges TOML file." default:""`
-	ModelsFile      string `help:"Path to models TOML file." default:""`
+	AgentsFile      string `help:"Path to agents config TOML file." default:""`
 	Model           string `help:"LLM model alias for the coding agent." default:"coding-agent"`
 }
 
@@ -77,9 +77,9 @@ func (c *Cmd) Run() error {
 		return errors.Wrap(err, "create llms manager")
 	}
 
-	models, err := modelcfg.Resolve(
+	models, configs, err := modelcfg.Resolve(
 		context.Background(), mgr,
-		modeltoml.OpenDefault(c.ModelsFile),
+		modeltoml.OpenDefault(c.AgentsFile),
 		coding.DefaultModels(),
 		coding.ModelMain, c.Model,
 	)
@@ -99,7 +99,7 @@ func (c *Cmd) Run() error {
 			"git":    forgegit.New(),
 		},
 		SessionMgr: session.NewMemoryManager(),
-		Agent:      coding.NewCodingAgent(models),
+		Agent:      coding.NewCodingAgent(models, configs),
 		Transferer: &transfer.StreamingTransferer{},
 	})
 }

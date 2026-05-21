@@ -49,7 +49,7 @@ type Cmd struct {
 	Logs          bool   `help:"Show log output." name:"logs"`
 	Project       string `help:"Project name for secret lookup. Falls back to git remote → project store if omitted." short:"p"`
 	SecretsFile   string `help:"Override path to secrets store (default: ~/.config/kvarn/secrets.toml)." name:"secrets-file"`
-	ModelsFile    string `help:"Override path to models store (default: ~/.config/kvarn/models.toml)." name:"models-file"`
+	AgentsFile    string `help:"Override path to agents config (default: ~/.config/kvarn/agents.toml)." name:"agents-file"`
 	Model         string `help:"LLM model alias for the coding agent." default:"coding-agent"`
 }
 
@@ -74,9 +74,9 @@ func (c *Cmd) Run() error {
 	if err != nil {
 		return errors.Wrap(err, "create llms manager")
 	}
-	models, err := modelcfg.Resolve(
+	models, configs, err := modelcfg.Resolve(
 		ctx, mgr,
-		modeltoml.OpenDefault(c.ModelsFile),
+		modeltoml.OpenDefault(c.AgentsFile),
 		coding.DefaultModels(),
 		coding.ModelMain, c.Model,
 	)
@@ -86,7 +86,7 @@ func (c *Cmd) Run() error {
 
 	return c.runWith(ctx, runDeps{
 		Provider: &local.Provider{},
-		Agent:    coding.NewCodingAgent(models),
+		Agent:    coding.NewCodingAgent(models, configs),
 		Stdout:   os.Stdout,
 	})
 }

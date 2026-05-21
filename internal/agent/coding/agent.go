@@ -11,6 +11,7 @@ import (
 
 	"github.com/aholstenson/kvarn/internal/agent"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
+	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 )
 
 // AgentSummary is the structured output format for the summary call.
@@ -21,14 +22,16 @@ type AgentSummary struct {
 
 // CodingAgent is an LLM-powered agent that can modify files in a VM.
 type CodingAgent struct {
-	models map[string]llms.Model
+	models  map[string]llms.Model
+	configs map[string]modelcfg.Entry
 }
 
 // NewCodingAgent creates a new coding agent. The models map must contain at
 // least ModelMain; sub-agents that declare a different alias (e.g. ModelSmall
-// for Explore) require the corresponding entry to also be present.
-func NewCodingAgent(models map[string]llms.Model) *CodingAgent {
-	return &CodingAgent{models: models}
+// for Explore) require the corresponding entry to also be present. configs
+// carries the resolved per-alias settings (thinking budget, max output tokens).
+func NewCodingAgent(models map[string]llms.Model, configs map[string]modelcfg.Entry) *CodingAgent {
+	return &CodingAgent{models: models, configs: configs}
 }
 
 func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.Result, error) {
@@ -55,6 +58,7 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 		SessionID:  agentCtx.SessionID,
 		Skills:     skills,
 		Models:     a.models,
+		Configs:    a.configs,
 		SubAgents:  subAgents,
 		RepoCtx:    agentCtx.RepoContext,
 	})
@@ -64,12 +68,21 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 	var conversationHistory []*llms.Message
 	conversationHistory = append(conversationHistory, llms.NewMessage(llms.RoleUser, llms.NewTextPart(agentCtx.Prompt)))
 
+	mainCfg := a.configs[ModelMain]
+	maxOut := mainCfg.MaxOutputTokens
+	if maxOut == 0 {
+		maxOut = 16384
+	}
+
 	opts := []llms.GenerateOption{
 		llms.WithSystemPrompt(systemPrompt),
 		llms.WithMessages(conversationHistory...),
 		llms.WithToolkits(toolkit),
 		llms.WithMaxSteps(50),
-		llms.WithMaxOutputTokens(16384),
+		llms.WithMaxOutputTokens(maxOut),
+	}
+	if mainCfg.ThinkingTokens > 0 {
+		opts = append(opts, llms.WithMaxThinkingTokens(mainCfg.ThinkingTokens))
 	}
 
 	if agentCtx.OnProgress != nil {

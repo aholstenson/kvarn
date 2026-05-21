@@ -25,6 +25,11 @@ type SubAgent struct {
 	// Model is the alias of the LLM the sub-agent runs against. Empty falls
 	// back to ModelMain.
 	Model string
+	// ThinkingTokens is the thinking budget for sub-agent calls. 0 disables
+	// thinking.
+	ThinkingTokens int
+	// MaxOutputTokens caps the sub-agent's output. 0 falls back to 16384.
+	MaxOutputTokens int
 }
 
 // SubAgentDeps carries everything a sub-agent's toolkit needs to construct

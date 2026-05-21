@@ -15,6 +15,7 @@ import (
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
+	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 )
 
@@ -25,6 +26,7 @@ type CodingToolkit struct {
 	sessionID  string
 	skills     map[string]*repocontext.Skill
 	models     map[string]llms.Model
+	configs    map[string]modelcfg.Entry
 	subAgents  SubAgents
 	repoCtx    *repocontext.RepoContext
 }
@@ -39,7 +41,10 @@ type CodingToolkitOpts struct {
 	SessionID  string
 	Skills     []repocontext.Skill
 	// Models maps alias (e.g. ModelMain, ModelSmall) to a resolved LLM.
-	Models    map[string]llms.Model
+	Models map[string]llms.Model
+	// Configs carries the resolved per-alias settings (thinking budget, max
+	// output tokens). May be nil if sub-agents are not used.
+	Configs   map[string]modelcfg.Entry
 	SubAgents SubAgents
 	RepoCtx   *repocontext.RepoContext
 }
@@ -64,6 +69,7 @@ func NewCodingToolkitWithOpts(opts CodingToolkitOpts) *CodingToolkit {
 		sessionID:  opts.SessionID,
 		skills:     skillMap,
 		models:     opts.Models,
+		configs:    opts.Configs,
 		subAgents:  opts.SubAgents,
 		repoCtx:    opts.RepoCtx,
 	}
@@ -685,12 +691,20 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 		Skills:     t.toolkit.skills,
 	}
 
+	maxOut := sub.MaxOutputTokens
+	if maxOut == 0 {
+		maxOut = 16384
+	}
+
 	opts := []llms.GenerateOption{
 		llms.WithSystemPrompt(sub.SystemPrompt(t.toolkit.repoCtx)),
 		llms.WithMessages(llms.NewMessage(llms.RoleUser, llms.NewTextPart(input.Prompt))),
 		llms.WithTools(sub.Tools(deps)...),
 		llms.WithMaxSteps(sub.MaxSteps),
-		llms.WithMaxOutputTokens(16384),
+		llms.WithMaxOutputTokens(maxOut),
+	}
+	if sub.ThinkingTokens > 0 {
+		opts = append(opts, llms.WithMaxThinkingTokens(sub.ThinkingTokens))
 	}
 	if parent := llms.GetExecutionContext(ctx); parent != nil {
 		opts = append(opts, llms.WithParentExecution(parent))
