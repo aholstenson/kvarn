@@ -210,11 +210,13 @@ type readFileTool struct {
 
 func (t *readFileTool) Name() string { return "read_file" }
 func (t *readFileTool) Description() string {
-	return `Read a file and return each line with a short content hash you can use as an anchor in subsequent edit_file calls. Example output line:
+	return `Read a file. Each line is returned with a short word anchor you can reference in subsequent edit_file calls. Example output line:
 
-  12:f1|  return "world";
+  12:cedar|  return "world";
 
-The first line of the output is "version: <hash>" — pass that value back to edit_file as expected_version. Hashes are NOT stable across edits; call read_file again after each edit to get fresh anchors.
+Anchors are deterministic, single-word labels of the line's content. When two distinct lines in the same file would otherwise share the same word, both get a short hex suffix (e.g. "cedar:f1"). Anchors stay valid for unchanged lines across edits — you only need to re-read if the lines you want to touch have changed.
+
+The first line of the output is "version: <hash>" — you may pass that back as expected_version on edit_file as an advisory check, but it is not required.
 
 Optional start_line / end_line (1-indexed, inclusive) limit the response to a window. The version always covers the whole file.`
 }
@@ -255,33 +257,37 @@ func (t *readFileTool) ToString(o *ReadFileOutput) string {
 
 // edit_file
 
-// EditOperationInput is a flat representation of a single hash-anchored edit
+// EditOperationInput is a flat representation of a single anchor-resolved edit
 // operation. Which fields are required depends on Op:
-//   - "replace" / "delete":            line, hash (+ lines for replace)
-//   - "replace_range" / "delete_range": start_line, start_hash, end_line, end_hash (+ lines for replace_range)
-//   - "insert_after":                  line, hash, lines
+//   - "replace" / "delete":                       hash (+ lines for replace)
+//   - "insert_after" / "insert_before":           hash, lines
+//   - "replace_range" / "delete_range":           start_hash, end_hash (+ lines for replace_range)
+//
+// The optional line / start_line / end_line are tiebreakers: supply them only
+// when the same anchor matches multiple identical lines in the file.
 type EditOperationInput struct {
-	Op        string   `json:"op" jsonschema:"description=One of: replace, replace_range, insert_after, delete, delete_range"`
-	Line      int      `json:"line,omitempty" jsonschema:"description=1-indexed line for single-line ops (replace, delete, insert_after). For insert_after use 0 to insert at the top."`
-	Hash      string   `json:"hash,omitempty" jsonschema:"description=Anchor hash from read_file for the line"`
-	StartLine int      `json:"start_line,omitempty" jsonschema:"description=1-indexed inclusive start for range ops"`
-	StartHash string   `json:"start_hash,omitempty" jsonschema:"description=Anchor hash for start_line"`
-	EndLine   int      `json:"end_line,omitempty" jsonschema:"description=1-indexed inclusive end for range ops"`
-	EndHash   string   `json:"end_hash,omitempty" jsonschema:"description=Anchor hash for end_line"`
+	Op        string   `json:"op" jsonschema:"description=One of: replace, replace_range, insert_after, insert_before, delete, delete_range"`
+	Line      int      `json:"line,omitempty" jsonschema:"description=Optional 1-indexed line tiebreaker for single-line ops. Needed only when the anchor matches multiple identical lines."`
+	Hash      string   `json:"hash,omitempty" jsonschema:"description=Anchor from read_file identifying the target line. Required for all single-line ops."`
+	StartLine int      `json:"start_line,omitempty" jsonschema:"description=Optional 1-indexed tiebreaker for the start of a range op."`
+	StartHash string   `json:"start_hash,omitempty" jsonschema:"description=Anchor for the inclusive start of a range op."`
+	EndLine   int      `json:"end_line,omitempty" jsonschema:"description=Optional 1-indexed tiebreaker for the end of a range op."`
+	EndHash   string   `json:"end_hash,omitempty" jsonschema:"description=Anchor for the inclusive end of a range op."`
 	Lines     []string `json:"lines,omitempty" jsonschema:"description=Replacement or insertion content. One entry per line, no trailing newlines."`
 }
 
 type EditFileInput struct {
 	Path            string               `json:"path" jsonschema:"description=Path to the file relative to the workspace root"`
-	ExpectedVersion string               `json:"expected_version" jsonschema:"description=Version hash from the most recent read_file call"`
-	Operations      []EditOperationInput `json:"operations" jsonschema:"description=Ordered list of hash-anchored edits to apply atomically"`
+	ExpectedVersion string               `json:"expected_version,omitempty" jsonschema:"description=Optional/advisory version from the most recent read_file. If supplied and stale the edit still applies when every anchor resolves, and version_drift is reported."`
+	Operations      []EditOperationInput `json:"operations" jsonschema:"description=Ordered list of anchor-resolved edits to apply atomically"`
 	ContextLines    int                  `json:"context_lines,omitempty" jsonschema:"description=Fresh tagged context lines around each edit in the response. Default 5."`
 }
 
 type EditFileOutput struct {
-	Version    string
-	TotalLines int32
-	Context    []TaggedLineView
+	Version      string
+	TotalLines   int32
+	Context      []TaggedLineView
+	VersionDrift bool
 	// Failure carries a structured error message and (when relevant) a fresh
 	// tagged snapshot of the file so the model can re-anchor.
 	Failure  string
@@ -294,20 +300,23 @@ type editFileTool struct {
 
 func (t *editFileTool) Name() string { return "edit_file" }
 func (t *editFileTool) Description() string {
-	return `Apply hash-anchored edits to a file transactionally. Pass expected_version from your most recent read_file call. Each operation references lines by {line, hash} (or {start_line, start_hash, end_line, end_hash} for range ops) where the hashes came from read_file.
+	return `Apply anchor-resolved edits to a file transactionally. Each operation references the target line by its anchor from read_file. Line numbers are optional tiebreakers and are not normally needed.
 
 Example operation:
 
-  {"op": "replace", "line": 12, "hash": "f1", "lines": ["  return \"hello world\";"]}
+  {"op": "replace", "hash": "cedar", "lines": ["  return \"hello world\";"]}
 
 Supported ops:
-- replace        — replace a single line (uses line, hash, lines)
-- replace_range  — replace an inclusive line range (start_line, start_hash, end_line, end_hash, lines)
-- insert_after   — insert new lines after the given line (line=0 inserts at the top; uses line, hash, lines)
-- delete         — delete a single line (line, hash)
-- delete_range   — delete an inclusive line range (start_line, start_hash, end_line, end_hash)
+- replace        — replace a single line (hash, lines)
+- replace_range  — replace an inclusive line range (start_hash, end_hash, lines)
+- insert_after   — insert new lines immediately after the given line (hash, lines)
+- insert_before  — insert new lines immediately before the given line (hash, lines)
+- delete         — delete a single line (hash)
+- delete_range   — delete an inclusive line range (start_hash, end_hash)
 
-On version conflict or anchor mismatch the call fails atomically (nothing is applied) and returns a fresh tagged read so you can re-anchor in one round-trip.`
+Chained edits: anchors for unchanged lines stay valid across edits, so you can issue multiple edit_file calls without re-reading the file as long as you reference lines that haven't moved. expected_version is optional/advisory — if you supply it and the file changed elsewhere the edit still applies (as long as anchors resolve) and version_drift is reported. The line / start_line / end_line fields are tiebreakers: supply them only when the same anchor would match multiple identical lines elsewhere in the file.
+
+On anchor mismatch the call fails atomically (nothing is applied) and returns a fresh tagged read so you can re-anchor in one round-trip.`
 }
 func (t *editFileTool) Schema() *EditFileInput { return &EditFileInput{} }
 
@@ -351,9 +360,10 @@ func (t *editFileTool) Execute(ctx context.Context, input *EditFileInput) (*Edit
 	}
 
 	out := &EditFileOutput{
-		Version:    resp.Version,
-		TotalLines: resp.TotalLines,
-		Context:    make([]TaggedLineView, len(resp.Context)),
+		Version:      resp.Version,
+		TotalLines:   resp.TotalLines,
+		VersionDrift: resp.VersionDrift,
+		Context:      make([]TaggedLineView, len(resp.Context)),
 	}
 	for i, l := range resp.Context {
 		out.Context[i] = TaggedLineView{Line: l.Line, Hash: l.Hash, Content: l.Content}
@@ -377,6 +387,9 @@ func (t *editFileTool) ToString(o *EditFileOutput) string {
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Edit applied. New version: %s (%d lines total)\n", o.Version, o.TotalLines)
+	if o.VersionDrift {
+		sb.WriteString("Note: the file changed elsewhere since your last read. Distant anchors may be stale.\n")
+	}
 	for _, l := range o.Context {
 		fmt.Fprintf(&sb, "%d:%s|%s\n", l.Line, l.Hash, l.Content)
 	}
@@ -391,6 +404,8 @@ func parseEditOp(s string) (v1.EditOp, error) {
 		return v1.EditOp_EDIT_OP_REPLACE_RANGE, nil
 	case "insert_after":
 		return v1.EditOp_EDIT_OP_INSERT_AFTER, nil
+	case "insert_before":
+		return v1.EditOp_EDIT_OP_INSERT_BEFORE, nil
 	case "delete":
 		return v1.EditOp_EDIT_OP_DELETE, nil
 	case "delete_range":
@@ -439,7 +454,7 @@ type writeFileTool struct {
 
 func (t *writeFileTool) Name() string { return "write_file" }
 func (t *writeFileTool) Description() string {
-	return "Create a new file (omit expected_version) or overwrite an existing one (provide expected_version from your most recent read_file). Prefer edit_file for targeted changes."
+	return "Create a new file (omit expected_version) or overwrite an existing one (provide expected_version from your most recent read_file). Unlike edit_file, expected_version is strict here — a mismatch rejects the write. Prefer edit_file for targeted changes."
 }
 func (t *writeFileTool) Schema() *WriteFileInput { return &WriteFileInput{} }
 

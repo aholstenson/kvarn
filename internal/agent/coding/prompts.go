@@ -169,9 +169,11 @@ const taskAsSourceOfTruth = `## Task message as source of truth
 
 const editingRules = `## Editing rules
 
-- Before editing, read the file with read_file. The response gives each line a short hash; reference those hashes (not the line text) in your edit_file calls, and pass the version field back as expected_version.
-- Prefer edit_file for existing files; use write_file only for new files (or to overwrite an entire existing file with an explicit expected_version).
-- If edit_file fails with a version_conflict or anchor_mismatch, re-read the file to get fresh anchors before retrying — never reproduce line text by memory.`
+- Before editing, read the file with read_file. Each line comes back with a short word anchor (e.g. "cedar"); reference that anchor (not the line text) in your edit_file calls.
+- Anchors for unchanged lines stay valid across edits. You can chain multiple edit_file calls without re-reading the file as long as the lines you target haven't moved or changed. Only re-read when an edit reports anchor_mismatch.
+- expected_version is optional. If you pass it and the file changed elsewhere, the edit still applies (when anchors resolve) and the response sets version_drift — treat that as a hint that distant anchors may be stale.
+- Prefer edit_file for existing files; use write_file only for new files (or to overwrite an entire existing file with an explicit expected_version — strict on write_file).
+- On anchor_mismatch, re-read the file to get fresh anchors before retrying — never reproduce line text by memory.`
 
 const qualityRules = `## Quality
 

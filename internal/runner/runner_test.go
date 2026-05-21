@@ -280,7 +280,7 @@ var _ = Describe("Runner", func() {
 			Expect(string(content)).To(Equal("hi\nworld\n"))
 		})
 
-		It("rejects edits with stale version", func() {
+		It("reports version_drift but applies edits when expected_version is stale and anchor still resolves", func() {
 			_, err := client.UploadFiles(context.Background(), connect.NewRequest(&v1.UploadFilesRequest{
 				WorkingDir: workDir,
 				Files: []*v1.FileContent{
@@ -295,7 +295,7 @@ var _ = Describe("Runner", func() {
 			}))
 			Expect(err).NotTo(HaveOccurred())
 
-			_, err = client.EditFile(context.Background(), connect.NewRequest(&v1.EditFileRequest{
+			resp, err := client.EditFile(context.Background(), connect.NewRequest(&v1.EditFileRequest{
 				WorkingDir:      workDir,
 				Path:            "test.txt",
 				ExpectedVersion: "deadbeef",
@@ -303,8 +303,8 @@ var _ = Describe("Runner", func() {
 					{Op: v1.EditOp_EDIT_OP_REPLACE, Line: 1, Hash: read.Msg.Lines[0].Hash, Lines: []string{"hi"}},
 				},
 			}))
-			Expect(err).To(HaveOccurred())
-			Expect(connect.CodeOf(err)).To(Equal(connect.CodeFailedPrecondition))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.VersionDrift).To(BeTrue())
 		})
 
 		It("rejects path traversal", func() {

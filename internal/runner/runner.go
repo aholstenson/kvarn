@@ -438,15 +438,7 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 	}
 
 	currentVersion := hashFile(content)
-	if msg.ExpectedVersion != "" && msg.ExpectedVersion != currentVersion {
-		snap, _ := buildReadResponse(content, 0, 0)
-		ae := &AnchoredError{
-			Code:     ErrVersionConflict,
-			Detail:   fmt.Sprintf("expected version %s, current version %s", msg.ExpectedVersion, currentVersion),
-			Snapshot: snap,
-		}
-		return nil, ae.toConnectError()
-	}
+	versionDrifted := msg.ExpectedVersion != "" && msg.ExpectedVersion != currentVersion
 
 	totalLines := len(lines)
 
@@ -464,81 +456,85 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 		}
 	}
 
-	// Validate anchor hashes at the longest prefix length the request uses.
-	prefixLen := requestPrefixLen(msg.Operations)
-	currentPrefix := func(line int) string {
-		if line < 1 || line > totalLines {
-			return ""
-		}
-		return hashLinePrefix(lines[line-1], prefixLen)
-	}
+	// Resolve each op's anchor(s) into concrete 1-indexed line positions. The
+	// op's `line` field is an optional tiebreaker used only when the anchor is
+	// ambiguous; an INSERT_AFTER with line=0 still means "top of file".
+	resolvedStart := make([]int, len(msg.Operations))
+	resolvedEnd := make([]int, len(msg.Operations))
 	for i, op := range msg.Operations {
-		anchors := []struct {
-			line int
-			hash string
-			role string
-		}{}
 		switch op.Op {
-		case v1.EditOp_EDIT_OP_REPLACE, v1.EditOp_EDIT_OP_DELETE, v1.EditOp_EDIT_OP_INSERT_AFTER:
-			if op.Op == v1.EditOp_EDIT_OP_INSERT_AFTER && op.Line == 0 {
-				// insert at top of file — no anchor required.
-				break
-			}
-			anchors = append(anchors, struct {
-				line int
-				hash string
-				role string
-			}{int(op.Line), op.Hash, "line"})
-		case v1.EditOp_EDIT_OP_REPLACE_RANGE, v1.EditOp_EDIT_OP_DELETE_RANGE:
-			anchors = append(anchors, struct {
-				line int
-				hash string
-				role string
-			}{int(op.StartLine), op.StartHash, "start_line"})
-			anchors = append(anchors, struct {
-				line int
-				hash string
-				role string
-			}{int(op.EndLine), op.EndHash, "end_line"})
-		}
-		for _, a := range anchors {
-			if a.hash == "" {
-				ae := &AnchoredError{
-					Code:   ErrInvalidOperation,
-					Detail: fmt.Sprintf("operation %d missing %s hash", i, a.role),
-				}
+		case v1.EditOp_EDIT_OP_REPLACE, v1.EditOp_EDIT_OP_DELETE:
+			if op.Hash == "" {
+				ae := &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d missing hash", i)}
 				return nil, ae.toConnectError()
 			}
-			expected := currentPrefix(a.line)
-			// If request supplied a longer hash than our recomputed prefix, trim.
-			actual := a.hash
-			if len(actual) < len(expected) {
-				expected = expected[:len(actual)]
-			} else if len(actual) > len(expected) {
-				actual = actual[:len(expected)]
+			line, ae := resolveAnchor(lines, op.Hash, int(op.Line))
+			if ae != nil {
+				ae.Snapshot, _ = buildReadResponse(content, 0, 0)
+				ae.Detail = fmt.Sprintf("operation %d: %s", i, ae.Detail)
+				return nil, ae.toConnectError()
 			}
-			if actual != expected {
-				ctxLines := contextWindow(lines, a.line, 3)
-				snap, _ := buildReadResponse(content, 0, 0)
-				ae := &AnchoredError{
-					Code: ErrAnchorMismatch,
-					Detail: fmt.Sprintf(
-						"operation %d %s %d hash %s does not match current %s",
-						i, a.role, a.line, a.hash, expected,
-					),
-					Snapshot: snap,
-				}
-				cerr := ae.toConnectError()
-				if ctxTagged := ctxLines; len(ctxTagged) > 0 {
-					// already attached snapshot; nothing extra to do here.
-					_ = ctxTagged
-				}
-				return nil, cerr
+			resolvedStart[i] = line
+			resolvedEnd[i] = line
+		case v1.EditOp_EDIT_OP_INSERT_AFTER:
+			if op.Line == 0 && op.Hash == "" {
+				// Insert at top of file: no anchor needed.
+				resolvedStart[i] = 0
+				resolvedEnd[i] = 0
+				continue
 			}
+			if op.Hash == "" {
+				ae := &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d missing hash", i)}
+				return nil, ae.toConnectError()
+			}
+			line, ae := resolveAnchor(lines, op.Hash, int(op.Line))
+			if ae != nil {
+				ae.Snapshot, _ = buildReadResponse(content, 0, 0)
+				ae.Detail = fmt.Sprintf("operation %d: %s", i, ae.Detail)
+				return nil, ae.toConnectError()
+			}
+			resolvedStart[i] = line
+			resolvedEnd[i] = line
+		case v1.EditOp_EDIT_OP_INSERT_BEFORE:
+			if op.Hash == "" {
+				ae := &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d missing hash", i)}
+				return nil, ae.toConnectError()
+			}
+			line, ae := resolveAnchor(lines, op.Hash, int(op.Line))
+			if ae != nil {
+				ae.Snapshot, _ = buildReadResponse(content, 0, 0)
+				ae.Detail = fmt.Sprintf("operation %d: %s", i, ae.Detail)
+				return nil, ae.toConnectError()
+			}
+			resolvedStart[i] = line
+			resolvedEnd[i] = line
+		case v1.EditOp_EDIT_OP_REPLACE_RANGE, v1.EditOp_EDIT_OP_DELETE_RANGE:
+			if op.StartHash == "" || op.EndHash == "" {
+				ae := &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d missing start_hash or end_hash", i)}
+				return nil, ae.toConnectError()
+			}
+			startLine, ae := resolveAnchor(lines, op.StartHash, int(op.StartLine))
+			if ae != nil {
+				ae.Snapshot, _ = buildReadResponse(content, 0, 0)
+				ae.Detail = fmt.Sprintf("operation %d start: %s", i, ae.Detail)
+				return nil, ae.toConnectError()
+			}
+			endLine, ae := resolveAnchor(lines, op.EndHash, int(op.EndLine))
+			if ae != nil {
+				ae.Snapshot, _ = buildReadResponse(content, 0, 0)
+				ae.Detail = fmt.Sprintf("operation %d end: %s", i, ae.Detail)
+				return nil, ae.toConnectError()
+			}
+			if startLine > endLine {
+				ae := &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d has start_line > end_line after anchor resolution", i)}
+				return nil, ae.toConnectError()
+			}
+			resolvedStart[i] = startLine
+			resolvedEnd[i] = endLine
 		}
 	}
 
-	if _, err := buildIntervals(msg.Operations); err != nil {
+	if _, err := buildIntervals(msg.Operations, resolvedStart, resolvedEnd); err != nil {
 		if ae, ok := err.(*AnchoredError); ok {
 			return nil, ae.toConnectError()
 		}
@@ -546,15 +542,9 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 	}
 
 	// Capture original anchor lines for context computation after the edit.
-	type anchorRecord struct{ line int }
-	anchorRecords := make([]anchorRecord, 0, len(msg.Operations))
-	for _, op := range msg.Operations {
-		switch op.Op {
-		case v1.EditOp_EDIT_OP_REPLACE, v1.EditOp_EDIT_OP_DELETE, v1.EditOp_EDIT_OP_INSERT_AFTER:
-			anchorRecords = append(anchorRecords, anchorRecord{int(op.Line)})
-		case v1.EditOp_EDIT_OP_REPLACE_RANGE, v1.EditOp_EDIT_OP_DELETE_RANGE:
-			anchorRecords = append(anchorRecords, anchorRecord{int(op.StartLine)})
-		}
+	anchorRecords := make([]int, 0, len(msg.Operations))
+	for i := range msg.Operations {
+		anchorRecords = append(anchorRecords, resolvedStart[i])
 	}
 
 	// Apply ops in descending start order so earlier indices remain valid.
@@ -563,7 +553,7 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 		indices[i] = i
 	}
 	sort.Slice(indices, func(i, j int) bool {
-		return opStart(msg.Operations[indices[i]]) > opStart(msg.Operations[indices[j]])
+		return resolvedStart[indices[i]] > resolvedStart[indices[j]]
 	})
 
 	newLines := make([][]byte, len(lines))
@@ -574,17 +564,20 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 		switch op.Op {
 		case v1.EditOp_EDIT_OP_REPLACE:
 			repl := stringsToByteSlices(op.Lines)
-			newLines = spliceLines(newLines, int(op.Line)-1, int(op.Line), repl)
+			newLines = spliceLines(newLines, resolvedStart[idx]-1, resolvedStart[idx], repl)
 		case v1.EditOp_EDIT_OP_REPLACE_RANGE:
 			repl := stringsToByteSlices(op.Lines)
-			newLines = spliceLines(newLines, int(op.StartLine)-1, int(op.EndLine), repl)
+			newLines = spliceLines(newLines, resolvedStart[idx]-1, resolvedEnd[idx], repl)
 		case v1.EditOp_EDIT_OP_INSERT_AFTER:
 			repl := stringsToByteSlices(op.Lines)
-			newLines = spliceLines(newLines, int(op.Line), int(op.Line), repl)
+			newLines = spliceLines(newLines, resolvedStart[idx], resolvedStart[idx], repl)
+		case v1.EditOp_EDIT_OP_INSERT_BEFORE:
+			repl := stringsToByteSlices(op.Lines)
+			newLines = spliceLines(newLines, resolvedStart[idx]-1, resolvedStart[idx]-1, repl)
 		case v1.EditOp_EDIT_OP_DELETE:
-			newLines = spliceLines(newLines, int(op.Line)-1, int(op.Line), nil)
+			newLines = spliceLines(newLines, resolvedStart[idx]-1, resolvedStart[idx], nil)
 		case v1.EditOp_EDIT_OP_DELETE_RANGE:
-			newLines = spliceLines(newLines, int(op.StartLine)-1, int(op.EndLine), nil)
+			newLines = spliceLines(newLines, resolvedStart[idx]-1, resolvedEnd[idx], nil)
 		}
 	}
 
@@ -606,8 +599,8 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 
 	contextSet := make([]*v1.TaggedLine, 0)
 	seen := make(map[int32]bool)
-	for _, rec := range anchorRecords {
-		tags := contextWindow(newLines, rec.line, contextLines)
+	for _, line := range anchorRecords {
+		tags := contextWindow(newLines, line, contextLines)
 		for _, t := range tags {
 			if !seen[t.Line] {
 				seen[t.Line] = true
@@ -618,22 +611,11 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 	sort.Slice(contextSet, func(i, j int) bool { return contextSet[i].Line < contextSet[j].Line })
 
 	return connect.NewResponse(&v1.EditFileResponse{
-		Version:    hashFile(updated),
-		TotalLines: int32(len(newLines)),
-		Context:    contextSet,
+		Version:      hashFile(updated),
+		TotalLines:   int32(len(newLines)),
+		Context:      contextSet,
+		VersionDrift: versionDrifted,
 	}), nil
-}
-
-// opStart returns the leading line number used to sort operations in descending
-// order before applying them. INSERT_AFTER at line N is placed after line N.
-func opStart(op *v1.EditOperation) int {
-	switch op.Op {
-	case v1.EditOp_EDIT_OP_REPLACE, v1.EditOp_EDIT_OP_DELETE, v1.EditOp_EDIT_OP_INSERT_AFTER:
-		return int(op.Line)
-	case v1.EditOp_EDIT_OP_REPLACE_RANGE, v1.EditOp_EDIT_OP_DELETE_RANGE:
-		return int(op.StartLine)
-	}
-	return 0
 }
 
 // spliceLines returns lines[:start] + replacement + lines[end:].

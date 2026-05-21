@@ -144,9 +144,9 @@ var _ = Describe("CodingToolkit", func() {
 					TotalLines: 5,
 					Newline:    "\n",
 					Lines: []*v1.TaggedLine{
-						{Line: 2, Hash: "f1", Content: "b"},
-						{Line: 3, Hash: "f2", Content: "c"},
-						{Line: 4, Hash: "f3", Content: "d"},
+						{Line: 2, Hash: "cedar", Content: "b"},
+						{Line: 3, Hash: "maple", Content: "c"},
+						{Line: 4, Hash: "birch", Content: "d"},
 					},
 				}, nil
 			}
@@ -159,7 +159,7 @@ var _ = Describe("CodingToolkit", func() {
 			Expect(output.Version).To(Equal("abc123"))
 			Expect(output.TotalLines).To(Equal(int32(5)))
 			Expect(output.Lines).To(HaveLen(3))
-			Expect(output.Lines[0].Hash).To(Equal("f1"))
+			Expect(output.Lines[0].Hash).To(Equal("cedar"))
 		})
 	})
 
@@ -172,13 +172,13 @@ var _ = Describe("CodingToolkit", func() {
 				Expect(req.Operations).To(HaveLen(1))
 				Expect(req.Operations[0].Op).To(Equal(v1.EditOp_EDIT_OP_REPLACE))
 				Expect(req.Operations[0].Line).To(Equal(int32(12)))
-				Expect(req.Operations[0].Hash).To(Equal("f1"))
+				Expect(req.Operations[0].Hash).To(Equal("cedar"))
 				Expect(req.Operations[0].Lines).To(Equal([]string{"new line"}))
 				return &v1.EditFileResponse{
 					Version:    "v2",
 					TotalLines: 20,
 					Context: []*v1.TaggedLine{
-						{Line: 12, Hash: "aa", Content: "new line"},
+						{Line: 12, Hash: "oakwood", Content: "new line"},
 					},
 				}, nil
 			}
@@ -187,7 +187,7 @@ var _ = Describe("CodingToolkit", func() {
 				Path:            "main.go",
 				ExpectedVersion: "v1",
 				Operations: []coding.EditOperationInput{
-					{Op: "replace", Line: 12, Hash: "f1", Lines: []string{"new line"}},
+					{Op: "replace", Line: 12, Hash: "cedar", Lines: []string{"new line"}},
 				},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -196,15 +196,49 @@ var _ = Describe("CodingToolkit", func() {
 			Expect(output.Context).To(HaveLen(1))
 		})
 
+		It("sends insert_before operation", func() {
+			runner.editFileFunc = func(_ context.Context, req *v1.EditFileRequest) (*v1.EditFileResponse, error) {
+				Expect(req.Operations).To(HaveLen(1))
+				Expect(req.Operations[0].Op).To(Equal(v1.EditOp_EDIT_OP_INSERT_BEFORE))
+				Expect(req.Operations[0].Hash).To(Equal("cedar"))
+				Expect(req.Operations[0].Lines).To(Equal([]string{"header"}))
+				return &v1.EditFileResponse{Version: "v2", TotalLines: 21}, nil
+			}
+
+			_, err := tools["edit_file"].Execute(ctx, &coding.EditFileInput{
+				Path: "main.go",
+				Operations: []coding.EditOperationInput{
+					{Op: "insert_before", Hash: "cedar", Lines: []string{"header"}},
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("surfaces version_drift in the rendered output", func() {
+			runner.editFileFunc = func(_ context.Context, _ *v1.EditFileRequest) (*v1.EditFileResponse, error) {
+				return &v1.EditFileResponse{Version: "v2", TotalLines: 5, VersionDrift: true}, nil
+			}
+			result, err := tools["edit_file"].Execute(ctx, &coding.EditFileInput{
+				Path:            "main.go",
+				ExpectedVersion: "vstale",
+				Operations: []coding.EditOperationInput{
+					{Op: "replace", Hash: "cedar", Lines: []string{"x"}},
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			rendered := tools["edit_file"].ToString(result.(*coding.EditFileOutput))
+			Expect(rendered).To(ContainSubstring("changed elsewhere"))
+		})
+
 		It("renders anchor-mismatch failure with a recovery hint", func() {
 			runner.editFileFunc = func(_ context.Context, _ *v1.EditFileRequest) (*v1.EditFileResponse, error) {
-				return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("anchor_mismatch: operation 0 line 1 hash zz does not match current f1"))
+				return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("anchor_mismatch: anchor \"cedar\" matches no line"))
 			}
 			result, err := tools["edit_file"].Execute(ctx, &coding.EditFileInput{
 				Path:            "main.go",
 				ExpectedVersion: "v1",
 				Operations: []coding.EditOperationInput{
-					{Op: "replace", Line: 1, Hash: "zz", Lines: []string{"x"}},
+					{Op: "replace", Hash: "cedar", Lines: []string{"x"}},
 				},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -390,12 +424,12 @@ var _ = Describe("CodingToolkit", func() {
 				Version:    "vnew",
 				TotalLines: 12,
 				Context: []coding.TaggedLineView{
-					{Line: 3, Hash: "ab", Content: "x"},
+					{Line: 3, Hash: "cedar", Content: "x"},
 				},
 			})
 			Expect(result).To(ContainSubstring("Edit applied"))
 			Expect(result).To(ContainSubstring("vnew"))
-			Expect(result).To(ContainSubstring("3:ab|x"))
+			Expect(result).To(ContainSubstring("3:cedar|x"))
 		})
 
 		It("formats write_file success output", func() {

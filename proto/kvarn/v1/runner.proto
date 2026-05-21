@@ -34,10 +34,11 @@ message UploadFilesResponse {
   int32 files_written = 1;
 }
 
-// TaggedLine is a single line of a file with an opaque anchor hash. The hash is
-// a short prefix of blake2s over the line bytes (no terminator); it is used to
-// reference the line in subsequent EditFile calls without requiring the agent
-// to reproduce the line verbatim.
+// TaggedLine is a single line of a file with an opaque anchor token. The token
+// is a single English word drawn from a curated vocabulary, optionally suffixed
+// with `:<hex>` when two distinct lines in the same file would otherwise map to
+// the same word. It is used to reference the line in subsequent EditFile calls
+// without requiring the agent to reproduce the line verbatim.
 message TaggedLine {
   int32 line = 1;
   string hash = 2;
@@ -70,14 +71,17 @@ enum EditOp {
   EDIT_OP_INSERT_AFTER = 3;
   EDIT_OP_DELETE = 4;
   EDIT_OP_DELETE_RANGE = 5;
+  EDIT_OP_INSERT_BEFORE = 6;
 }
 
 message EditOperation {
   EditOp op = 1;
-  // Single-line ops use line/hash.
+  // Single-line ops use hash to locate the line. line is an optional tiebreaker
+  // used only when the same anchor matches multiple distinct lines in the file.
   int32 line = 2;
   string hash = 3;
-  // Range ops use start_line/start_hash through end_line/end_hash (inclusive).
+  // Range ops use start_hash and end_hash to locate the bounds; start_line and
+  // end_line are optional tiebreakers (see line above).
   int32 start_line = 4;
   string start_hash = 5;
   int32 end_line = 6;
@@ -89,7 +93,10 @@ message EditOperation {
 message EditFileRequest {
   string working_dir = 1;
   string path = 2;
-  // Version hash returned by the most recent ReadFile.
+  // Optional/advisory: the version returned by the most recent ReadFile. When
+  // present and mismatched, the runner still applies the edit if every op's
+  // anchor still resolves uniquely, and signals the drift via
+  // EditFileResponse.version_drift.
   string expected_version = 3;
   repeated EditOperation operations = 4;
   // Lines of fresh tagged context around each edit in the response. 0 means default (5).
@@ -101,6 +108,11 @@ message EditFileResponse {
   int32 total_lines = 2;
   // Fresh tagged context around each touched region.
   repeated TaggedLine context = 3;
+  // True when expected_version was supplied but did not match the file's
+  // current version. The edit still succeeded because all op anchors resolved;
+  // the agent should consider re-reading the file before further work since
+  // anchors elsewhere in the file may be stale.
+  bool version_drift = 4;
 }
 
 message WriteFileRequest {

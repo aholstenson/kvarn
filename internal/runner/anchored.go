@@ -95,26 +95,42 @@ func hashFile(content []byte) string {
 	return fmt.Sprintf("%016x", h.Sum64())
 }
 
-// hashLinePrefix returns the first prefixLen hex chars of FNV-1a 32-bit over
-// line. Callers want a prefix to fit in 2-3 characters in the common case;
-// the maximum useful length is 8 (full 32-bit hash).
-func hashLinePrefix(line []byte, prefixLen int) string {
+// fnv32 returns the FNV-1a 32-bit digest over b.
+func fnv32(b []byte) uint32 {
 	h := fnv.New32a()
-	h.Write(line)
-	full := fmt.Sprintf("%08x", h.Sum32())
-	if prefixLen > len(full) {
-		prefixLen = len(full)
+	h.Write(b)
+	return h.Sum32()
+}
+
+// wordFor returns the vocabulary word that line maps to. Deterministic and
+// stateless: same input always yields the same word.
+func wordFor(line []byte) string {
+	return anchorVocab[fnv32(line)%uint32(len(anchorVocab))]
+}
+
+// wordAnchor returns the canonical anchor for a line at the given extension
+// length. extension is the number of hex chars in the disambiguating suffix; 0
+// means no suffix (just the bare word). The suffix is the first `extension`
+// hex chars of FNV-1a 32 over the line content.
+func wordAnchor(line []byte, extension int) string {
+	word := wordFor(line)
+	if extension <= 0 {
+		return word
 	}
-	return full[:prefixLen]
+	if extension > 8 {
+		extension = 8
+	}
+	return fmt.Sprintf("%s:%0*x", word, extension, fnv32(line))[:len(word)+1+extension]
 }
 
 // tagLines builds TaggedLine entries for the supplied windowed lines. Each
-// TaggedLine carries the 1-indexed line number from windowStart. The prefix
-// length adapts: start at 2, extend up to 8 if two distinct lines collide.
+// TaggedLine carries the 1-indexed line number from windowStart. The extension
+// length adapts: start at 0 (bare word), extend up to 8 hex chars if two
+// distinct lines in allLines would otherwise collide on the same anchor.
 func tagLines(allLines [][]byte, windowStart int, windowLines [][]byte) ([]*v1.TaggedLine, int) {
-	prefixLen := 2
-	for ; prefixLen <= 8; prefixLen++ {
-		if !hasPrefixCollision(allLines, prefixLen) {
+	extension := 0
+	for ; extension <= 8; extension++ {
+		if !hasAnchorCollision(allLines, extension) {
 			break
 		}
 	}
@@ -122,28 +138,115 @@ func tagLines(allLines [][]byte, windowStart int, windowLines [][]byte) ([]*v1.T
 	for i, line := range windowLines {
 		out[i] = &v1.TaggedLine{
 			Line:    int32(windowStart + i),
-			Hash:    hashLinePrefix(line, prefixLen),
+			Hash:    wordAnchor(line, extension),
 			Content: string(line),
 		}
 	}
-	return out, prefixLen
+	return out, extension
 }
 
-// hasPrefixCollision reports whether two distinct lines in the slice share the
-// same prefix hash at the given length.
-func hasPrefixCollision(lines [][]byte, prefixLen int) bool {
+// hasAnchorCollision reports whether two distinct lines in the slice share the
+// same anchor at the given extension length.
+func hasAnchorCollision(lines [][]byte, extension int) bool {
 	seen := make(map[string]int, len(lines))
 	for i, line := range lines {
-		h := hashLinePrefix(line, prefixLen)
-		if prev, ok := seen[h]; ok {
+		a := wordAnchor(line, extension)
+		if prev, ok := seen[a]; ok {
 			if string(lines[prev]) != string(line) {
 				return true
 			}
 			continue
 		}
-		seen[h] = i
+		seen[a] = i
 	}
 	return false
+}
+
+// splitAnchor returns the word part and hex suffix of anchor (the part after
+// `:`). suffix is "" if there is no suffix.
+func splitAnchor(anchor string) (word, suffix string) {
+	for i := 0; i < len(anchor); i++ {
+		if anchor[i] == ':' {
+			return anchor[:i], anchor[i+1:]
+		}
+	}
+	return anchor, ""
+}
+
+// anchorMatchesLine reports whether request would be a valid anchor for line.
+// The request matches when (a) its word matches the line's vocabulary word and
+// (b) any hex suffix in the request agrees with the leading hex of the line's
+// content hash. The runner's canonical anchor is the shortest such request for
+// the file; this function additionally accepts longer or shorter forms so
+// previously-returned anchors keep resolving even after collisions elsewhere
+// in the file change the canonical extension length.
+func anchorMatchesLine(request string, line []byte) bool {
+	reqWord, reqSuffix := splitAnchor(request)
+	if reqWord != wordFor(line) {
+		return false
+	}
+	if reqSuffix == "" {
+		return true
+	}
+	if len(reqSuffix) > 8 {
+		return false
+	}
+	full := fmt.Sprintf("%08x", fnv32(line))
+	return reqSuffix == full[:len(reqSuffix)]
+}
+
+// resolveAnchor finds the unique line in lines whose current anchor matches
+// request, optionally disambiguated by line. line is 1-indexed; pass 0 to mean
+// "no tiebreaker provided".
+//
+// Resolution rules:
+//   - Exactly one line matches → return that line index (1-indexed).
+//   - Multiple lines match → require line to be one of them; otherwise return
+//     ErrAnchorMismatch (ambiguous).
+//   - Zero lines match → return ErrAnchorMismatch.
+//   - Exactly one line matches but caller supplied a non-zero line that points
+//     elsewhere → return ErrAnchorMismatch (likely agent confusion).
+func resolveAnchor(lines [][]byte, request string, line int) (int, *AnchoredError) {
+	if request == "" {
+		return 0, &AnchoredError{Code: ErrInvalidOperation, Detail: "anchor must not be empty"}
+	}
+	var matches []int
+	for i, l := range lines {
+		if anchorMatchesLine(request, l) {
+			matches = append(matches, i+1)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return 0, &AnchoredError{
+			Code:   ErrAnchorMismatch,
+			Detail: fmt.Sprintf("anchor %q matches no line", request),
+		}
+	case 1:
+		if line > 0 && line != matches[0] {
+			return 0, &AnchoredError{
+				Code:   ErrAnchorMismatch,
+				Detail: fmt.Sprintf("anchor %q matches line %d but caller specified line %d", request, matches[0], line),
+			}
+		}
+		return matches[0], nil
+	default:
+		if line == 0 {
+			return 0, &AnchoredError{
+				Code:   ErrAnchorMismatch,
+				Detail: fmt.Sprintf("anchor %q matches %d lines; supply line to disambiguate", request, len(matches)),
+			}
+		}
+		for _, m := range matches {
+			if m == line {
+				return m, nil
+			}
+		}
+		return 0, &AnchoredError{
+			Code:   ErrAnchorMismatch,
+			Detail: fmt.Sprintf("anchor %q matches %d lines but none at line %d", request, len(matches), line),
+		}
+	}
 }
 
 // splitLines walks content and returns the lines (without their terminators),
@@ -273,44 +376,33 @@ func validateFileContent(content []byte) error {
 	return nil
 }
 
-// requestPrefixLen returns the longest hash length supplied in any operation.
-// Anchors are validated against current-file prefixes at this length.
-func requestPrefixLen(ops []*v1.EditOperation) int {
-	max := 0
-	for _, op := range ops {
-		for _, h := range []string{op.Hash, op.StartHash, op.EndHash} {
-			if len(h) > max {
-				max = len(h)
-			}
-		}
-	}
-	if max == 0 {
-		max = 2
-	}
-	return max
-}
-
 // editInterval describes the span a single op occupies in the original line
-// numbering. INSERT_AFTER occupies the seam between N and N+1; we model it as
-// a half-open zero-width interval [N+1, N+1) so adjacent inserts don't overlap.
+// numbering. INSERT_AFTER and INSERT_BEFORE occupy a seam between two existing
+// lines; both are modelled as zero-width intervals so adjacent inserts don't
+// overlap each other or surrounding edits.
 type editInterval struct {
 	start, end float64
 	opIndex    int
 }
 
-// buildIntervals returns sorted intervals per operation in the original line
-// numbering. An INSERT_AFTER op at line N becomes [N+0.5, N+0.5).
-func buildIntervals(ops []*v1.EditOperation) ([]editInterval, error) {
+// buildIntervals returns sorted intervals per operation in the *resolved* line
+// numbering (each op's anchor must already be resolved into resolvedLine for
+// that index). INSERT_AFTER N becomes [N+0.5, N+0.5); INSERT_BEFORE N becomes
+// [N-0.5, N-0.5).
+func buildIntervals(ops []*v1.EditOperation, resolvedStart, resolvedEnd []int) ([]editInterval, error) {
 	intervals := make([]editInterval, 0, len(ops))
 	for i, op := range ops {
 		switch op.Op {
 		case v1.EditOp_EDIT_OP_REPLACE, v1.EditOp_EDIT_OP_DELETE:
-			intervals = append(intervals, editInterval{start: float64(op.Line), end: float64(op.Line) + 0.001, opIndex: i})
+			intervals = append(intervals, editInterval{start: float64(resolvedStart[i]), end: float64(resolvedStart[i]) + 0.001, opIndex: i})
 		case v1.EditOp_EDIT_OP_REPLACE_RANGE, v1.EditOp_EDIT_OP_DELETE_RANGE:
-			intervals = append(intervals, editInterval{start: float64(op.StartLine), end: float64(op.EndLine) + 0.001, opIndex: i})
+			intervals = append(intervals, editInterval{start: float64(resolvedStart[i]), end: float64(resolvedEnd[i]) + 0.001, opIndex: i})
 		case v1.EditOp_EDIT_OP_INSERT_AFTER:
-			seam := float64(op.Line) + 0.5
-			intervals = append(intervals, editInterval{start: seam, end: seam, opIndex: i})
+			seam := float64(resolvedStart[i]) + 0.5
+			intervals = append(intervals, editInterval{start: seam, end: seam + 0.001, opIndex: i})
+		case v1.EditOp_EDIT_OP_INSERT_BEFORE:
+			seam := float64(resolvedStart[i]) - 0.5
+			intervals = append(intervals, editInterval{start: seam, end: seam + 0.001, opIndex: i})
 		default:
 			return nil, &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d has unspecified op code", i)}
 		}
@@ -332,24 +424,30 @@ func buildIntervals(ops []*v1.EditOperation) ([]editInterval, error) {
 }
 
 // validateOpBounds enforces that the line numbers referenced by op are within
-// [1, totalLines] and ranges are well-formed.
+// [1, totalLines] and ranges are well-formed. line/start_line/end_line are
+// optional tiebreakers; this validator only rejects values out of range, not
+// missing ones (resolveAnchor handles the missing-tiebreaker case).
 func validateOpBounds(op *v1.EditOperation, opIndex, totalLines int) error {
 	switch op.Op {
 	case v1.EditOp_EDIT_OP_REPLACE, v1.EditOp_EDIT_OP_DELETE:
-		if op.Line < 1 || int(op.Line) > totalLines {
-			return &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d line %d out of range [1, %d]", opIndex, op.Line, totalLines)}
+		if op.Line < 0 || int(op.Line) > totalLines {
+			return &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d line %d out of range [0, %d]", opIndex, op.Line, totalLines)}
 		}
 	case v1.EditOp_EDIT_OP_REPLACE_RANGE, v1.EditOp_EDIT_OP_DELETE_RANGE:
-		if op.StartLine < 1 || op.EndLine < 1 || int(op.StartLine) > totalLines || int(op.EndLine) > totalLines {
-			return &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d range [%d, %d] out of bounds [1, %d]", opIndex, op.StartLine, op.EndLine, totalLines)}
+		if op.StartLine < 0 || op.EndLine < 0 || int(op.StartLine) > totalLines || int(op.EndLine) > totalLines {
+			return &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d range [%d, %d] out of bounds [0, %d]", opIndex, op.StartLine, op.EndLine, totalLines)}
 		}
-		if op.StartLine > op.EndLine {
+		if op.StartLine > 0 && op.EndLine > 0 && op.StartLine > op.EndLine {
 			return &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d has start_line > end_line", opIndex)}
 		}
 	case v1.EditOp_EDIT_OP_INSERT_AFTER:
 		// 0 means insert at top of file; otherwise must be within bounds.
 		if op.Line < 0 || int(op.Line) > totalLines {
 			return &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d insert_after line %d out of range [0, %d]", opIndex, op.Line, totalLines)}
+		}
+	case v1.EditOp_EDIT_OP_INSERT_BEFORE:
+		if op.Line < 0 || int(op.Line) > totalLines {
+			return &AnchoredError{Code: ErrInvalidOperation, Detail: fmt.Sprintf("operation %d insert_before line %d out of range [0, %d]", opIndex, op.Line, totalLines)}
 		}
 	}
 	return nil
