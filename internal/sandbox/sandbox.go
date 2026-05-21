@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
@@ -160,7 +161,9 @@ type Session struct {
 	cachePaths    []string
 	onEvent       func(Event)
 
-	closers []func()
+	closers   []func()
+	closersMu sync.Mutex
+	closeOnce sync.Once
 }
 
 // BareProxy returns the underlying BridgeProxy that talks directly to the VM,
@@ -221,13 +224,21 @@ func (s *Session) SaveCache(ctx context.Context) error {
 
 // Close tears down all resources in reverse order. Idempotent.
 func (s *Session) Close() {
-	for i := len(s.closers) - 1; i >= 0; i-- {
-		s.closers[i]()
-	}
-	s.closers = nil
+	s.closeOnce.Do(func() {
+		s.closersMu.Lock()
+		closers := s.closers
+		s.closers = nil
+		s.closersMu.Unlock()
+
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
+	})
 }
 
 func (s *Session) addCloser(fn func()) {
+	s.closersMu.Lock()
+	defer s.closersMu.Unlock()
 	s.closers = append(s.closers, fn)
 }
 
