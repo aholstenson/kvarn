@@ -28,3 +28,7 @@ func (p *Provider) Destroy(_ context.Context, _ string) error {
 func (p *Provider) List(_ context.Context) ([]*vm.VM, error) {
 	return nil, errors.ErrUnsupported
 }
+
+// NewProvider creates a new Provider for unsupported platforms.
+// All operations return errors.ErrUnsupported.
+func NewProvider() *Provider { return &Provider{} }

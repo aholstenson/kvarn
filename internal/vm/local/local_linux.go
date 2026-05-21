@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aholstenson/kvarn/internal/egress/link"
@@ -49,6 +51,19 @@ type Provider struct {
 	vms      map[string]*vmInstance
 	nextCID  atomic.Uint32
 	nextPort atomic.Uint32
+}
+
+// NewProvider creates a Provider and seeds the vsock CID counter above any
+// CIDs already in use by running QEMU processes, preventing collisions when
+// the orchestrator restarts while VMs are still alive.
+func NewProvider() *Provider {
+	p := &Provider{}
+	if highest := scanHighestQEMUCID(); highest > 0 {
+		// allocateCID does nextCID.Add(1)+2, so storing (highest-2) makes the
+		// next call yield (highest+1), safely above all running guests.
+		p.nextCID.Store(highest - 2)
+	}
+	return p
 }
 
 type vmInstance struct {
@@ -389,13 +404,72 @@ func (p *Provider) List(_ context.Context) ([]*vm.VM, error) {
 }
 
 func (p *Provider) allocateCID() uint32 {
-	// CID 0-2 are reserved (hypervisor, local, host). Start at 3.
+	// CIDs 0-2 are reserved (hypervisor, local, host). nextCID starts at 0
+	// (yielding CID 3 on first call) or is pre-seeded by NewProvider() to
+	// avoid collisions with already-running VMs after an orchestrator restart.
 	return p.nextCID.Add(1) + 2
 }
 
 func (p *Provider) allocatePort() uint32 {
 	// Start vsock ports at 1024 to avoid privileged range.
 	return p.nextPort.Add(1) + 1023
+}
+
+// scanHighestQEMUCID returns the highest guest vsock CID held by any
+// currently running QEMU process, or 0 if none are found.
+func scanHighestQEMUCID() uint32 {
+	return scanHighestQEMUCIDFromProc("/proc")
+}
+
+// scanHighestQEMUCIDFromProc walks procRoot looking for numeric PID
+// directories and returns the highest vhost-vsock-pci guest-cid value seen.
+// It accepts the proc root as a parameter to make it testable without real
+// QEMU processes.
+func scanHighestQEMUCIDFromProc(procRoot string) uint32 {
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return 0
+	}
+	var highest uint32
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		// Only numeric entries are PID directories.
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		cid := readCIDFromCmdline(filepath.Join(procRoot, e.Name(), "cmdline"))
+		if cid > highest {
+			highest = cid
+		}
+	}
+	return highest
+}
+
+// readCIDFromCmdline reads a /proc/<pid>/cmdline file and returns the
+// vhost-vsock-pci guest-cid value if present, or 0 otherwise.
+func readCIDFromCmdline(cmdlinePath string) uint32 {
+	data, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		return 0
+	}
+	// /proc/<pid>/cmdline separates argv elements with NUL bytes.
+	args := strings.Split(string(data), "\x00")
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "vhost-vsock-pci,") {
+			continue
+		}
+		for _, part := range strings.Split(arg, ",") {
+			if strings.HasPrefix(part, "guest-cid=") {
+				val, err := strconv.ParseUint(strings.TrimPrefix(part, "guest-cid="), 10, 32)
+				if err == nil {
+					return uint32(val)
+				}
+			}
+		}
+	}
+	return 0
 }
 
 func findQEMU() (string, error) {

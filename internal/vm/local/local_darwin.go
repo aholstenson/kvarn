@@ -29,6 +29,9 @@ type Provider struct {
 	vms map[string]*vmInstance
 }
 
+// NewProvider creates a new Provider for macOS using Apple Virtualization Framework.
+func NewProvider() *Provider { return &Provider{} }
+
 type vmInstance struct {
 	machine     *vz.VirtualMachine
 	tmpDisk     string

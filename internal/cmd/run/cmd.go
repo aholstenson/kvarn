@@ -93,7 +93,7 @@ func (c *Cmd) Run() error {
 	}
 
 	return c.runWith(ctx, runDeps{
-		Provider: &local.Provider{},
+		Provider: local.NewProvider(),
 		Agent:    coding.NewCodingAgent(models, configs),
 		Mode:     mode,
 		Stdout:   os.Stdout,

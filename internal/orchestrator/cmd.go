@@ -44,7 +44,7 @@ func (c *Cmd) Run() error {
 		diskImagePath = resolved
 	}
 
-	p := &local.Provider{}
+	p := local.NewProvider()
 	base := vm.BaseImage{
 		DiskImagePath: diskImagePath,
 	}

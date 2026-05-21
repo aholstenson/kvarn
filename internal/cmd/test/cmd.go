@@ -97,7 +97,7 @@ func (c *Cmd) Run() error {
 	}
 
 	// Prepare VM image.
-	provider := &local.Provider{}
+	provider := local.NewProvider()
 	img, err := provider.PrepareImage(ctx, vm.BaseImage{DiskImagePath: diskImagePath})
 	if err != nil {
 		renderer.Stop()
