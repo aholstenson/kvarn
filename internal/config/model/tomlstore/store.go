@@ -19,14 +19,37 @@ type entryData struct {
 	MaxOutputTokens *int   `toml:"max_output_tokens"`
 }
 
+// jobDefaults mirrors a single [defaults.jobs.<mode>] block.
+type jobDefaults struct {
+	MaxCostUSD *float64 `toml:"max_cost_usd,omitempty"`
+}
+
+// defaultsData mirrors the [defaults] block. The Jobs map carries per-mode
+// overrides keyed by mode name (auto, implement, fix, review, research).
+type defaultsData struct {
+	MaxCostUSD     *float64               `toml:"max_cost_usd,omitempty"`
+	WarnThreshold  *float64               `toml:"warn_threshold,omitempty"`
+	ReportCostOnPR *bool                  `toml:"report_cost_on_pr,omitempty"`
+	Jobs           map[string]jobDefaults `toml:"jobs,omitempty"`
+}
+
 // fileData mirrors the on-disk layout:
+//
+//	[defaults]
+//	max_cost_usd      = 5.00
+//	warn_threshold    = 0.80
+//	report_cost_on_pr = true
+//
+//	[defaults.jobs.implement]
+//	max_cost_usd = 25.00
 //
 //	[models.coding-agent]
 //	model            = "anthropic/claude-sonnet-4-6"
 //	thinking_tokens  = 8000
 //	max_output_tokens = 16384
 type fileData struct {
-	Models map[string]entryData `toml:"models"`
+	Defaults defaultsData         `toml:"defaults"`
+	Models   map[string]entryData `toml:"models"`
 }
 
 // Store is a TOML file-backed model-alias override store.
@@ -55,21 +78,28 @@ func OpenDefault(path string) *Store {
 	return New(path)
 }
 
+func (s *Store) load() (fileData, error) {
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fileData{}, nil
+		}
+		return fileData{}, err
+	}
+	var fd fileData
+	if err := toml.Unmarshal(data, &fd); err != nil {
+		return fileData{}, errors.Wrapf(err, "parse %s", s.path)
+	}
+	return fd, nil
+}
+
 func (s *Store) All(_ context.Context) (map[string]modelcfg.RawEntry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	data, err := os.ReadFile(s.path)
+	fd, err := s.load()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]modelcfg.RawEntry{}, nil
-		}
 		return nil, err
-	}
-
-	var fd fileData
-	if err := toml.Unmarshal(data, &fd); err != nil {
-		return nil, errors.Wrapf(err, "parse %s", s.path)
 	}
 	if fd.Models == nil {
 		return map[string]modelcfg.RawEntry{}, nil
@@ -81,6 +111,32 @@ func (s *Store) All(_ context.Context) (map[string]modelcfg.RawEntry, error) {
 			ModelID:         e.Model,
 			ThinkingTokens:  e.ThinkingTokens,
 			MaxOutputTokens: e.MaxOutputTokens,
+		}
+	}
+	return out, nil
+}
+
+// Defaults returns the parsed [defaults] block from agents.toml. A missing
+// file yields a zero-value Defaults with no error so callers can layer
+// built-in fallbacks on top.
+func (s *Store) Defaults(_ context.Context) (modelcfg.Defaults, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	fd, err := s.load()
+	if err != nil {
+		return modelcfg.Defaults{}, err
+	}
+
+	out := modelcfg.Defaults{
+		MaxCostUSD:     fd.Defaults.MaxCostUSD,
+		WarnThreshold:  fd.Defaults.WarnThreshold,
+		ReportCostOnPR: fd.Defaults.ReportCostOnPR,
+	}
+	if len(fd.Defaults.Jobs) > 0 {
+		out.Jobs = make(map[string]modelcfg.JobDefaults, len(fd.Defaults.Jobs))
+		for mode, j := range fd.Defaults.Jobs {
+			out.Jobs[mode] = modelcfg.JobDefaults{MaxCostUSD: j.MaxCostUSD}
 		}
 	}
 	return out, nil

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+
+	"github.com/aholstenson/kvarn/internal/agent/cost"
 )
 
 type watcher struct {
@@ -116,6 +118,20 @@ func (m *MemoryManager) Fail(_ context.Context, id string, err error) error {
 	s.UpdatedAt = time.Now()
 
 	m.notifyStateChange(id, s)
+	return nil
+}
+
+func (m *MemoryManager) UpdateCost(_ context.Context, id string, report cost.Report) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s, ok := m.sessions[id]
+	if !ok {
+		return errors.Newf("session %q not found", id)
+	}
+
+	s.Cost = report
+	s.UpdatedAt = time.Now()
 	return nil
 }
 

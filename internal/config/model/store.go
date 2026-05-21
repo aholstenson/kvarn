@@ -32,6 +32,29 @@ type Store interface {
 	All(ctx context.Context) (map[string]RawEntry, error)
 }
 
+// JobDefaults is the per-job-mode default block (forward-compatible: today
+// only cost cap, later per-mode model selection).
+type JobDefaults struct {
+	MaxCostUSD *float64
+}
+
+// Defaults holds the top-level user defaults that apply to all jobs unless a
+// project or per-mode override is set. All fields are optional; nil means
+// "use the built-in fallback".
+type Defaults struct {
+	MaxCostUSD     *float64
+	WarnThreshold  *float64
+	ReportCostOnPR *bool
+	Jobs           map[string]JobDefaults
+}
+
+// DefaultsStore reads user-level defaults (the [defaults] block in
+// agents.toml). An empty/missing config is not an error: callers receive a
+// zero-value Defaults struct and apply built-in fallbacks themselves.
+type DefaultsStore interface {
+	Defaults(ctx context.Context) (Defaults, error)
+}
+
 // Resolve registers each alias in defaults on mgr (overrides layered on top),
 // then resolves every alias to a concrete llms.Model. It returns both the
 // model map and the merged configuration keyed by alias.

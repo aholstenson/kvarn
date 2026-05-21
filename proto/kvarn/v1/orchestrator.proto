@@ -42,6 +42,42 @@ message GetSessionResponse {
   string prompt = 6;
   string pull_request_url = 7;
   string mode = 8;
+  CostReport cost = 9;
+}
+
+// CostReport carries accumulated LLM spend for a job: totals across all
+// models plus a per-model breakdown keyed by service name.
+message CostReport {
+  int64 input_tokens = 1;
+  int64 output_tokens = 2;
+  int64 cached_tokens = 3;
+  double total_usd = 4;
+  repeated ModelCost per_model = 5;
+}
+
+message ModelCost {
+  string model_id = 1;
+  int64 input_tokens = 2;
+  int64 output_tokens = 3;
+  int64 cached_tokens = 4;
+  double total_usd = 5;
+}
+
+// CostUpdate is broadcast on the session event stream when the budget warn
+// threshold is crossed, when the hard cap is reached, and once at the end of
+// each run as a final summary.
+message CostUpdate {
+  CostUpdateKind kind = 1;
+  CostReport report = 2;
+  double limit_usd = 3;
+  double warn_fraction = 4;
+}
+
+enum CostUpdateKind {
+  COST_UPDATE_KIND_UNSPECIFIED = 0;
+  COST_UPDATE_KIND_WARNING = 1;
+  COST_UPDATE_KIND_OVER_BUDGET = 2;
+  COST_UPDATE_KIND_FINAL = 3;
 }
 
 message ListSessionsRequest {}
@@ -70,6 +106,7 @@ message SessionUpdate {
     DependencyOutput dependency_output = 18;
     CacheProgress cache_progress = 19;
     PullRequestCreated pull_request_created = 20;
+    CostUpdate cost_update = 21;
   }
 }
 

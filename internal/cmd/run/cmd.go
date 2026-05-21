@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	llms "github.com/aholstenson/llms-go"
@@ -17,6 +18,7 @@ import (
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/agent"
 	"github.com/aholstenson/kvarn/internal/agent/coding"
+	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 	modeltoml "github.com/aholstenson/kvarn/internal/config/model/tomlstore"
@@ -433,6 +435,9 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 
 	branch := currentBranch(c.Dir)
 	var toolCount int
+	tracker := cost.NewTracker(cost.TrackerOpts{
+		Pricing: llms.NewPricingManager(slog.Default()),
+	})
 	agentCtx := &agent.Context{
 		ProjectName: filepath.Base(absDir),
 		Branch:      branch,
@@ -443,6 +448,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		Runner:      sess.GetRunner(),
 		RepoContext: rc,
 		OnProgress:  makeProgressCallback(renderer, agentItem, &toolCount),
+		Cost:        tracker,
 	}
 
 	agentResult, agentErr := deps.Agent.Run(ctx, agentCtx)
@@ -538,6 +544,8 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 			fmt.Fprintln(deps.Stdout, agentResult.Description)
 		}
 	}
+
+	printCostReport(deps.Stdout, tracker.Snapshot())
 
 	outputMode := ""
 	if mode.WritesChanges() {
@@ -799,6 +807,29 @@ func openSecretStore(path string) (secret.Store, error) {
 		return nil, errors.Wrapf(err, "stat %s", resolved)
 	}
 	return store, nil
+}
+
+// printCostReport prints a compact end-of-run cost summary. Silent when no
+// spend was recorded (e.g. mock agent in tests, dry runs).
+func printCostReport(out io.Writer, report cost.Report) {
+	if report.InputTokens == 0 && report.OutputTokens == 0 && report.TotalUSD == 0 {
+		return
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Cost: $%.4f — %d input / %d output / %d cached tokens\n",
+		report.TotalUSD, report.InputTokens, report.OutputTokens, report.CachedTokens)
+	if len(report.PerModel) > 1 {
+		ids := make([]string, 0, len(report.PerModel))
+		for id := range report.PerModel {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			m := report.PerModel[id]
+			fmt.Fprintf(out, "  %s: $%.4f (%d in / %d out)\n",
+				m.ModelID, m.TotalUSD, m.InputTokens, m.OutputTokens)
+		}
+	}
 }
 
 type summaryState struct {

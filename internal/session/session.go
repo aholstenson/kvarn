@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"time"
+
+	"github.com/aholstenson/kvarn/internal/agent/cost"
 )
 
 // State represents the current phase of a session.
@@ -40,6 +42,9 @@ type Session struct {
 	UpdatedAt      time.Time
 	Error          string
 	PullRequestURL string
+	// Cost is the LLM spend snapshot for the run. Updated on warning, on
+	// over-budget cancellation, and once at the end of the run.
+	Cost cost.Report
 }
 
 // Event represents something that happened to a session.
@@ -180,12 +185,36 @@ type PullRequestEvent struct {
 
 func (PullRequestEvent) isSessionEvent() {}
 
+// CostUpdateKind identifies what kind of cost transition a CostEvent reports.
+type CostUpdateKind int
+
+const (
+	CostUpdateWarning    CostUpdateKind = 1
+	CostUpdateOverBudget CostUpdateKind = 2
+	CostUpdateFinal      CostUpdateKind = 3
+)
+
+// CostEvent carries an LLM spend snapshot, either when a budget transition
+// fires mid-run (warning, over-budget) or as a final summary at run end.
+type CostEvent struct {
+	SessionID string
+	Kind      CostUpdateKind
+	Report    cost.Report
+	Limit     cost.Limit
+}
+
+func (CostEvent) isSessionEvent() {}
+
 // Manager provides operations for managing sessions.
 type Manager interface {
 	Create(ctx context.Context, projectName string, prompt string, mode string) (*Session, error)
 	Get(ctx context.Context, id string) (*Session, error)
 	List(ctx context.Context) ([]*Session, error)
 	UpdateState(ctx context.Context, id string, state State, message string) error
+	// UpdateCost persists the latest cost snapshot on the session. Watchers
+	// see it on the next state change; mid-run snapshots are also broadcast
+	// via CostEvent.
+	UpdateCost(ctx context.Context, id string, report cost.Report) error
 	Fail(ctx context.Context, id string, err error) error
 	// EmitEvent broadcasts an ephemeral event to watchers without mutating session state.
 	EmitEvent(ctx context.Context, id string, event Event) error

@@ -14,6 +14,7 @@ import (
 	llms "github.com/aholstenson/llms-go"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 	"github.com/aholstenson/kvarn/internal/sandbox"
@@ -29,6 +30,7 @@ type CodingToolkit struct {
 	configs    map[string]modelcfg.Entry
 	subAgents  SubAgents
 	repoCtx    *repocontext.RepoContext
+	tracker    *cost.Tracker
 }
 
 // CodingToolkitOpts configures a CodingToolkit. Models, SubAgents, and RepoCtx
@@ -47,6 +49,10 @@ type CodingToolkitOpts struct {
 	Configs   map[string]modelcfg.Entry
 	SubAgents SubAgents
 	RepoCtx   *repocontext.RepoContext
+	// Tracker, when set, gates tool results so the agent receives a one-shot
+	// budget warning note in the next tool result it sees after the warn
+	// threshold is crossed.
+	Tracker *cost.Tracker
 }
 
 func NewCodingToolkit(runner sandbox.RunnerProxy, workingDir string, sessionID string, skills []repocontext.Skill) *CodingToolkit {
@@ -72,7 +78,47 @@ func NewCodingToolkitWithOpts(opts CodingToolkitOpts) *CodingToolkit {
 		configs:    opts.Configs,
 		subAgents:  opts.SubAgents,
 		repoCtx:    opts.RepoCtx,
+		tracker:    opts.Tracker,
 	}
+}
+
+// withBudgetWarning wraps each ToolDef so that, after the warn threshold is
+// crossed, the next tool result the model sees gains a wrap-up note from the
+// tracker. When no tracker is set, the input slice is returned unchanged.
+func (t *CodingToolkit) withBudgetWarning(tools []llms.ToolDef) []llms.ToolDef {
+	if t.tracker == nil {
+		return tools
+	}
+	wrapped := make([]llms.ToolDef, len(tools))
+	for i, td := range tools {
+		wrapped[i] = &budgetWrappedTool{inner: td, tracker: t.tracker}
+	}
+	return wrapped
+}
+
+// budgetWrappedTool decorates a ToolDef so that ToString optionally appends a
+// one-shot budget warning. All other behavior is forwarded verbatim.
+type budgetWrappedTool struct {
+	inner   llms.ToolDef
+	tracker *cost.Tracker
+}
+
+func (w *budgetWrappedTool) Name() string                                  { return w.inner.Name() }
+func (w *budgetWrappedTool) Description() string                           { return w.inner.Description() }
+func (w *budgetWrappedTool) Schema() any                                   { return w.inner.Schema() }
+func (w *budgetWrappedTool) Execute(ctx context.Context, in any) (any, error) {
+	return w.inner.Execute(ctx, in)
+}
+
+func (w *budgetWrappedTool) ToString(out any) string {
+	s := w.inner.ToString(out)
+	if note, ok := w.tracker.ConsumeWarning(); ok {
+		if s != "" {
+			s += "\n\n"
+		}
+		s += note
+	}
+	return s
 }
 
 func (t *CodingToolkit) Tools() []llms.ToolDef {
@@ -90,7 +136,7 @@ func (t *CodingToolkit) Tools() []llms.ToolDef {
 	if len(t.models) > 0 && len(t.subAgents) > 0 {
 		tools = append(tools, llms.NewToolDef(&spawnAgentTool{toolkit: t}))
 	}
-	return tools
+	return t.withBudgetWarning(tools)
 }
 
 // ReadOnlyTools returns the same toolkit minus edit_file and write_file. Used
@@ -109,7 +155,7 @@ func (t *CodingToolkit) ReadOnlyTools() []llms.ToolDef {
 	if len(t.models) > 0 && len(t.subAgents) > 0 {
 		tools = append(tools, llms.NewToolDef(&spawnAgentTool{toolkit: t}))
 	}
-	return tools
+	return t.withBudgetWarning(tools)
 }
 
 // exec_command

@@ -77,9 +77,10 @@ func (c *Cmd) Run() error {
 		return errors.Wrap(err, "create llms manager")
 	}
 
+	agentsStore := modeltoml.OpenDefault(c.AgentsFile)
 	models, configs, err := modelcfg.Resolve(
 		context.Background(), mgr,
-		modeltoml.OpenDefault(c.AgentsFile),
+		agentsStore,
 		coding.DefaultModels(),
 		coding.ModelMain, c.Model,
 	)
@@ -98,8 +99,10 @@ func (c *Cmd) Run() error {
 			"github": forgegithub.New(),
 			"git":    forgegit.New(),
 		},
-		SessionMgr: session.NewMemoryManager(),
-		Agent:      coding.NewCodingAgent(models, configs),
-		Transferer: &transfer.StreamingTransferer{},
+		SessionMgr:     session.NewMemoryManager(),
+		Agent:          coding.NewCodingAgent(models, configs),
+		Transferer:     &transfer.StreamingTransferer{},
+		DefaultsStore:  agentsStore,
+		PricingManager: llms.NewPricingManager(logger),
 	})
 }

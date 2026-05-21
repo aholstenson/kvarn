@@ -15,10 +15,17 @@ type fileData struct {
 	Projects map[string]*projectEntry `toml:"projects"`
 }
 
+type jobEntry struct {
+	MaxCostUSD *float64 `toml:"max_cost_usd,omitempty"`
+}
+
 type projectEntry struct {
-	Repo          string `toml:"repo"`
-	DefaultBranch string `toml:"default_branch,omitempty"`
-	Forge         string `toml:"forge,omitempty"`
+	Repo            string              `toml:"repo"`
+	DefaultBranch   string              `toml:"default_branch,omitempty"`
+	Forge           string              `toml:"forge,omitempty"`
+	MaxCostUSD      *float64            `toml:"max_cost_usd,omitempty"`
+	ReportCostOnPR  *bool               `toml:"report_cost_on_pr,omitempty"`
+	Jobs            map[string]jobEntry `toml:"jobs,omitempty"`
 }
 
 // Store is a TOML file-backed project store.
@@ -70,6 +77,43 @@ func (s *Store) save(fd *fileData) error {
 	return os.WriteFile(s.path, data, 0644)
 }
 
+func entryToProject(name string, entry *projectEntry) *project.Project {
+	var jobs map[string]project.JobLimits
+	if len(entry.Jobs) > 0 {
+		jobs = make(map[string]project.JobLimits, len(entry.Jobs))
+		for mode, j := range entry.Jobs {
+			jobs[mode] = project.JobLimits{MaxCostUSD: j.MaxCostUSD}
+		}
+	}
+	return &project.Project{
+		Name:           name,
+		RepoURL:        entry.Repo,
+		DefaultBranch:  entry.DefaultBranch,
+		Forge:          entry.Forge,
+		MaxCostUSD:     entry.MaxCostUSD,
+		ReportCostOnPR: entry.ReportCostOnPR,
+		Jobs:           jobs,
+	}
+}
+
+func projectToEntry(p *project.Project) *projectEntry {
+	var jobs map[string]jobEntry
+	if len(p.Jobs) > 0 {
+		jobs = make(map[string]jobEntry, len(p.Jobs))
+		for mode, j := range p.Jobs {
+			jobs[mode] = jobEntry{MaxCostUSD: j.MaxCostUSD}
+		}
+	}
+	return &projectEntry{
+		Repo:           p.RepoURL,
+		DefaultBranch:  p.DefaultBranch,
+		Forge:          p.Forge,
+		MaxCostUSD:     p.MaxCostUSD,
+		ReportCostOnPR: p.ReportCostOnPR,
+		Jobs:           jobs,
+	}
+}
+
 func (s *Store) Get(_ context.Context, name string) (*project.Project, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -84,12 +128,7 @@ func (s *Store) Get(_ context.Context, name string) (*project.Project, error) {
 		return nil, errors.Newf("project %q not found", name)
 	}
 
-	return &project.Project{
-		Name:          name,
-		RepoURL:       entry.Repo,
-		DefaultBranch: entry.DefaultBranch,
-		Forge:         entry.Forge,
-	}, nil
+	return entryToProject(name, entry), nil
 }
 
 func (s *Store) List(_ context.Context) ([]*project.Project, error) {
@@ -103,12 +142,7 @@ func (s *Store) List(_ context.Context) ([]*project.Project, error) {
 
 	var result []*project.Project
 	for name, entry := range fd.Projects {
-		result = append(result, &project.Project{
-			Name:          name,
-			RepoURL:       entry.Repo,
-			DefaultBranch: entry.DefaultBranch,
-			Forge:         entry.Forge,
-		})
+		result = append(result, entryToProject(name, entry))
 	}
 	return result, nil
 }
@@ -122,11 +156,7 @@ func (s *Store) Put(_ context.Context, p *project.Project) error {
 		return err
 	}
 
-	fd.Projects[p.Name] = &projectEntry{
-		Repo:          p.RepoURL,
-		DefaultBranch: p.DefaultBranch,
-		Forge:         p.Forge,
-	}
+	fd.Projects[p.Name] = projectToEntry(p)
 
 	return s.save(fd)
 }

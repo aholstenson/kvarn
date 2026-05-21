@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 
+	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 )
@@ -40,6 +41,27 @@ type ProgressToolResult struct {
 
 func (ProgressToolResult) isProgressEvent() {}
 
+// ProgressCostUpdate carries a cost update for the running job. Kind reports
+// what the update represents: a soft warning (the WarnFraction was just
+// crossed), an over-budget signal (the hard limit was hit), or a final
+// snapshot at end of run.
+type ProgressCostUpdate struct {
+	Kind   CostUpdateKind
+	Report cost.Report
+	Limit  cost.Limit
+}
+
+func (ProgressCostUpdate) isProgressEvent() {}
+
+// CostUpdateKind tags the meaning of a ProgressCostUpdate.
+type CostUpdateKind int
+
+const (
+	CostUpdateWarning CostUpdateKind = iota + 1
+	CostUpdateOverBudget
+	CostUpdateFinal
+)
+
 // Mode identifies the high-level steering mode of an agent run (e.g. implement,
 // review). Concrete Mode values are owned by individual agent implementations;
 // this package only carries them on Context so callers can select one.
@@ -63,6 +85,9 @@ type Context struct {
 	Runner      sandbox.RunnerProxy
 	RepoContext *repocontext.RepoContext
 	OnProgress  func(event ProgressEvent)
+	// Cost is the per-job spend tracker. When non-nil the agent should record
+	// LLM token usage through it and consult it for budget enforcement.
+	Cost *cost.Tracker
 }
 
 // Result holds the outcome of an agent run, including a summary suitable for
@@ -70,6 +95,9 @@ type Context struct {
 type Result struct {
 	Title       string // short summary for commit message / PR title
 	Description string // detailed description for PR body
+	// Cost is the final spend snapshot for the run. Populated on both success
+	// and failure paths so partial spend can still be reported.
+	Cost cost.Report
 }
 
 // Agent defines the interface for agentic execution inside a VM.

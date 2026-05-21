@@ -10,6 +10,7 @@ import (
 	llms "github.com/aholstenson/llms-go"
 
 	"github.com/aholstenson/kvarn/internal/agent"
+	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 )
@@ -61,6 +62,7 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 		Configs:    a.configs,
 		SubAgents:  subAgents,
 		RepoCtx:    agentCtx.RepoContext,
+		Tracker:    agentCtx.Cost,
 	})
 	systemPrompt := mode.SystemPrompt(agentCtx.ProjectName, agentCtx.RepoURL, agentCtx.Branch, agentCtx.RepoContext, subAgents)
 
@@ -123,6 +125,9 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 					})
 					buf.Reset()
 				}
+				if agentCtx.Cost != nil {
+					agentCtx.Cost.CheckBudget()
+				}
 
 			case llms.StreamingEventToolUse:
 				argsJSON, _ := json.Marshal(e.Arguments)
@@ -157,10 +162,24 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 		}))
 	}
 
+	if agentCtx.Cost != nil {
+		ctx = llms.WithMetrics(ctx, agentCtx.Cost.Recorder())
+	}
+
+	finalCost := func() cost.Report {
+		if agentCtx.Cost == nil {
+			return cost.Report{}
+		}
+		return agentCtx.Cost.Snapshot()
+	}
+
 	mainModel := a.models[ModelMain]
 	agenticResult, err := mainModel.GenerateContent(ctx, opts...)
+	if agentCtx.Cost != nil {
+		agentCtx.Cost.CheckBudget()
+	}
 	if err != nil {
-		return nil, err
+		return &agent.Result{Cost: finalCost()}, err
 	}
 
 	var finalText string
@@ -175,6 +194,7 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 	if !mode.Writes {
 		return &agent.Result{
 			Description: finalText,
+			Cost:        finalCost(),
 		}, nil
 	}
 
@@ -215,11 +235,15 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 		llms.WithResponseSchema[AgentSummary](),
 		llms.WithMaxOutputTokens(1024),
 	)
+	if agentCtx.Cost != nil {
+		agentCtx.Cost.CheckBudget()
+	}
 	if err != nil {
 		slog.Warn("failed to generate summary, using default", "error", err)
 		return &agent.Result{
 			Title:       "Apply agent changes",
 			Description: "Automated changes by kvarn agent.",
+			Cost:        finalCost(),
 		}, nil
 	}
 
@@ -227,11 +251,13 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 		return &agent.Result{
 			Title:       structured.Data.Title,
 			Description: structured.Data.Description,
+			Cost:        finalCost(),
 		}, nil
 	}
 
 	return &agent.Result{
 		Title:       "Apply agent changes",
 		Description: "Automated changes by kvarn agent.",
+		Cost:        finalCost(),
 	}, nil
 }

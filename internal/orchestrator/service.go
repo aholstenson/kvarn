@@ -7,17 +7,22 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"connectrpc.com/connect"
+	llms "github.com/aholstenson/llms-go"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/agent"
 	"github.com/aholstenson/kvarn/internal/agent/coding"
+	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 	"github.com/aholstenson/kvarn/internal/config/credential"
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
+	"github.com/aholstenson/kvarn/internal/config/limits"
+	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 	"github.com/aholstenson/kvarn/internal/config/project"
 	"github.com/aholstenson/kvarn/internal/config/secret"
 	"github.com/aholstenson/kvarn/internal/dispatch"
@@ -109,8 +114,9 @@ func firstLine(s string) string {
 }
 
 // formatWorklogComment renders the original prompt and a collapsible work log
-// for posting as a PR comment.
-func formatWorklogComment(prompt string, entries []worklogEntry) string {
+// for posting as a PR comment. When includeCost is true and report has any
+// recorded spend, a "## Cost" section is appended after the work log.
+func formatWorklogComment(prompt string, entries []worklogEntry, includeCost bool, report cost.Report) string {
 	var sb strings.Builder
 	sb.WriteString("## Task\n\n")
 	sb.WriteString(strings.TrimSpace(prompt))
@@ -141,6 +147,34 @@ func formatWorklogComment(prompt string, entries []worklogEntry) string {
 			}
 		}
 		sb.WriteString("\n</details>")
+	}
+	if includeCost && (report.InputTokens > 0 || report.OutputTokens > 0 || report.TotalUSD > 0) {
+		sb.WriteString("\n\n")
+		sb.WriteString(formatCostSection(report))
+	}
+	return sb.String()
+}
+
+// formatCostSection renders the per-job LLM spend as a "## Cost" markdown
+// block: a totals line plus a per-model table.
+func formatCostSection(report cost.Report) string {
+	var sb strings.Builder
+	sb.WriteString("## Cost\n\n")
+	fmt.Fprintf(&sb, "Total: $%.4f — %d input / %d output / %d cached tokens\n",
+		report.TotalUSD, report.InputTokens, report.OutputTokens, report.CachedTokens)
+	if len(report.PerModel) > 0 {
+		ids := make([]string, 0, len(report.PerModel))
+		for id := range report.PerModel {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		sb.WriteString("\n| Model | Input | Output | Cached | USD |\n")
+		sb.WriteString("|-------|------:|-------:|-------:|----:|\n")
+		for _, id := range ids {
+			m := report.PerModel[id]
+			fmt.Fprintf(&sb, "| %s | %d | %d | %d | $%.4f |\n",
+				m.ModelID, m.InputTokens, m.OutputTokens, m.CachedTokens, m.TotalUSD)
+		}
 	}
 	return sb.String()
 }
@@ -180,10 +214,12 @@ type Service struct {
 	sessionMgr       session.Manager
 	agent            agent.Agent
 	transferer       transfer.Transferer
-	workspaceDir     string         // VM workspace path; defaults to "/home/kvarn/workspace"
-	registryMirrors  []string       // Docker registry mirrors
-	cacheProvider    cache.Provider // optional cache provider
-	sandboxFactory   SandboxFactory // optional; nil uses defaultSandboxFactory
+	workspaceDir     string                 // VM workspace path; defaults to "/home/kvarn/workspace"
+	registryMirrors  []string               // Docker registry mirrors
+	cacheProvider    cache.Provider         // optional cache provider
+	sandboxFactory   SandboxFactory         // optional; nil uses defaultSandboxFactory
+	defaultsStore    modelcfg.DefaultsStore // optional; nil means built-in fallbacks only
+	pricingManager   *llms.PricingManager   // optional; nil disables USD computation
 }
 
 type ServiceOpts struct {
@@ -197,10 +233,12 @@ type ServiceOpts struct {
 	SessionMgr       session.Manager
 	Agent            agent.Agent
 	Transferer       transfer.Transferer
-	WorkspaceDir     string         // VM workspace path; defaults to "/home/kvarn/workspace"
-	RegistryMirrors  []string       // Docker registry mirrors (infrastructure config)
-	CacheProvider    cache.Provider // optional cache provider
-	SandboxFactory   SandboxFactory // optional; nil uses defaultSandboxFactory
+	WorkspaceDir     string                 // VM workspace path; defaults to "/home/kvarn/workspace"
+	RegistryMirrors  []string               // Docker registry mirrors (infrastructure config)
+	CacheProvider    cache.Provider         // optional cache provider
+	SandboxFactory   SandboxFactory         // optional; nil uses defaultSandboxFactory
+	DefaultsStore    modelcfg.DefaultsStore // optional; nil means no user defaults (built-ins only)
+	PricingManager   *llms.PricingManager   // optional; nil disables USD computation
 }
 
 func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
@@ -236,6 +274,8 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		registryMirrors:  opts.RegistryMirrors,
 		cacheProvider:    opts.CacheProvider,
 		sandboxFactory:   opts.SandboxFactory,
+		defaultsStore:    opts.DefaultsStore,
+		pricingManager:   opts.PricingManager,
 	}
 }
 
@@ -374,10 +414,51 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 }
 
 func (s *Service) runJob(sessionID string, proj *project.Project, branch string, prompt string, mode *coding.Mode) {
-	ctx := context.Background()
+	rootCtx, cancelJob := context.WithCancelCause(context.Background())
+	defer cancelJob(nil)
+	ctx := rootCtx
 	log := slog.With("session_id", sessionID, "project", proj.Name, "mode", mode.ModeName())
 
 	log.Info("job started", "repo", proj.RepoURL, "branch", branch)
+
+	// Resolve cost limits for this (project, mode) pair. Built-in fallbacks
+	// kick in when no user defaults or project overrides are configured, so
+	// the tracker is always created with a sane MaxCostUSD.
+	var userDefaults modelcfg.Defaults
+	if s.defaultsStore != nil {
+		d, err := s.defaultsStore.Defaults(ctx)
+		if err != nil {
+			log.Warn("failed to load user defaults; using built-in fallbacks", "error", err)
+		} else {
+			userDefaults = d
+		}
+	}
+	costLimits := limits.Resolve(proj, userDefaults, mode.ModeName())
+	tracker := cost.NewTracker(cost.TrackerOpts{
+		Pricing: s.pricingManager,
+		Limit:   cost.Limit{MaxUSD: costLimits.MaxCostUSD, WarnFraction: costLimits.WarnThreshold},
+		Cancel:  cancelJob,
+		OnWarning: func(report cost.Report) {
+			log.Info("cost warning threshold crossed", "usd", report.TotalUSD, "limit_usd", costLimits.MaxCostUSD)
+			s.sessionMgr.EmitEvent(ctx, sessionID, session.CostEvent{
+				SessionID: sessionID,
+				Kind:      session.CostUpdateWarning,
+				Report:    report,
+				Limit:     cost.Limit{MaxUSD: costLimits.MaxCostUSD, WarnFraction: costLimits.WarnThreshold},
+			})
+			s.sessionMgr.UpdateCost(ctx, sessionID, report)
+		},
+		OnOverBudget: func(report cost.Report) {
+			log.Warn("cost limit exceeded; cancelling job", "usd", report.TotalUSD, "limit_usd", costLimits.MaxCostUSD)
+			s.sessionMgr.EmitEvent(ctx, sessionID, session.CostEvent{
+				SessionID: sessionID,
+				Kind:      session.CostUpdateOverBudget,
+				Report:    report,
+				Limit:     cost.Limit{MaxUSD: costLimits.MaxCostUSD, WarnFraction: costLimits.WarnThreshold},
+			})
+			s.sessionMgr.UpdateCost(ctx, sessionID, report)
+		},
+	})
 
 	// Resolve forge config, forge impl, and credentials.
 	var forgeCfg *forgeconfig.ForgeConfig
@@ -558,6 +639,7 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 		Mode:        mode,
 		Runner:      sess.GetRunner(),
 		RepoContext: rc,
+		Cost:        tracker,
 		OnProgress: func(event agent.ProgressEvent) {
 			switch e := event.(type) {
 			case agent.ProgressToolUse:
@@ -597,9 +679,19 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 	var agentResult *agent.Result
 	if s.agent != nil {
 		agentResult, err = s.agent.Run(ctx, agentCtx)
+		// Persist partial cost regardless of success: spend up to a failure
+		// is still interesting to users.
+		s.sessionMgr.UpdateCost(context.Background(), sessionID, tracker.Snapshot())
 		if err != nil {
 			log.Error("agent failed", "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, errors.Wrap(err, "agent"))
+			// Surface a clearer error message when the agent ctx was cancelled
+			// because the cost cap was hit.
+			cause := context.Cause(rootCtx)
+			if errors.Is(cause, cost.ErrBudgetExceeded) {
+				s.sessionMgr.Fail(context.Background(), sessionID, errors.Wrap(cause, "agent"))
+			} else {
+				s.sessionMgr.Fail(context.Background(), sessionID, errors.Wrap(err, "agent"))
+			}
 			return
 		}
 	}
@@ -652,8 +744,20 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 	} else if creds == nil || creds.APIToken() == "" {
 		log.Info("skipping PR submission: no token in credentials")
 	} else {
-		s.submitChanges(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg, branch, cloneURL, cloneDir, creds, prompt, worklog.snapshot(), log)
+		s.submitChanges(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg, branch, cloneURL, cloneDir, creds, prompt, worklog.snapshot(), tracker.Snapshot(), costLimits.ReportCostOnPR, log)
 	}
+
+	// Final cost snapshot. The agent has already populated the session with
+	// its partial snapshot above; this one captures any tail work, and the
+	// CostEvent gives watchers a clear end-of-run summary.
+	finalReport := tracker.Snapshot()
+	s.sessionMgr.UpdateCost(ctx, sessionID, finalReport)
+	s.sessionMgr.EmitEvent(ctx, sessionID, session.CostEvent{
+		SessionID: sessionID,
+		Kind:      session.CostUpdateFinal,
+		Report:    finalReport,
+		Limit:     cost.Limit{MaxUSD: costLimits.MaxCostUSD, WarnFraction: costLimits.WarnThreshold},
+	})
 
 	log.Info("job completed successfully")
 	s.sessionMgr.UpdateState(ctx, sessionID, session.StateCompleted, "Completed")
@@ -674,6 +778,8 @@ func (s *Service) submitChanges(
 	creds *scm.Credentials,
 	prompt string,
 	worklog []worklogEntry,
+	costReport cost.Report,
+	reportCostOnPR bool,
 	log *slog.Logger,
 ) {
 	// Check if there are any changes.
@@ -770,7 +876,7 @@ func (s *Service) submitChanges(
 
 	// Post task + work log as a PR comment so it stays out of any
 	// squash-merge commit message.
-	commentBody := formatWorklogComment(prompt, worklog)
+	commentBody := formatWorklogComment(prompt, worklog, reportCostOnPR, costReport)
 	if err := forgeImpl.PostComment(ctx, forge.PostCommentOpts{
 		RepoURL:     cloneURL,
 		Number:      pr.Number,
@@ -893,6 +999,7 @@ func (s *Service) GetSession(ctx context.Context, req *connect.Request[v1.GetSes
 		Prompt:         sess.Prompt,
 		PullRequestUrl: sess.PullRequestURL,
 		Mode:           sess.Mode,
+		Cost:           costReportToProto(sess.Cost),
 	}), nil
 }
 
@@ -917,6 +1024,7 @@ func (s *Service) ListSessions(ctx context.Context, _ *connect.Request[v1.ListSe
 			Prompt:         sess.Prompt,
 			PullRequestUrl: sess.PullRequestURL,
 			Mode:           sess.Mode,
+			Cost:           costReportToProto(sess.Cost),
 		})
 	}
 
@@ -1068,6 +1176,18 @@ func (s *Service) WatchSession(ctx context.Context, req *connect.Request[v1.Watc
 					},
 				},
 			}
+		case session.CostEvent:
+			update = &v1.SessionUpdate{
+				SessionId: e.SessionID,
+				Event: &v1.SessionUpdate_CostUpdate{
+					CostUpdate: &v1.CostUpdate{
+						Kind:         costKindToProto(e.Kind),
+						Report:       costReportToProto(e.Report),
+						LimitUsd:     e.Limit.MaxUSD,
+						WarnFraction: e.Limit.WarnFraction,
+					},
+				},
+			}
 		}
 		if update != nil {
 			if err := stream.Send(update); err != nil {
@@ -1136,6 +1256,51 @@ func (s *Service) makeStepCallback(ctx context.Context, sessionID string) sandbo
 			Passed:    passed,
 			Skipped:   result.Skipped,
 		})
+	}
+}
+
+// costReportToProto converts an internal cost.Report into its proto shape.
+// Returns nil for the zero report so the wire format stays unset when no
+// spend was recorded.
+func costReportToProto(r cost.Report) *v1.CostReport {
+	if r.InputTokens == 0 && r.OutputTokens == 0 && r.CachedTokens == 0 && r.TotalUSD == 0 && len(r.PerModel) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(r.PerModel))
+	for id := range r.PerModel {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	perModel := make([]*v1.ModelCost, 0, len(ids))
+	for _, id := range ids {
+		m := r.PerModel[id]
+		perModel = append(perModel, &v1.ModelCost{
+			ModelId:      m.ModelID,
+			InputTokens:  m.InputTokens,
+			OutputTokens: m.OutputTokens,
+			CachedTokens: m.CachedTokens,
+			TotalUsd:     m.TotalUSD,
+		})
+	}
+	return &v1.CostReport{
+		InputTokens:  r.InputTokens,
+		OutputTokens: r.OutputTokens,
+		CachedTokens: r.CachedTokens,
+		TotalUsd:     r.TotalUSD,
+		PerModel:     perModel,
+	}
+}
+
+func costKindToProto(k session.CostUpdateKind) v1.CostUpdateKind {
+	switch k {
+	case session.CostUpdateWarning:
+		return v1.CostUpdateKind_COST_UPDATE_KIND_WARNING
+	case session.CostUpdateOverBudget:
+		return v1.CostUpdateKind_COST_UPDATE_KIND_OVER_BUDGET
+	case session.CostUpdateFinal:
+		return v1.CostUpdateKind_COST_UPDATE_KIND_FINAL
+	default:
+		return v1.CostUpdateKind_COST_UPDATE_KIND_UNSPECIFIED
 	}
 }
 
