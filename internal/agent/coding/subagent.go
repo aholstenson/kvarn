@@ -51,6 +51,7 @@ func readOnlyTools(deps SubAgentDeps) []llms.ToolDef {
 		workingDir: deps.WorkingDir,
 		sessionID:  deps.SessionID,
 		skills:     deps.Skills,
+		tasks:      NewTaskList(),
 	}
 	return []llms.ToolDef{
 		llms.NewToolDef(&readFileTool{toolkit: tk}),

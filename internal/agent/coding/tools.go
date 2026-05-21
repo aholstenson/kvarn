@@ -31,6 +31,7 @@ type CodingToolkit struct {
 	subAgents  SubAgents
 	repoCtx    *repocontext.RepoContext
 	tracker    *cost.Tracker
+	tasks      *TaskList
 }
 
 // CodingToolkitOpts configures a CodingToolkit. Models, SubAgents, and RepoCtx
@@ -79,6 +80,7 @@ func NewCodingToolkitWithOpts(opts CodingToolkitOpts) *CodingToolkit {
 		subAgents:  opts.SubAgents,
 		repoCtx:    opts.RepoCtx,
 		tracker:    opts.Tracker,
+		tasks:      NewTaskList(),
 	}
 }
 
@@ -129,6 +131,9 @@ func (t *CodingToolkit) Tools() []llms.ToolDef {
 		llms.NewToolDef(&writeFileTool{toolkit: t}),
 		llms.NewToolDef(&listFilesTool{toolkit: t}),
 		llms.NewToolDef(&searchFilesTool{toolkit: t}),
+		llms.NewToolDef(&addTaskTool{toolkit: t}),
+		llms.NewToolDef(&updateTaskTool{toolkit: t}),
+		llms.NewToolDef(&listTasksTool{toolkit: t}),
 	}
 	if len(t.skills) > 0 {
 		tools = append(tools, llms.NewToolDef(&activateSkillTool{skills: t.skills}))
@@ -148,6 +153,9 @@ func (t *CodingToolkit) ReadOnlyTools() []llms.ToolDef {
 		llms.NewToolDef(&readFileTool{toolkit: t}),
 		llms.NewToolDef(&listFilesTool{toolkit: t}),
 		llms.NewToolDef(&searchFilesTool{toolkit: t}),
+		llms.NewToolDef(&addTaskTool{toolkit: t}),
+		llms.NewToolDef(&updateTaskTool{toolkit: t}),
+		llms.NewToolDef(&listTasksTool{toolkit: t}),
 	}
 	if len(t.skills) > 0 {
 		tools = append(tools, llms.NewToolDef(&activateSkillTool{skills: t.skills}))

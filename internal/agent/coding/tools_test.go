@@ -99,6 +99,9 @@ var _ = Describe("CodingToolkit", func() {
 		Expect(tools).To(HaveKey("write_file"))
 		Expect(tools).To(HaveKey("list_files"))
 		Expect(tools).To(HaveKey("search_files"))
+		Expect(tools).To(HaveKey("add_task"))
+		Expect(tools).To(HaveKey("update_task"))
+		Expect(tools).To(HaveKey("list_tasks"))
 	})
 
 	Describe("exec_command", func() {
@@ -436,6 +439,81 @@ var _ = Describe("CodingToolkit", func() {
 			result := tools["write_file"].ToString(&coding.WriteFileOutput{Version: "vv", TotalLines: 3})
 			Expect(result).To(ContainSubstring("Wrote file"))
 			Expect(result).To(ContainSubstring("vv"))
+		})
+	})
+	Describe("task list management", func() {
+		It("starts with an empty list", func() {
+			result, err := tools["list_tasks"].Execute(ctx, &coding.ListTasksInput{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tools["list_tasks"].ToString(result)).To(ContainSubstring("Internal task list is empty."))
+		})
+
+		It("can add a task and list it", func() {
+			addResult, err := tools["add_task"].Execute(ctx, &coding.AddTaskInput{
+				Description: "Fix the build script",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			addStr := tools["add_task"].ToString(addResult)
+			Expect(addStr).To(ContainSubstring("Added task ID 1: \"Fix the build script\"."))
+			Expect(addStr).To(ContainSubstring("- [todo] ID 1: Fix the build script"))
+
+			// Now verify it shows up in list_tasks
+			listResult, err := tools["list_tasks"].Execute(ctx, &coding.ListTasksInput{})
+			Expect(err).NotTo(HaveOccurred())
+			listStr := tools["list_tasks"].ToString(listResult)
+			Expect(listStr).To(ContainSubstring("- [todo] ID 1: Fix the build script"))
+		})
+
+		It("can update a task's status and description", func() {
+			_, err := tools["add_task"].Execute(ctx, &coding.AddTaskInput{
+				Description: "Write tests",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			newDesc := "Write robust tests"
+			updateResult, err := tools["update_task"].Execute(ctx, &coding.UpdateTaskInput{
+				ID:          "1",
+				Status:      "in_progress",
+				Description: &newDesc,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			updateStr := tools["update_task"].ToString(updateResult)
+			Expect(updateStr).To(ContainSubstring("Updated task ID 1 to status \"in_progress\"."))
+			Expect(updateStr).To(ContainSubstring("- [in_progress] ID 1: Write robust tests"))
+
+			// Mark completed
+			updateResult, err = tools["update_task"].Execute(ctx, &coding.UpdateTaskInput{
+				ID:     "1",
+				Status: "completed",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			updateStr = tools["update_task"].ToString(updateResult)
+			Expect(updateStr).To(ContainSubstring("- [completed] ID 1: Write robust tests"))
+		})
+
+		It("returns an error when updating a non-existent task ID", func() {
+			newDesc := "Do something"
+			_, err := tools["update_task"].Execute(ctx, &coding.UpdateTaskInput{
+				ID:          "999",
+				Status:      "in_progress",
+				Description: &newDesc,
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("task with ID 999 not found"))
+		})
+
+		It("returns an error when status is invalid", func() {
+			_, err := tools["add_task"].Execute(ctx, &coding.AddTaskInput{
+				Description: "Test invalid status",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = tools["update_task"].Execute(ctx, &coding.UpdateTaskInput{
+				ID:     "1",
+				Status: "invalid-status-value",
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("invalid status"))
 		})
 	})
 })
