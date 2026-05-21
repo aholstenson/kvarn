@@ -17,6 +17,7 @@ type Cmd struct {
 	Project string `arg:"" help:"Project name."`
 	Prompt  string `arg:"" help:"Prompt for the agent."`
 	Branch  string `help:"Branch override." default:""`
+	Mode    string `help:"Agent mode: auto, implement, fix, review, research." default:"auto"`
 	Watch   bool   `help:"Watch session until completion." default:"true"`
 }
 
@@ -27,6 +28,7 @@ func (c *Cmd) Run() error {
 		Project: c.Project,
 		Prompt:  c.Prompt,
 		Branch:  c.Branch,
+		Mode:    c.Mode,
 	}))
 	if err != nil {
 		return errors.Wrap(err, "start job")

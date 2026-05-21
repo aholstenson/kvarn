@@ -22,6 +22,7 @@ message StartJobRequest {
   string project = 1;
   string prompt = 2;
   string branch = 3;
+  string mode = 4;
 }
 
 message StartJobResponse {
@@ -40,6 +41,7 @@ message GetSessionResponse {
   string error = 5;
   string prompt = 6;
   string pull_request_url = 7;
+  string mode = 8;
 }
 
 message ListSessionsRequest {}

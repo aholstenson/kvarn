@@ -24,7 +24,7 @@ var _ = Describe("MemoryManager", func() {
 	})
 
 	It("creates a session with pending state", func() {
-		sess, err := mgr.Create(ctx, "my-project", "do something")
+		sess, err := mgr.Create(ctx, "my-project", "do something", "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(sess.ID).NotTo(BeEmpty())
 		Expect(sess.ProjectName).To(Equal("my-project"))
@@ -33,7 +33,7 @@ var _ = Describe("MemoryManager", func() {
 	})
 
 	It("gets a session by ID", func() {
-		created, err := mgr.Create(ctx, "proj", "prompt")
+		created, err := mgr.Create(ctx, "proj", "prompt", "")
 		Expect(err).NotTo(HaveOccurred())
 
 		got, err := mgr.Get(ctx, created.ID)
@@ -49,9 +49,9 @@ var _ = Describe("MemoryManager", func() {
 	})
 
 	It("lists sessions", func() {
-		_, err := mgr.Create(ctx, "a", "p1")
+		_, err := mgr.Create(ctx, "a", "p1", "")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = mgr.Create(ctx, "b", "p2")
+		_, err = mgr.Create(ctx, "b", "p2", "")
 		Expect(err).NotTo(HaveOccurred())
 
 		sessions, err := mgr.List(ctx)
@@ -60,7 +60,7 @@ var _ = Describe("MemoryManager", func() {
 	})
 
 	It("updates session state", func() {
-		sess, err := mgr.Create(ctx, "proj", "prompt")
+		sess, err := mgr.Create(ctx, "proj", "prompt", "")
 		Expect(err).NotTo(HaveOccurred())
 
 		err = mgr.UpdateState(ctx, sess.ID, session.StateCloning, "Cloning repo")
@@ -73,7 +73,7 @@ var _ = Describe("MemoryManager", func() {
 	})
 
 	It("fails a session", func() {
-		sess, err := mgr.Create(ctx, "proj", "prompt")
+		sess, err := mgr.Create(ctx, "proj", "prompt", "")
 		Expect(err).NotTo(HaveOccurred())
 
 		err = mgr.Fail(ctx, sess.ID, fmt.Errorf("something broke"))
@@ -92,7 +92,7 @@ var _ = Describe("MemoryManager", func() {
 
 	Describe("Watch", func() {
 		It("receives state updates", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt")
+			sess, err := mgr.Create(ctx, "proj", "prompt", "")
 			Expect(err).NotTo(HaveOccurred())
 
 			watchCtx, cancel := context.WithCancel(ctx)
@@ -113,7 +113,7 @@ var _ = Describe("MemoryManager", func() {
 		})
 
 		It("closes channel on terminal state", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt")
+			sess, err := mgr.Create(ctx, "proj", "prompt", "")
 			Expect(err).NotTo(HaveOccurred())
 
 			watchCtx, cancel := context.WithCancel(ctx)
@@ -133,7 +133,7 @@ var _ = Describe("MemoryManager", func() {
 		})
 
 		It("returns closed channel with final state for already-terminal session", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt")
+			sess, err := mgr.Create(ctx, "proj", "prompt", "")
 			Expect(err).NotTo(HaveOccurred())
 
 			err = mgr.UpdateState(ctx, sess.ID, session.StateCompleted, "done")
@@ -157,7 +157,7 @@ var _ = Describe("MemoryManager", func() {
 		})
 
 		It("handles concurrent access safely", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt")
+			sess, err := mgr.Create(ctx, "proj", "prompt", "")
 			Expect(err).NotTo(HaveOccurred())
 
 			var wg sync.WaitGroup

@@ -40,7 +40,7 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 		skills = agentCtx.RepoContext.Skills
 	}
 
-	mode := ModeImplement
+	mode := ModeAuto
 	if agentCtx.Mode != nil {
 		if m, ok := agentCtx.Mode.(*Mode); ok {
 			mode = m
@@ -81,9 +81,13 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 	opts := []llms.GenerateOption{
 		llms.WithSystemPrompt(systemPrompt),
 		llms.WithMessages(conversationHistory...),
-		llms.WithToolkits(toolkit),
 		llms.WithMaxSteps(maxSteps),
 		llms.WithMaxOutputTokens(maxOut),
+	}
+	if mode.Tools != nil {
+		opts = append(opts, llms.WithTools(mode.Tools(toolkit)...))
+	} else {
+		opts = append(opts, llms.WithToolkits(toolkit))
 	}
 	if mainCfg.ThinkingTokens > 0 {
 		opts = append(opts, llms.WithMaxThinkingTokens(mainCfg.ThinkingTokens))
@@ -159,10 +163,22 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 		return nil, err
 	}
 
-	// Extract the final assistant message to include in summary context.
+	var finalText string
 	if textResult, ok := agenticResult.(llms.TextResult); ok {
-		conversationHistory = append(conversationHistory, llms.NewMessage(llms.RoleAssistant, llms.NewTextPart(textResult.Text)))
+		finalText = textResult.Text
 	}
+
+	// Read-only modes (review, research) produce a written answer as
+	// their final message. Return that verbatim — summarizing it into a
+	// commit-message-shaped title/description would just discard the
+	// content the user actually asked for.
+	if !mode.Writes {
+		return &agent.Result{
+			Description: finalText,
+		}, nil
+	}
+
+	conversationHistory = append(conversationHistory, llms.NewMessage(llms.RoleAssistant, llms.NewTextPart(finalText)))
 
 	// The API requires the conversation to end with a user message.
 	summaryPrompt := "Summarize the work you just completed for a git commit and pull request.\n\n" +

@@ -33,6 +33,7 @@ type Session struct {
 	ID             string
 	ProjectName    string
 	Prompt         string
+	Mode           string
 	State          State
 	Message        string
 	CreatedAt      time.Time
@@ -181,7 +182,7 @@ func (PullRequestEvent) isSessionEvent() {}
 
 // Manager provides operations for managing sessions.
 type Manager interface {
-	Create(ctx context.Context, projectName string, prompt string) (*Session, error)
+	Create(ctx context.Context, projectName string, prompt string, mode string) (*Session, error)
 	Get(ctx context.Context, id string) (*Session, error)
 	List(ctx context.Context) ([]*Session, error)
 	UpdateState(ctx context.Context, id string, state State, message string) error

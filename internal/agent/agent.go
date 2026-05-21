@@ -45,6 +45,10 @@ func (ProgressToolResult) isProgressEvent() {}
 // this package only carries them on Context so callers can select one.
 type Mode interface {
 	ModeName() string
+	// WritesChanges reports whether the mode is expected to modify files.
+	// Read-only modes (review, research) return false; the orchestrator and
+	// `run` CLI use this to skip validation and PR submission.
+	WritesChanges() bool
 }
 
 // Context holds all the information an agent needs to perform work inside a VM.

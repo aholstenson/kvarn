@@ -339,7 +339,12 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("project-aware jobs not configured"))
 	}
 
-	slog.Info("starting job", "project", msg.Project, "branch", msg.Branch)
+	slog.Info("starting job", "project", msg.Project, "branch", msg.Branch, "mode", msg.Mode)
+
+	mode, err := coding.ModeByName(msg.Mode)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
 
 	proj, err := s.projectStore.Get(ctx, msg.Project)
 	if err != nil {
@@ -349,7 +354,7 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 
 	slog.Info("resolved project", "project", proj.Name, "repo", proj.RepoURL, "forge", proj.Forge)
 
-	sess, err := s.sessionMgr.Create(ctx, msg.Project, msg.Prompt)
+	sess, err := s.sessionMgr.Create(ctx, msg.Project, msg.Prompt, mode.ModeName())
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, errors.Wrap(err, "create session"))
 	}
@@ -359,18 +364,18 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 		branch = proj.DefaultBranch
 	}
 
-	slog.Info("session created", "session_id", sess.ID, "branch", branch)
+	slog.Info("session created", "session_id", sess.ID, "branch", branch, "mode", mode.ModeName())
 
-	go s.runJob(sess.ID, proj, branch, msg.Prompt)
+	go s.runJob(sess.ID, proj, branch, msg.Prompt, mode)
 
 	return connect.NewResponse(&v1.StartJobResponse{
 		SessionId: sess.ID,
 	}), nil
 }
 
-func (s *Service) runJob(sessionID string, proj *project.Project, branch string, prompt string) {
+func (s *Service) runJob(sessionID string, proj *project.Project, branch string, prompt string, mode *coding.Mode) {
 	ctx := context.Background()
-	log := slog.With("session_id", sessionID, "project", proj.Name)
+	log := slog.With("session_id", sessionID, "project", proj.Name, "mode", mode.ModeName())
 
 	log.Info("job started", "repo", proj.RepoURL, "branch", branch)
 
@@ -550,7 +555,7 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 		WorkingDir:  sess.GetWorkingDir(),
 		SessionID:   sess.GetShellSessionID(),
 		Prompt:      prompt,
-		Mode:        coding.ModeImplement,
+		Mode:        mode,
 		Runner:      sess.GetRunner(),
 		RepoContext: rc,
 		OnProgress: func(event agent.ProgressEvent) {
@@ -600,7 +605,9 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 	}
 
 	// Run validation steps.
-	if cfg != nil && (len(cfg.Validation.Required) > 0 || len(cfg.Validation.Advisory) > 0) {
+	if !mode.WritesChanges() {
+		log.Info("skipping validation: read-only mode")
+	} else if cfg != nil && (len(cfg.Validation.Required) > 0 || len(cfg.Validation.Advisory) > 0) {
 		log.Info("running validation steps")
 		s.sessionMgr.UpdateState(ctx, sessionID, session.StateValidating, "Running validation")
 
@@ -636,7 +643,9 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 
 	// Submit changes as PR if forge is available, agent produced a result,
 	// and there are changes.
-	if forgeImpl == nil {
+	if !mode.WritesChanges() {
+		log.Info("skipping PR submission: read-only mode")
+	} else if forgeImpl == nil {
 		log.Info("skipping PR submission: no forge configured")
 	} else if agentResult == nil {
 		log.Info("skipping PR submission: no agent result")
@@ -883,6 +892,7 @@ func (s *Service) GetSession(ctx context.Context, req *connect.Request[v1.GetSes
 		Error:          sess.Error,
 		Prompt:         sess.Prompt,
 		PullRequestUrl: sess.PullRequestURL,
+		Mode:           sess.Mode,
 	}), nil
 }
 
@@ -906,6 +916,7 @@ func (s *Service) ListSessions(ctx context.Context, _ *connect.Request[v1.ListSe
 			Error:          sess.Error,
 			Prompt:         sess.Prompt,
 			PullRequestUrl: sess.PullRequestURL,
+			Mode:           sess.Mode,
 		})
 	}
 

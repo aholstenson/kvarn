@@ -39,7 +39,7 @@ func generateID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func (m *MemoryManager) Create(_ context.Context, projectName string, prompt string) (*Session, error) {
+func (m *MemoryManager) Create(_ context.Context, projectName string, prompt string, mode string) (*Session, error) {
 	id, err := generateID()
 	if err != nil {
 		return nil, errors.Wrap(err, "generate session id")
@@ -50,6 +50,7 @@ func (m *MemoryManager) Create(_ context.Context, projectName string, prompt str
 		ID:          id,
 		ProjectName: projectName,
 		Prompt:      prompt,
+		Mode:        mode,
 		State:       StatePending,
 		CreatedAt:   now,
 		UpdatedAt:   now,

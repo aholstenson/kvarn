@@ -93,6 +93,25 @@ func (t *CodingToolkit) Tools() []llms.ToolDef {
 	return tools
 }
 
+// ReadOnlyTools returns the same toolkit minus edit_file and write_file. Used
+// by read-only modes (review, research) that may still need to run shell
+// commands for inspection but must not modify files.
+func (t *CodingToolkit) ReadOnlyTools() []llms.ToolDef {
+	tools := []llms.ToolDef{
+		llms.NewToolDef(&execCommandTool{toolkit: t}),
+		llms.NewToolDef(&readFileTool{toolkit: t}),
+		llms.NewToolDef(&listFilesTool{toolkit: t}),
+		llms.NewToolDef(&searchFilesTool{toolkit: t}),
+	}
+	if len(t.skills) > 0 {
+		tools = append(tools, llms.NewToolDef(&activateSkillTool{skills: t.skills}))
+	}
+	if len(t.models) > 0 && len(t.subAgents) > 0 {
+		tools = append(tools, llms.NewToolDef(&spawnAgentTool{toolkit: t}))
+	}
+	return tools
+}
+
 // exec_command
 
 type ExecCommandInput struct {

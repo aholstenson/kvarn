@@ -51,13 +51,21 @@ type Cmd struct {
 	SecretsFile   string `help:"Override path to secrets store (default: ~/.config/kvarn/secrets.toml)." name:"secrets-file"`
 	AgentsFile    string `help:"Override path to agents config (default: ~/.config/kvarn/agents.toml)." name:"agents-file"`
 	Model         string `help:"LLM model alias for the coding agent." default:"coding-agent"`
+	Mode          string `help:"Agent mode: auto, implement, fix, review, research." default:"auto"`
 }
 
 // Run is the kong-invoked entry point. It resolves defaults and delegates to
 // the package-level run() so the core flow can be exercised by tests.
 func (c *Cmd) Run() error {
-	if !c.Diff && !c.Apply {
-		return errors.New("one of --diff or --apply must be specified")
+	mode, err := coding.ModeByName(c.Mode)
+	if err != nil {
+		return err
+	}
+
+	if mode.WritesChanges() {
+		if !c.Diff && !c.Apply {
+			return errors.New("one of --diff or --apply must be specified")
+		}
 	}
 
 	// Redirect slog to discard unless --logs is passed.
@@ -87,6 +95,7 @@ func (c *Cmd) Run() error {
 	return c.runWith(ctx, runDeps{
 		Provider: &local.Provider{},
 		Agent:    coding.NewCodingAgent(models, configs),
+		Mode:     mode,
 		Stdout:   os.Stdout,
 	})
 }
@@ -96,12 +105,18 @@ func (c *Cmd) Run() error {
 type runDeps struct {
 	Provider vm.Provider
 	Agent    agent.Agent
+	Mode     *coding.Mode
 	Stdout   io.Writer
 }
 
 // runWith is the testable core of the command. All external entry points
 // (real VM provider, real agent) are resolved by Run() and passed in.
 func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
+	mode := deps.Mode
+	if mode == nil {
+		mode = coding.ModeAuto
+	}
+
 	renderer := taskui.New(deps.Stdout, c.Verbose)
 	renderer.Start()
 
@@ -424,7 +439,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		WorkingDir:  sess.GetWorkingDir(),
 		SessionID:   sess.GetShellSessionID(),
 		Prompt:      c.Prompt,
-		Mode:        coding.ModeImplement,
+		Mode:        mode,
 		Runner:      sess.GetRunner(),
 		RepoContext: rc,
 		OnProgress:  makeProgressCallback(renderer, agentItem, &toolCount),
@@ -443,40 +458,42 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 	}
 
 	// Validation. Always runs, even when the agent errored — the user may
-	// still want to inspect partial changes.
-	changedFiles, cfErr := sess.ChangedFiles(ctx)
-	if cfErr != nil {
-		slog.Warn("failed to get changed files for validation gating", "error", cfErr)
-	}
+	// still want to inspect partial changes. Skipped for read-only modes.
+	if mode.WritesChanges() {
+		changedFiles, cfErr := sess.ChangedFiles(ctx)
+		if cfErr != nil {
+			slog.Warn("failed to get changed files for validation gating", "error", cfErr)
+		}
 
-	if len(cfg.Validation.Required) > 0 {
-		reqItem := renderer.AddItem("Validation (required)")
-		renderer.SetStatus(reqItem, taskui.StatusRunning, "")
-		stepDone, outputCb := makeCallbacks(reqItem, cfg.Validation.Required)
-		valResult, err := sess.RunValidation(ctx, &project.Config{
-			Validation: project.Validation{Required: cfg.Validation.Required},
-		}, changedFiles, stepDone, outputCb)
-		if err != nil {
-			renderer.Stop()
-			return summary.finish(deps.Stdout, err, "", 0, 0)
+		if len(cfg.Validation.Required) > 0 {
+			reqItem := renderer.AddItem("Validation (required)")
+			renderer.SetStatus(reqItem, taskui.StatusRunning, "")
+			stepDone, outputCb := makeCallbacks(reqItem, cfg.Validation.Required)
+			valResult, err := sess.RunValidation(ctx, &project.Config{
+				Validation: project.Validation{Required: cfg.Validation.Required},
+			}, changedFiles, stepDone, outputCb)
+			if err != nil {
+				renderer.Stop()
+				return summary.finish(deps.Stdout, err, "", 0, 0)
+			}
+			if !valResult.RequiredPassed {
+				summary.requiredFailed = true
+			}
+			renderer.SetStatus(reqItem, parentStatus(reqItem), "")
 		}
-		if !valResult.RequiredPassed {
-			summary.requiredFailed = true
-		}
-		renderer.SetStatus(reqItem, parentStatus(reqItem), "")
-	}
 
-	if len(cfg.Validation.Advisory) > 0 {
-		advItem := renderer.AddItem("Validation (advisory)")
-		renderer.SetStatus(advItem, taskui.StatusRunning, "")
-		stepDone, outputCb := makeCallbacks(advItem, cfg.Validation.Advisory)
-		if _, err := sess.RunValidation(ctx, &project.Config{
-			Validation: project.Validation{Advisory: cfg.Validation.Advisory},
-		}, changedFiles, stepDone, outputCb); err != nil {
-			renderer.Stop()
-			return summary.finish(deps.Stdout, err, "", 0, 0)
+		if len(cfg.Validation.Advisory) > 0 {
+			advItem := renderer.AddItem("Validation (advisory)")
+			renderer.SetStatus(advItem, taskui.StatusRunning, "")
+			stepDone, outputCb := makeCallbacks(advItem, cfg.Validation.Advisory)
+			if _, err := sess.RunValidation(ctx, &project.Config{
+				Validation: project.Validation{Advisory: cfg.Validation.Advisory},
+			}, changedFiles, stepDone, outputCb); err != nil {
+				renderer.Stop()
+				return summary.finish(deps.Stdout, err, "", 0, 0)
+			}
+			renderer.SetStatus(advItem, parentStatus(advItem), "")
 		}
-		renderer.SetStatus(advItem, parentStatus(advItem), "")
 	}
 
 	if !c.NoCache {
@@ -495,14 +512,19 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 
 	// Emit output per the user's selection. We do this even when the
 	// agent or validation failed so the user can inspect what happened.
+	// Read-only modes never produce changes, so diff/apply are skipped.
 	var diffLineCount int
 	var appliedFileCount int
 	var outputErr error
-	switch {
-	case c.Diff:
-		diffLineCount, outputErr = emitDiff(ctx, sess.GetRunner(), sess.GetWorkingDir(), deps.Stdout)
-	case c.Apply:
-		appliedFileCount, outputErr = emitApply(ctx, sess, c.Dir, deps.Stdout)
+	if mode.WritesChanges() {
+		switch {
+		case c.Diff:
+			diffLineCount, outputErr = emitDiff(ctx, sess.GetRunner(), sess.GetWorkingDir(), deps.Stdout)
+		case c.Apply:
+			appliedFileCount, outputErr = emitApply(ctx, sess, c.Dir, deps.Stdout)
+		}
+	} else if c.Diff || c.Apply {
+		fmt.Fprintln(deps.Stdout, "Skipping --diff/--apply: read-only mode produces no changes.")
 	}
 
 	// Print the agent's title/description as the last block before the
@@ -517,12 +539,14 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		}
 	}
 
-	mode := ""
-	switch {
-	case c.Diff:
-		mode = "diff"
-	case c.Apply:
-		mode = "apply"
+	outputMode := ""
+	if mode.WritesChanges() {
+		switch {
+		case c.Diff:
+			outputMode = "diff"
+		case c.Apply:
+			outputMode = "apply"
+		}
 	}
 
 	// Surface the agent error in the final summary, but only if we made
@@ -531,7 +555,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 	if finalErr == nil && agentErr != nil {
 		finalErr = agentErr
 	}
-	return summary.finish(deps.Stdout, finalErr, mode, diffLineCount, appliedFileCount)
+	return summary.finish(deps.Stdout, finalErr, outputMode, diffLineCount, appliedFileCount)
 }
 
 // extractor is the sandbox surface emitApply needs: a runner to classify
