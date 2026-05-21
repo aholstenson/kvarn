@@ -1,0 +1,163 @@
+syntax = "proto3";
+
+package kvarn.v1;
+
+message ExecRequest {
+  string command = 1;
+  repeated string args = 2;
+  string working_dir = 3;
+  bool privileged = 4;
+  // Optional timeout in seconds. If > 0, the command will be killed after this duration.
+  uint32 timeout_seconds = 5;
+}
+
+message ExecResponse {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+}
+
+message FileContent {
+  string path = 1;
+  bytes content = 2;
+  uint32 mode = 3;
+  // If set, create a symlink at path pointing to this target instead of writing content.
+  string symlink_target = 4;
+}
+
+message UploadFilesRequest {
+  string working_dir = 1;
+  repeated FileContent files = 2;
+}
+
+message UploadFilesResponse {
+  int32 files_written = 1;
+}
+
+// TaggedLine is a single line of a file with an opaque anchor hash. The hash is
+// a short prefix of blake2s over the line bytes (no terminator); it is used to
+// reference the line in subsequent EditFile calls without requiring the agent
+// to reproduce the line verbatim.
+message TaggedLine {
+  int32 line = 1;
+  string hash = 2;
+  string content = 3;
+}
+
+message ReadFileRequest {
+  string working_dir = 1;
+  string path = 2;
+  // 1-indexed start line; 0 means from the beginning of the file.
+  int32 start_line = 3;
+  // 1-indexed inclusive end line; 0 means to the end of the file.
+  int32 end_line = 4;
+}
+
+message ReadFileResponse {
+  // Hex blake2s of the full file bytes. Pass back as expected_version on
+  // EditFile/WriteFile to detect stale edits.
+  string version = 1;
+  int32 total_lines = 2;
+  repeated TaggedLine lines = 3;
+  // Newline style observed in the file ("\n" or "\r\n"). Informational only.
+  string newline = 4;
+}
+
+enum EditOp {
+  EDIT_OP_UNSPECIFIED = 0;
+  EDIT_OP_REPLACE = 1;
+  EDIT_OP_REPLACE_RANGE = 2;
+  EDIT_OP_INSERT_AFTER = 3;
+  EDIT_OP_DELETE = 4;
+  EDIT_OP_DELETE_RANGE = 5;
+}
+
+message EditOperation {
+  EditOp op = 1;
+  // Single-line ops use line/hash.
+  int32 line = 2;
+  string hash = 3;
+  // Range ops use start_line/start_hash through end_line/end_hash (inclusive).
+  int32 start_line = 4;
+  string start_hash = 5;
+  int32 end_line = 6;
+  string end_hash = 7;
+  // Replacement / insertion content. Each entry is one line, without terminators.
+  repeated string lines = 8;
+}
+
+message EditFileRequest {
+  string working_dir = 1;
+  string path = 2;
+  // Version hash returned by the most recent ReadFile.
+  string expected_version = 3;
+  repeated EditOperation operations = 4;
+  // Lines of fresh tagged context around each edit in the response. 0 means default (5).
+  int32 context_lines = 5;
+}
+
+message EditFileResponse {
+  string version = 1;
+  int32 total_lines = 2;
+  // Fresh tagged context around each touched region.
+  repeated TaggedLine context = 3;
+}
+
+message WriteFileRequest {
+  string working_dir = 1;
+  string path = 2;
+  bytes content = 3;
+  // Empty = create-only (fails if the file exists). Non-empty = overwrite with
+  // version check (must match current file hash).
+  string expected_version = 4;
+  // File mode. 0 means default (0644).
+  uint32 mode = 5;
+}
+
+message WriteFileResponse {
+  string version = 1;
+  int32 total_lines = 2;
+}
+
+message CreateSessionRequest {
+  string working_dir = 1;
+  // If set, run the session shell inside this container via podman exec.
+  string container = 2;
+}
+
+message CreateSessionResponse {
+  string session_id = 1;
+}
+
+message SessionExecRequest {
+  string session_id = 1;
+  string command = 2;
+  uint32 timeout_seconds = 3;
+}
+
+message SessionExecResponse {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+  string working_dir = 4;
+  // True if the shell died (e.g. `exit` was called) and was respawned.
+  // All prior session state (env vars, cwd) has been lost.
+  bool state_reset = 5;
+}
+
+message CloseSessionRequest {
+  string session_id = 1;
+}
+
+message CloseSessionResponse {}
+
+service RunnerService {
+  rpc Exec(ExecRequest) returns (ExecResponse);
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc SessionExec(SessionExecRequest) returns (SessionExecResponse);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+  rpc UploadFiles(UploadFilesRequest) returns (UploadFilesResponse);
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+  rpc EditFile(EditFileRequest) returns (EditFileResponse);
+  rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+}

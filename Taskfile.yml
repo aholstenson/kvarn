@@ -1,0 +1,75 @@
+version: "3"
+
+tasks:
+  generate:
+    desc: Regenerate protobuf + ConnectRPC code
+    cmds:
+      - buf generate
+    sources:
+      - proto/**/*.proto
+      - buf.gen.yaml
+    generates:
+      - gen/**/*.go
+
+  build:
+    desc: Build the kvarn binary
+    deps: [generate]
+    cmds:
+      - go build ./cmd/kvarn
+      - task: sign
+        platforms: [darwin]
+
+  sign:
+    desc: Ad-hoc codesign with virtualization entitlement (macOS only)
+    platforms: [darwin]
+    cmds:
+      - codesign -f --entitlements entitlements.plist -s - kvarn
+
+  test:
+    desc: Run all tests
+    deps: [generate]
+    cmds:
+      - ginkgo ./...
+
+  test:verbose:
+    desc: Run all tests with verbose output
+    deps: [generate]
+    cmds:
+      - ginkgo -v ./...
+
+  lint:
+    desc: Run go vet
+    deps: [generate]
+    cmds:
+      - go vet ./...
+
+  tidy:
+    desc: Tidy go modules
+    cmds:
+      - go mod tidy
+
+  image:build:
+    desc: Build VM disk image for host architecture
+    cmds:
+      - ./image/build-image.sh
+
+  image:build:arm64:
+    desc: Build VM disk image for arm64
+    cmds:
+      - ARCH=arm64 ./image/build-image.sh
+
+  image:build:amd64:
+    desc: Build VM disk image for amd64
+    cmds:
+      - ARCH=amd64 ./image/build-image.sh
+
+  image:clean:
+    desc: Remove built VM image artifacts
+    cmds:
+      - rm -rf dist/
+
+  clean:
+    desc: Remove build artifacts and generated code
+    cmds:
+      - rm -rf gen/
+      - rm -f kvarn

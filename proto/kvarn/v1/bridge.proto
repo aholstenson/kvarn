@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package kvarn.v1;
+
+import "kvarn/v1/runner.proto";
+
+message VmInfo {
+  int32 cpu_count = 1;
+  string cpu_model = 2;
+  int64 mem_total_mb = 3;
+  int64 mem_available_mb = 4;
+  int64 disk_used_mb = 5;
+  int64 disk_total_mb = 6;
+}
+
+message RegisterRequest {
+  string token = 1;
+  VmInfo vm_info = 2;
+}
+
+message RunnerCommand {
+  string command_id = 1;
+  oneof command {
+    ExecRequest exec = 2;
+    UploadFilesRequest upload_files = 3;
+    ReadFileRequest read_file = 4;
+    EditFileRequest edit_file = 5;
+    CreateSessionRequest create_session = 7;
+    SessionExecRequest session_exec = 8;
+    CloseSessionRequest close_session = 9;
+    DownloadFileCommand download_file = 10;
+    UploadFileCommand upload_file = 11;
+    WriteFileRequest write_file = 12;
+  }
+  reserved 6;
+}
+
+message DownloadFileCommand {
+  string transfer_id = 1;
+  string path = 2;
+}
+
+message UploadFileCommand {
+  string transfer_id = 1;
+  string path = 2;
+}
+
+message CommandResult {
+  string command_id = 1;
+  string token = 2;
+  oneof result {
+    ExecResponse exec = 3;
+    UploadFilesResponse upload_files = 4;
+    ReadFileResponse read_file = 5;
+    EditFileResponse edit_file = 6;
+    CreateSessionResponse create_session = 9;
+    SessionExecResponse session_exec = 10;
+    CloseSessionResponse close_session = 11;
+    FileStreamResult download_file_result = 12;
+    FileStreamResult upload_file_result = 13;
+    WriteFileResponse write_file = 14;
+  }
+  reserved 8;
+  string error = 7;
+}
+
+message ReportResultResponse {}
+
+message OutputChunk {
+  string command_id = 1;
+  string token = 2;
+  string stdout = 3;
+  string stderr = 4;
+}
+
+message ReportOutputResponse {}
+
+message FileStreamChunk {
+  oneof payload {
+    FileStreamStart start = 1;
+    bytes data = 2;
+  }
+}
+
+message FileStreamStart {
+  string transfer_id = 1;
+  string token = 2;
+  string path = 3;
+  int64 size = 4;
+  uint32 mode = 5;
+}
+
+message FileStreamResult {
+  int64 bytes_written = 1;
+}
+
+message DownloadFileRequest {
+  string transfer_id = 1;
+  string token = 2;
+}
+
+service BridgeService {
+  rpc Register(RegisterRequest) returns (stream RunnerCommand);
+  rpc ReportResult(CommandResult) returns (ReportResultResponse);
+  rpc ReportOutput(OutputChunk) returns (ReportOutputResponse);
+  rpc DownloadFile(DownloadFileRequest) returns (stream FileStreamChunk);
+  rpc UploadFile(stream FileStreamChunk) returns (FileStreamResult);
+}

@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aholstenson/kvarn/raw/main/kvarn.schema.json",
+  "title": "kvarn configuration",
+  "description": "Configuration file for kvarn (kvarn.yml / kvarn.yaml / .kvarn.yml / .kvarn.yaml)",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "image": {
+      "description": "Docker image to run steps in. Mutually exclusive with 'tools'.",
+      "type": "string",
+      "minLength": 1
+    },
+    "tools": {
+      "description": "Built-in tools to install into the VM before setup. Mutually exclusive with 'image'.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*(@[a-zA-Z0-9._-]+)?$"
+      }
+    },
+    "vm": {
+      "description": "VM resource configuration overrides.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "disk": {
+          "description": "Disk size (e.g. \"4G\", \"8GiB\", \"8192M\"). Minimum 4G.",
+          "type": "string",
+          "pattern": "^\\s*[0-9]+(M|MiB|G|GiB)\\s*$"
+        },
+        "cpus": {
+          "description": "Number of virtual CPUs. Minimum 1, default 2.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory": {
+          "description": "Memory size (e.g. \"2G\", \"4GiB\", \"512M\"). Minimum 512M.",
+          "type": "string",
+          "pattern": "^\\s*[0-9]+(M|MiB|G|GiB)\\s*$"
+        }
+      }
+    },
+    "network": {
+      "description": "Network egress controls for the VM.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowed_hosts": {
+          "description": "Additional hostnames or IPs allowed for outbound TCP connections (ports 80/443). Common infrastructure hosts are always allowed.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9._-]+$"
+          }
+        }
+      }
+    },
+    "cache": {
+      "description": "Cache configuration for persisting tool artifacts across VM runs.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "description": "Additional absolute guest paths to cache. Must not be under /home/kvarn/workspace. Tool cache paths (e.g. Go modules, npm cache) are included automatically.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        }
+      }
+    },
+    "setup": {
+      "description": "Steps run before the agent starts. Short-circuits on first failure.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "steps": {
+          "description": "Commands to run during setup. All must pass before health checks run.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" }
+        },
+        "health_checks": {
+          "description": "Verification checks to ensure readiness. Only run if all setup steps pass.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" }
+        }
+      }
+    },
+    "validation": {
+      "description": "Validation steps run after setup completes.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "description": "Steps that must pass. All steps run regardless of individual failures.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" }
+        },
+        "advisory": {
+          "description": "Optional validation steps. Failures do not affect overall pass/fail.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "step": {
+      "description": "A command step to execute.",
+      "type": "object",
+      "required": ["name", "run"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Step identifier.",
+          "type": "string",
+          "minLength": 1
+        },
+        "run": {
+          "description": "Shell command to execute (via sh -c).",
+          "type": "string",
+          "minLength": 1
+        },
+        "working_dir": {
+          "description": "Relative path where the command executes, resolved from the workspace root.",
+          "type": "string"
+        },
+        "paths": {
+          "description": "Doublestar glob patterns for conditional execution (validation steps only). If set, the step only runs when changed files match at least one pattern.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "examples": [
+            ["backend/**"],
+            ["frontend/**/*.tsx", "**/*.go"]
+          ]
+        },
+        "timeout": {
+          "description": "Maximum execution time. Accepts an integer (seconds) or a Go duration string (e.g. \"10m\", \"1h30m\", \"30s\"). 0 or omitted means no timeout.",
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "string", "pattern": "^[0-9]+[hms]+.*$" }
+          ]
+        },
+        "retry": {
+          "description": "Number of additional attempts if the step fails (setup steps only). 0 or omitted means no retries. Maximum 10.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        }
+      }
+    }
+  }
+}

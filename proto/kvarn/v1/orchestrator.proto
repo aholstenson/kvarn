@@ -1,0 +1,154 @@
+syntax = "proto3";
+
+package kvarn.v1;
+
+import "kvarn/v1/bridge.proto";
+
+message ExecuteJobRequest {
+  string command = 1;
+  repeated string args = 2;
+  string working_dir = 3;
+}
+
+message ExecuteJobResponse {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+  string vm_id = 4;
+  VmInfo vm_info = 5;
+}
+
+message StartJobRequest {
+  string project = 1;
+  string prompt = 2;
+  string branch = 3;
+}
+
+message StartJobResponse {
+  string session_id = 1;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+}
+
+message GetSessionResponse {
+  string session_id = 1;
+  string project = 2;
+  string state = 3;
+  string message = 4;
+  string error = 5;
+  string prompt = 6;
+  string pull_request_url = 7;
+}
+
+message ListSessionsRequest {}
+
+message ListSessionsResponse {
+  repeated GetSessionResponse sessions = 1;
+}
+
+message WatchSessionRequest {
+  string session_id = 1;
+}
+
+message SessionUpdate {
+  string session_id = 1;
+  string project = 2;
+
+  oneof event {
+    StateChange state_change = 10;
+    AgentMessage agent_message = 11;
+    AgentToolUse agent_tool_use = 12;
+    AgentToolResult agent_tool_result = 13;
+    StepResult step_result = 14;
+    VmInfo vm_info = 15;
+    StepOutput step_output = 16;
+    TransferProgress transfer_progress = 17;
+    DependencyOutput dependency_output = 18;
+    CacheProgress cache_progress = 19;
+    PullRequestCreated pull_request_created = 20;
+  }
+}
+
+message StateChange {
+  string state = 1;
+  string message = 2;
+  string error = 3;
+}
+
+message AgentMessage {
+  string text = 1;
+  bool final = 2;
+  // Empty for the parent agent; identifier of the sub-agent run otherwise.
+  string agent_id = 3;
+}
+
+message AgentToolUse {
+  string tool_id = 1;
+  string arguments_json = 2;
+  string agent_id = 3;
+}
+
+message AgentToolResult {
+  string tool_id = 1;
+  string result = 2;
+  bool is_error = 3;
+  string agent_id = 4;
+}
+
+enum StepPhase {
+  STEP_PHASE_UNSPECIFIED = 0;
+  STEP_PHASE_SETUP = 1;
+  STEP_PHASE_HEALTH_CHECK = 2;
+  STEP_PHASE_VALIDATION_REQUIRED = 3;
+  STEP_PHASE_VALIDATION_ADVISORY = 4;
+}
+
+message StepResult {
+  string name = 1;
+  StepPhase phase = 2;
+  int32 exit_code = 3;
+  string stdout = 4;
+  string stderr = 5;
+  bool passed = 6;
+  bool skipped = 7;
+}
+
+message StepOutput {
+  string name = 1;
+  StepPhase phase = 2;
+  string stdout = 3;
+  string stderr = 4;
+}
+
+message TransferProgress {
+  int64 bytes_sent = 1;
+  int64 total_bytes = 2;
+}
+
+message DependencyOutput {
+  string stdout = 1;
+  string stderr = 2;
+}
+
+message CacheProgress {
+  string path = 1;
+  int32 index = 2;
+  int32 total = 3;
+  bool restoring = 4;
+}
+
+message PullRequestCreated {
+  string url = 1;
+  int32 number = 2;
+  string branch = 3;
+}
+
+service OrchestratorService {
+  rpc ExecuteJob(ExecuteJobRequest) returns (ExecuteJobResponse);
+  rpc StartJob(StartJobRequest) returns (StartJobResponse);
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc WatchSession(WatchSessionRequest) returns (stream SessionUpdate);
+}

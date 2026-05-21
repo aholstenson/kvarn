@@ -1,0 +1,25 @@
+dependencies:
+  nixpkgs:
+    - go
+    - buf
+    - go-task
+
+setup:
+  steps:
+    - name: Generate code
+      run: task generate
+    
+    - name: go mod tidy
+      run: go mod tidy
+
+    - name: Install Ginkgo
+      run: go install github.com/onsi/ginkgo/v2/ginkgo
+
+validation:
+  required:
+    - name: Build everything
+      run: task build
+
+    - name: Run all tests
+      run: task test
+      timeout: 10m

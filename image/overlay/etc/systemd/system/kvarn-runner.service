@@ -1,0 +1,14 @@
+[Unit]
+Description=Kvarn runner service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/bin/kvarn-runner-setup.sh
+EnvironmentFile=-/run/kvarn-runner.env
+ExecStart=/bin/sh -c '/usr/local/bin/kvarn ${KVARN_RUNNER_ARGS}'
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

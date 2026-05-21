@@ -1,0 +1,159 @@
+package tomlstore
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"sync"
+
+	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
+	"github.com/cockroachdb/errors"
+	"github.com/pelletier/go-toml/v2"
+)
+
+type fileData struct {
+	Forges map[string]*forgeEntry `toml:"forges"`
+}
+
+type forgeEntry struct {
+	Type              string   `toml:"type"`
+	Credential        string   `toml:"credential,omitempty"`
+	BranchPrefix      string   `toml:"branch_prefix,omitempty"`
+	Labels            []string `toml:"labels,omitempty"`
+	CommitAuthorName  string   `toml:"commit_author_name,omitempty"`
+	CommitAuthorEmail string   `toml:"commit_author_email,omitempty"`
+}
+
+// Store is a TOML file-backed forge config store.
+type Store struct {
+	path string
+	mu   sync.RWMutex
+}
+
+// New creates a Store backed by the given file path.
+func New(path string) *Store {
+	return &Store{path: path}
+}
+
+// DefaultPath returns the default forge config store path.
+func DefaultPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "kvarn", "forges.toml")
+}
+
+func (s *Store) load() (*fileData, error) {
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &fileData{Forges: make(map[string]*forgeEntry)}, nil
+		}
+		return nil, err
+	}
+
+	var fd fileData
+	if err := toml.Unmarshal(data, &fd); err != nil {
+		return nil, errors.Wrapf(err, "parse %s", s.path)
+	}
+	if fd.Forges == nil {
+		fd.Forges = make(map[string]*forgeEntry)
+	}
+	return &fd, nil
+}
+
+func (s *Store) save(fd *fileData) error {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
+		return err
+	}
+
+	data, err := toml.Marshal(fd)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(s.path, data, 0644)
+}
+
+func (s *Store) Get(_ context.Context, name string) (*forgeconfig.ForgeConfig, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	fd, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+
+	entry, ok := fd.Forges[name]
+	if !ok {
+		return nil, errors.Newf("forge config %q not found", name)
+	}
+
+	return entryToConfig(name, entry), nil
+}
+
+func (s *Store) List(_ context.Context) ([]*forgeconfig.ForgeConfig, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	fd, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+
+	var result []*forgeconfig.ForgeConfig
+	for name, entry := range fd.Forges {
+		result = append(result, entryToConfig(name, entry))
+	}
+	return result, nil
+}
+
+func (s *Store) Put(_ context.Context, fc *forgeconfig.ForgeConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	fd, err := s.load()
+	if err != nil {
+		return err
+	}
+
+	fd.Forges[fc.Name] = &forgeEntry{
+		Type:              fc.Type,
+		Credential:        fc.Credential,
+		BranchPrefix:      fc.BranchPrefix,
+		Labels:            fc.Labels,
+		CommitAuthorName:  fc.CommitAuthorName,
+		CommitAuthorEmail: fc.CommitAuthorEmail,
+	}
+
+	return s.save(fd)
+}
+
+func (s *Store) Delete(_ context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	fd, err := s.load()
+	if err != nil {
+		return err
+	}
+
+	if _, ok := fd.Forges[name]; !ok {
+		return errors.Newf("forge config %q not found", name)
+	}
+
+	delete(fd.Forges, name)
+	return s.save(fd)
+}
+
+func entryToConfig(name string, e *forgeEntry) *forgeconfig.ForgeConfig {
+	labels := make([]string, len(e.Labels))
+	copy(labels, e.Labels)
+	return &forgeconfig.ForgeConfig{
+		Name:              name,
+		Type:              e.Type,
+		Credential:        e.Credential,
+		BranchPrefix:      e.BranchPrefix,
+		Labels:            labels,
+		CommitAuthorName:  e.CommitAuthorName,
+		CommitAuthorEmail: e.CommitAuthorEmail,
+	}
+}

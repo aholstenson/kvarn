@@ -1,0 +1,6 @@
+gen/
+/kvarn
+dist/
+
+.task/
+.env*
