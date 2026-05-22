@@ -20,8 +20,8 @@ type stubCollector struct {
 	counters map[string]int
 }
 
-func (s *stubCollector) Counter(name string) llms.Counter   { return &noopCounter{} }
-func (s *stubCollector) GetCounters() map[string]int        { return s.counters }
+func (s *stubCollector) Counter(name string) llms.Counter { return &noopCounter{} }
+func (s *stubCollector) GetCounters() map[string]int      { return s.counters }
 
 type noopCounter struct{}
 

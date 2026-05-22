@@ -105,9 +105,9 @@ type budgetWrappedTool struct {
 	tracker *cost.Tracker
 }
 
-func (w *budgetWrappedTool) Name() string                                  { return w.inner.Name() }
-func (w *budgetWrappedTool) Description() string                           { return w.inner.Description() }
-func (w *budgetWrappedTool) Schema() any                                   { return w.inner.Schema() }
+func (w *budgetWrappedTool) Name() string        { return w.inner.Name() }
+func (w *budgetWrappedTool) Description() string { return w.inner.Description() }
+func (w *budgetWrappedTool) Schema() any         { return w.inner.Schema() }
 func (w *budgetWrappedTool) Execute(ctx context.Context, in any) (any, error) {
 	return w.inner.Execute(ctx, in)
 }
