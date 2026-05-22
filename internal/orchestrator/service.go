@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -209,7 +210,8 @@ type Service struct {
 	credentialStore  credential.Store
 	secretStore      secret.Store
 	forgeConfigStore forgeconfig.Store
-	forgeTypes       map[string]forge.Forge // type registry ("github" -> impl)
+	forgeDefaults    forgeconfig.DefaultsStore // optional; nil means built-in fallbacks only
+	forgeTypes       map[string]forge.Forge    // type registry ("github" -> impl)
 	sessionMgr       session.Manager
 	agent            agent.Agent
 	transferer       transfer.Transferer
@@ -224,24 +226,25 @@ type Service struct {
 }
 
 type ServiceOpts struct {
-	Provider         vm.Provider
-	CreateOpts       vm.CreateOpts
-	ProjectStore     project.Store
-	CredentialStore  credential.Store
-	SecretStore      secret.Store
-	ForgeConfigStore forgeconfig.Store
-	ForgeTypes       map[string]forge.Forge
-	SessionMgr       session.Manager
-	Agent            agent.Agent
-	Transferer       transfer.Transferer
-	WorkspaceDir     string                 // VM workspace path; defaults to "/home/kvarn/workspace"
-	RegistryMirrors  []string               // Docker registry mirrors (infrastructure config)
-	CacheProvider    cache.Provider         // optional cache provider
-	SandboxFactory   SandboxFactory         // optional; nil uses defaultSandboxFactory
-	DefaultsStore    modelcfg.DefaultsStore // optional; nil means no user defaults (built-ins only)
-	PricingManager   *llms.PricingManager   // optional; nil disables USD computation
-	APIKeyStore      apikey.Store           // API keys for request authentication
-	AuthEnabled      bool                   // when true, project-scoped RPCs require an authorized key
+	Provider           vm.Provider
+	CreateOpts         vm.CreateOpts
+	ProjectStore       project.Store
+	CredentialStore    credential.Store
+	SecretStore        secret.Store
+	ForgeConfigStore   forgeconfig.Store
+	ForgeDefaultsStore forgeconfig.DefaultsStore // optional; nil means built-in fallbacks only
+	ForgeTypes         map[string]forge.Forge
+	SessionMgr         session.Manager
+	Agent              agent.Agent
+	Transferer         transfer.Transferer
+	WorkspaceDir       string                 // VM workspace path; defaults to "/home/kvarn/workspace"
+	RegistryMirrors    []string               // Docker registry mirrors (infrastructure config)
+	CacheProvider      cache.Provider         // optional cache provider
+	SandboxFactory     SandboxFactory         // optional; nil uses defaultSandboxFactory
+	DefaultsStore      modelcfg.DefaultsStore // optional; nil means no user defaults (built-ins only)
+	PricingManager     *llms.PricingManager   // optional; nil disables USD computation
+	APIKeyStore        apikey.Store           // API keys for request authentication
+	AuthEnabled        bool                   // when true, project-scoped RPCs require an authorized key
 }
 
 func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
@@ -269,6 +272,7 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		credentialStore:  opts.CredentialStore,
 		secretStore:      opts.SecretStore,
 		forgeConfigStore: opts.ForgeConfigStore,
+		forgeDefaults:    opts.ForgeDefaultsStore,
 		forgeTypes:       opts.ForgeTypes,
 		sessionMgr:       opts.SessionMgr,
 		agent:            opts.Agent,
@@ -742,30 +746,27 @@ func (s *Service) submitChanges(
 		return
 	}
 
-	// Resolve behavioral settings from forge config with defaults.
-	prefix := "kvarn"
-	authorName := "kvarn"
-	authorEmail := "kvarn@noreply"
-	var labels []string
-
-	if forgeCfg != nil {
-		if forgeCfg.BranchPrefix != "" {
-			prefix = forgeCfg.BranchPrefix
-		}
-		if forgeCfg.CommitAuthorName != "" {
-			authorName = forgeCfg.CommitAuthorName
-		}
-		if forgeCfg.CommitAuthorEmail != "" {
-			authorEmail = forgeCfg.CommitAuthorEmail
-		}
-		if len(forgeCfg.Labels) > 0 {
-			labels = forgeCfg.Labels
+	// Resolve behavioral settings by layering, highest precedence first:
+	// per-project overrides, per-forge values, the global [defaults] block, and
+	// the compiled-in constants.
+	var forgeDefaults forgeconfig.Defaults
+	if s.forgeDefaults != nil {
+		if d, err := s.forgeDefaults.Defaults(ctx); err != nil {
+			log.Warn("failed to load forge defaults; using built-ins", "error", err)
+		} else {
+			forgeDefaults = d
 		}
 	}
-
-	if len(labels) == 0 {
-		labels = []string{"kvarn"}
-	}
+	behavior := forgeCfg.ResolveBehavior(forgeDefaults, forgeconfig.Overrides{
+		BranchPrefix:      proj.BranchPrefix,
+		CommitAuthorName:  proj.CommitAuthorName,
+		CommitAuthorEmail: proj.CommitAuthorEmail,
+		Labels:            proj.Labels,
+	})
+	prefix := behavior.BranchPrefix
+	authorName := behavior.CommitAuthorName
+	authorEmail := behavior.CommitAuthorEmail
+	labels := behavior.Labels
 
 	// Commit and push. The commit message and PR body are identical so the
 	// PR shows the same content that lands as the merge commit.

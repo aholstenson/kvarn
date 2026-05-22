@@ -13,7 +13,18 @@ import (
 )
 
 type fileData struct {
-	Forges map[string]*forgeEntry `toml:"forges"`
+	// Defaults is a pointer with omitempty so a config without a [defaults]
+	// block round-trips through Put without gaining an empty table.
+	Defaults *defaultsEntry         `toml:"defaults,omitempty"`
+	Forges   map[string]*forgeEntry `toml:"forges"`
+}
+
+// defaultsEntry mirrors the forge-wide [defaults] block in forges.toml.
+type defaultsEntry struct {
+	BranchPrefix      string   `toml:"branch_prefix,omitempty"`
+	Labels            []string `toml:"labels,omitempty"`
+	CommitAuthorName  string   `toml:"commit_author_name,omitempty"`
+	CommitAuthorEmail string   `toml:"commit_author_email,omitempty"`
 }
 
 type forgeEntry struct {
@@ -105,6 +116,31 @@ func (s *Store) List(_ context.Context) ([]*forgeconfig.ForgeConfig, error) {
 		result = append(result, entryToConfig(name, entry))
 	}
 	return result, nil
+}
+
+// Defaults returns the parsed [defaults] block. A missing block or file yields
+// a zero-value Defaults with no error so callers can layer built-in fallbacks
+// via forgeconfig.ResolveBehavior.
+func (s *Store) Defaults(_ context.Context) (forgeconfig.Defaults, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	fd, err := s.load()
+	if err != nil {
+		return forgeconfig.Defaults{}, err
+	}
+	if fd.Defaults == nil {
+		return forgeconfig.Defaults{}, nil
+	}
+
+	labels := make([]string, len(fd.Defaults.Labels))
+	copy(labels, fd.Defaults.Labels)
+	return forgeconfig.Defaults{
+		BranchPrefix:      fd.Defaults.BranchPrefix,
+		CommitAuthorName:  fd.Defaults.CommitAuthorName,
+		CommitAuthorEmail: fd.Defaults.CommitAuthorEmail,
+		Labels:            labels,
+	}, nil
 }
 
 func (s *Store) Put(_ context.Context, fc *forgeconfig.ForgeConfig) error {

@@ -112,4 +112,59 @@ var _ = Describe("Forge Config TomlStore", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(configs).To(BeEmpty())
 	})
+
+	It("returns zero-value defaults when no [defaults] block is present", func() {
+		Expect(store.Put(ctx, &forgeconfig.ForgeConfig{Name: "a", Type: "github"})).To(Succeed())
+
+		d, err := store.Defaults(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(d).To(Equal(forgeconfig.Defaults{}))
+	})
+
+	It("returns zero-value defaults for a missing file", func() {
+		d, err := store.Defaults(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(d).To(Equal(forgeconfig.Defaults{}))
+	})
+
+	It("parses the [defaults] block", func() {
+		path := filepath.Join(tmpDir, "forges.toml")
+		content := `[defaults]
+branch_prefix       = "bot"
+commit_author_name  = "Global Bot"
+commit_author_email = "global@example.com"
+labels              = ["automated", "kvarn"]
+
+[forges.github-myorg]
+type          = "github"
+branch_prefix = "myorg"
+`
+		Expect(os.WriteFile(path, []byte(content), 0644)).To(Succeed())
+
+		d, err := store.Defaults(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(d.BranchPrefix).To(Equal("bot"))
+		Expect(d.CommitAuthorName).To(Equal("Global Bot"))
+		Expect(d.CommitAuthorEmail).To(Equal("global@example.com"))
+		Expect(d.Labels).To(Equal([]string{"automated", "kvarn"}))
+
+		// The named forge override is still readable alongside the defaults.
+		fc, err := store.Get(ctx, "github-myorg")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fc.BranchPrefix).To(Equal("myorg"))
+	})
+
+	It("preserves an existing [defaults] block across a Put", func() {
+		path := filepath.Join(tmpDir, "forges.toml")
+		content := `[defaults]
+branch_prefix = "bot"
+`
+		Expect(os.WriteFile(path, []byte(content), 0644)).To(Succeed())
+
+		Expect(store.Put(ctx, &forgeconfig.ForgeConfig{Name: "new", Type: "git"})).To(Succeed())
+
+		d, err := store.Defaults(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(d.BranchPrefix).To(Equal("bot"))
+	})
 })

@@ -21,12 +21,16 @@ type jobEntry struct {
 }
 
 type projectEntry struct {
-	Repo           string              `toml:"repo"`
-	DefaultBranch  string              `toml:"default_branch,omitempty"`
-	Forge          string              `toml:"forge,omitempty"`
-	MaxCostUSD     *float64            `toml:"max_cost_usd,omitempty"`
-	ReportCostOnPR *bool               `toml:"report_cost_on_pr,omitempty"`
-	Jobs           map[string]jobEntry `toml:"jobs,omitempty"`
+	Repo              string              `toml:"repo"`
+	DefaultBranch     string              `toml:"default_branch,omitempty"`
+	Forge             string              `toml:"forge,omitempty"`
+	MaxCostUSD        *float64            `toml:"max_cost_usd,omitempty"`
+	ReportCostOnPR    *bool               `toml:"report_cost_on_pr,omitempty"`
+	Jobs              map[string]jobEntry `toml:"jobs,omitempty"`
+	BranchPrefix      string              `toml:"branch_prefix,omitempty"`
+	Labels            []string            `toml:"labels,omitempty"`
+	CommitAuthorName  string              `toml:"commit_author_name,omitempty"`
+	CommitAuthorEmail string              `toml:"commit_author_email,omitempty"`
 }
 
 // Store is a TOML file-backed project store.
@@ -86,14 +90,20 @@ func entryToProject(name string, entry *projectEntry) *project.Project {
 			jobs[mode] = project.JobLimits{MaxCostUSD: j.MaxCostUSD}
 		}
 	}
+	labels := make([]string, len(entry.Labels))
+	copy(labels, entry.Labels)
 	return &project.Project{
-		Name:           name,
-		RepoURL:        entry.Repo,
-		DefaultBranch:  entry.DefaultBranch,
-		Forge:          entry.Forge,
-		MaxCostUSD:     entry.MaxCostUSD,
-		ReportCostOnPR: entry.ReportCostOnPR,
-		Jobs:           jobs,
+		Name:              name,
+		RepoURL:           entry.Repo,
+		DefaultBranch:     entry.DefaultBranch,
+		Forge:             entry.Forge,
+		MaxCostUSD:        entry.MaxCostUSD,
+		ReportCostOnPR:    entry.ReportCostOnPR,
+		Jobs:              jobs,
+		BranchPrefix:      entry.BranchPrefix,
+		Labels:            labels,
+		CommitAuthorName:  entry.CommitAuthorName,
+		CommitAuthorEmail: entry.CommitAuthorEmail,
 	}
 }
 
@@ -106,12 +116,16 @@ func projectToEntry(p *project.Project) *projectEntry {
 		}
 	}
 	return &projectEntry{
-		Repo:           p.RepoURL,
-		DefaultBranch:  p.DefaultBranch,
-		Forge:          p.Forge,
-		MaxCostUSD:     p.MaxCostUSD,
-		ReportCostOnPR: p.ReportCostOnPR,
-		Jobs:           jobs,
+		Repo:              p.RepoURL,
+		DefaultBranch:     p.DefaultBranch,
+		Forge:             p.Forge,
+		MaxCostUSD:        p.MaxCostUSD,
+		ReportCostOnPR:    p.ReportCostOnPR,
+		Jobs:              jobs,
+		BranchPrefix:      p.BranchPrefix,
+		Labels:            p.Labels,
+		CommitAuthorName:  p.CommitAuthorName,
+		CommitAuthorEmail: p.CommitAuthorEmail,
 	}
 }
 

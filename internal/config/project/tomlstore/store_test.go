@@ -91,6 +91,36 @@ var _ = Describe("Project TomlStore", func() {
 		Expect(proj.Forge).To(Equal("my-forge"))
 	})
 
+	It("round-trips per-project PR behavior overrides", func() {
+		Expect(store.Put(ctx, &project.Project{
+			Name:              "app",
+			RepoURL:           "org/app",
+			Forge:             "github",
+			BranchPrefix:      "agent",
+			Labels:            []string{"automated", "needs-review"},
+			CommitAuthorName:  "Project Bot",
+			CommitAuthorEmail: "bot@example.com",
+		})).To(Succeed())
+
+		proj, err := store.Get(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(proj.BranchPrefix).To(Equal("agent"))
+		Expect(proj.Labels).To(Equal([]string{"automated", "needs-review"}))
+		Expect(proj.CommitAuthorName).To(Equal("Project Bot"))
+		Expect(proj.CommitAuthorEmail).To(Equal("bot@example.com"))
+	})
+
+	It("leaves PR behavior overrides empty when unset", func() {
+		Expect(store.Put(ctx, &project.Project{Name: "app", RepoURL: "org/app"})).To(Succeed())
+
+		proj, err := store.Get(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(proj.BranchPrefix).To(BeEmpty())
+		Expect(proj.Labels).To(BeEmpty())
+		Expect(proj.CommitAuthorName).To(BeEmpty())
+		Expect(proj.CommitAuthorEmail).To(BeEmpty())
+	})
+
 	It("handles missing file gracefully", func() {
 		projs, err := store.List(ctx)
 		Expect(err).NotTo(HaveOccurred())

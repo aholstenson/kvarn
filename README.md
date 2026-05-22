@@ -293,6 +293,8 @@ commit_author_name = "kvarn"
 commit_author_email = "kvarn@noreply"
 ```
 
+Only `type` and `credential` are required. `branch_prefix`, `labels`, `commit_author_name`, and `commit_author_email` are optional; any you omit fall back to the `[defaults]` block (below) and then to Kvarn's built-in values (`branch_prefix = "kvarn"`, `labels = ["kvarn"]`, `commit_author_name = "kvarn"`, `commit_author_email = "kvarn@noreply"`).
+
 For a plain Git remote instead of GitHub:
 
 ```toml
@@ -302,6 +304,47 @@ credential = "git-creds"
 ```
 
 Plain Git supports cloning and pushing but cannot create pull requests.
+
+#### Forge defaults
+
+A `[defaults]` block sets behavior shared by every forge, so you only repeat a value in the forges that need to differ:
+
+```toml
+[defaults]
+branch_prefix = "agent"
+labels = ["automated", "kvarn"]
+commit_author_name = "Kvarn Bot"
+commit_author_email = "bot@example.com"
+
+[forges.github]
+type = "github"
+credential = "github"
+labels = ["agent"]   # overrides the default for this forge only
+
+[forges.git]
+type = "git"
+credential = "git-creds"
+# inherits branch_prefix, labels, and commit author from [defaults]
+```
+
+Each field resolves independently, from highest precedence to lowest: a per-project override (see [Per-project PR behavior](#per-project-pr-behavior)), then the named forge, then the `[defaults]` block, then Kvarn's built-in. `labels` are replaced wholesale, not merged — a layer that sets its own `labels` does not inherit the list from below. The `[defaults]` block is optional; omit it to use the built-ins.
+
+#### Per-project PR behavior
+
+A single forge is shared by many projects, but some settings vary per repository — different repos often use different label sets and branch conventions. Set them on the project in `projects.toml` to override the forge for that project only:
+
+```toml
+[projects.my-project]
+repo = "owner/repo"
+default_branch = "main"
+forge = "github"
+branch_prefix = "agent"
+labels = ["automated", "needs-review"]
+commit_author_name = "Project Bot"
+commit_author_email = "bot@example.com"
+```
+
+These are the highest-precedence layer in the cascade above: a value set here wins over the forge, the `[defaults]` block, and the built-ins. Omit any field to inherit it. As elsewhere, `labels` set on the project replace the inherited list rather than extending it.
 
 ### Credentials
 

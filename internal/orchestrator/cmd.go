@@ -99,6 +99,10 @@ func (c *Cmd) Run() error {
 		return fmt.Errorf("create llms manager: %w", err)
 	}
 
+	// One store instance serves both the named forge configs and the global
+	// [defaults] block.
+	forgeStore := forgetoml.New(forgesPath)
+
 	agentsStore := modeltoml.OpenDefault(c.AgentsFile)
 	models, configs, err := modelcfg.Resolve(
 		ctx, mgr,
@@ -111,12 +115,13 @@ func (c *Cmd) Run() error {
 	}
 
 	return run(c.Addr, ServiceOpts{
-		Provider:         p,
-		CreateOpts:       vm.CreateOpts{Image: image},
-		ProjectStore:     projtoml.New(projectsPath),
-		CredentialStore:  credtoml.New(credentialsPath),
-		SecretStore:      secrettoml.New(secretsPath),
-		ForgeConfigStore: forgetoml.New(forgesPath),
+		Provider:           p,
+		CreateOpts:         vm.CreateOpts{Image: image},
+		ProjectStore:       projtoml.New(projectsPath),
+		CredentialStore:    credtoml.New(credentialsPath),
+		SecretStore:        secrettoml.New(secretsPath),
+		ForgeConfigStore:   forgeStore,
+		ForgeDefaultsStore: forgeStore,
 		ForgeTypes: map[string]forge.Forge{
 			"github": forgegithub.New(),
 			"git":    forgegit.New(),

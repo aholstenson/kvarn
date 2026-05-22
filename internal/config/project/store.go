@@ -25,6 +25,16 @@ type Project struct {
 	// Jobs holds per-job-mode overrides keyed by mode name (auto, implement,
 	// fix, review, research). nil/empty means no per-mode overrides.
 	Jobs map[string]JobLimits
+	// The following override the selected forge's PR behavior for this project.
+	// Empty/zero means "inherit from the forge, then the global [defaults], then
+	// the compiled-in constants"; see forge.ForgeConfig.ResolveBehavior. They
+	// live here, not on the forge, because one forge is shared by many projects
+	// and these settings vary per repository (different repos use different label
+	// sets and branch conventions).
+	BranchPrefix      string
+	Labels            []string
+	CommitAuthorName  string
+	CommitAuthorEmail string
 }
 
 // Store provides CRUD operations for projects.
