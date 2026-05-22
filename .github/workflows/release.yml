@@ -1,0 +1,141 @@
+name: release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and upload assets for (dry-run)."
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # Target tag from either trigger: the published release, or the dispatch input.
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  # Build the VM disk image per arch on native runners (the apt/chroot build is
+  # too slow under emulation) and upload the qcow2 plus a per-arch checksum
+  # sidecar the CLI fetches at runtime.
+  image:
+    name: image (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
+      - name: Generate code
+        run: buf generate
+      - name: Build disk image
+        run: ARCH=${{ matrix.arch }} ./image/build-image.sh
+      - name: Package image
+        run: |
+          cp "dist/${{ matrix.arch }}/disk.qcow2" "kvarn-disk-${{ matrix.arch }}.qcow2"
+          sha256sum "kvarn-disk-${{ matrix.arch }}.qcow2" > "kvarn-disk-${{ matrix.arch }}.qcow2.sha256"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            "kvarn-disk-${{ matrix.arch }}.qcow2" \
+            "kvarn-disk-${{ matrix.arch }}.qcow2.sha256" \
+            --clobber
+
+  # Linux CLI binaries, cross-compiled on one runner (no CGO needed).
+  cli-linux:
+    name: cli-linux (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
+      - name: Generate code
+        run: buf generate
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          go build \
+            -ldflags "-s -w -X github.com/aholstenson/kvarn/internal/buildinfo.Version=${TAG}" \
+            -o kvarn ./cmd/kvarn
+      - name: Package
+        run: |
+          tar czf "kvarn_${TAG}_linux_${{ matrix.arch }}.tar.gz" kvarn
+          sha256sum "kvarn_${TAG}_linux_${{ matrix.arch }}.tar.gz" > "kvarn_${TAG}_linux_${{ matrix.arch }}.tar.gz.sha256"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            "kvarn_${TAG}_linux_${{ matrix.arch }}.tar.gz" \
+            "kvarn_${TAG}_linux_${{ matrix.arch }}.tar.gz.sha256" \
+            --clobber
+
+  # macOS CLI binaries. CGO + Virtualization.framework can't be cross-compiled
+  # from Linux, so this runs on macOS; ad-hoc codesigning grants the
+  # virtualization entitlement (without it `kvarn run`/`test` fail).
+  cli-darwin:
+    name: cli-darwin (${{ matrix.arch }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, amd64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
+      - name: Generate code
+        run: buf generate
+      - name: Build
+        env:
+          CGO_ENABLED: "1"
+          GOOS: darwin
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          go build \
+            -ldflags "-s -w -X github.com/aholstenson/kvarn/internal/buildinfo.Version=${TAG}" \
+            -o kvarn ./cmd/kvarn
+      - name: Ad-hoc codesign
+        run: codesign -f --entitlements entitlements.plist -s - kvarn
+      - name: Package
+        run: |
+          zip "kvarn_${TAG}_darwin_${{ matrix.arch }}.zip" kvarn
+          shasum -a 256 "kvarn_${TAG}_darwin_${{ matrix.arch }}.zip" > "kvarn_${TAG}_darwin_${{ matrix.arch }}.zip.sha256"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            "kvarn_${TAG}_darwin_${{ matrix.arch }}.zip" \
+            "kvarn_${TAG}_darwin_${{ matrix.arch }}.zip.sha256" \
+            --clobber

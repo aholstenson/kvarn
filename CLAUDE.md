@@ -52,6 +52,11 @@ task image:clean         # remove dist/
 - Output: `dist/<arch>/disk.qcow2` — one self-contained image per arch.
 - The runner binary is baked into the image, so the image and the CLI/orchestrator are version-coupled by convention: the same release tag builds both.
 
+### Release flow
+
+- Pushes to `main` drive Release Please (`.github/workflows/release-please.yml`), which maintains a release PR from Conventional Commits. Merging it tags `vX.Y.Z` and publishes a GitHub Release.
+- `.github/workflows/release.yml` then builds and uploads, per arch, `kvarn-disk-<arch>.qcow2` + `.sha256` and the `kvarn` CLI binaries (`.tar.gz`/`.zip` + `.sha256`).
+- At runtime, VM commands resolve the image via `vm.EnsureDiskImage`: explicit `--disk-image-path` → local `dist/`/system paths → per-version user cache → download from the release. Downloads are checksum-verified and cached at `~/.cache/kvarn/images/<version>/<arch>/disk.qcow2`. `KVARN_IMAGE_VERSION` (or `--version` on `kvarn image`) overrides the version; `kvarn image pull` pre-seeds the cache.
 
 ## Comments and documentation
 
