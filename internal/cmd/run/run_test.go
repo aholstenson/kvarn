@@ -193,6 +193,14 @@ var _ = Describe("summaryState.finish", func() {
 		Expect(out.String()).To(ContainSubstring("applied 2 files"))
 	})
 
+	It("includes the agent tool count when nonzero", func() {
+		s := &summaryState{passed: 1, agentTools: 5}
+		var out bytes.Buffer
+		err := s.finish(&out, nil, "", 0, 0)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out.String()).To(ContainSubstring("agent: ok (5 tools)"))
+	})
+
 	It("returns an error when required validation failed", func() {
 		s := &summaryState{requiredFailed: true, failed: 1}
 		err := s.finish(io.Discard, nil, "diff", 0, 0)
@@ -209,64 +217,102 @@ var _ = Describe("summaryState.finish", func() {
 })
 
 var _ = Describe("makeProgressCallback", func() {
-	It("updates the parent suffix on ToolUse and logs a check on ToolResult", func() {
+	It("adds a running item per tool call and freezes it on result", func() {
 		renderer := taskui.New(io.Discard, false)
-		parent := renderer.AddItem("Agent")
 		var count int
-		cb := makeProgressCallback(renderer, parent, &count)
+		cb, _ := makeProgressCallback(renderer, &count)
 
 		cb(agent.ProgressToolUse{ToolID: "read_file", ArgumentsJSON: `{"path":"x"}`})
 		Expect(count).To(Equal(1))
-		Expect(parent.Children).To(BeEmpty())
-		Expect(parent.Suffix).To(ContainSubstring("read_file"))
-		Expect(parent.Suffix).To(ContainSubstring("1 tools"))
+		items := renderer.Items()
+		Expect(items).To(HaveLen(1))
+		Expect(items[0].Name).To(ContainSubstring("read_file"))
+		Expect(items[0].Name).To(ContainSubstring(`{"path":"x"}`))
+		Expect(items[0].Status).To(Equal(taskui.StatusRunning))
 
 		cb(agent.ProgressToolResult{ToolID: "read_file", Result: "ok"})
-		Expect(parent.Output).To(ContainElement(ContainSubstring("✓ read_file")))
-		Expect(parent.Output[len(parent.Output)-1]).To(ContainSubstring(`{"path":"x"}`))
+		Expect(items[0].Status).To(Equal(taskui.StatusPassed))
 	})
 
 	It("pairs overlapping calls to the same tool via FIFO order", func() {
 		renderer := taskui.New(io.Discard, false)
-		parent := renderer.AddItem("Agent")
 		var count int
-		cb := makeProgressCallback(renderer, parent, &count)
+		cb, _ := makeProgressCallback(renderer, &count)
 
 		cb(agent.ProgressToolUse{ToolID: "read_file", ArgumentsJSON: `{"path":"a"}`})
 		cb(agent.ProgressToolUse{ToolID: "read_file", ArgumentsJSON: `{"path":"b"}`})
-		cb(agent.ProgressToolResult{ToolID: "read_file"})
+		cb(agent.ProgressToolResult{ToolID: "read_file", Result: "bad", IsError: true})
 		cb(agent.ProgressToolResult{ToolID: "read_file"})
 
 		Expect(count).To(Equal(2))
-		Expect(parent.Output).To(HaveLen(2))
-		Expect(parent.Output[0]).To(ContainSubstring(`{"path":"a"}`))
-		Expect(parent.Output[1]).To(ContainSubstring(`{"path":"b"}`))
+		items := renderer.Items()
+		Expect(items).To(HaveLen(2))
+		// The first result resolves the first call (path a), the second the
+		// second call (path b).
+		Expect(items[0].Name).To(ContainSubstring(`{"path":"a"}`))
+		Expect(items[0].Status).To(Equal(taskui.StatusFailed))
+		Expect(items[1].Name).To(ContainSubstring(`{"path":"b"}`))
+		Expect(items[1].Status).To(Equal(taskui.StatusPassed))
 	})
 
-	It("marks the result line with ✗ and the first error line on IsError", func() {
+	It("records the first error line on a failed result", func() {
 		renderer := taskui.New(io.Discard, false)
-		parent := renderer.AddItem("Agent")
 		var count int
-		cb := makeProgressCallback(renderer, parent, &count)
+		cb, _ := makeProgressCallback(renderer, &count)
 
 		cb(agent.ProgressToolUse{ToolID: "edit_file", ArgumentsJSON: "{}"})
 		cb(agent.ProgressToolResult{ToolID: "edit_file", Result: "no such file\n(more details)", IsError: true})
 
-		Expect(parent.Output).To(HaveLen(1))
-		Expect(parent.Output[0]).To(HavePrefix("✗ edit_file"))
-		Expect(parent.Output[0]).To(ContainSubstring("no such file"))
-		Expect(parent.Output[0]).NotTo(ContainSubstring("(more details)"))
+		items := renderer.Items()
+		Expect(items).To(HaveLen(1))
+		Expect(items[0].Status).To(Equal(taskui.StatusFailed))
+		Expect(items[0].Output).To(HaveLen(1))
+		Expect(items[0].Output[0]).To(Equal("no such file"))
+		Expect(items[0].Output[0]).NotTo(ContainSubstring("(more details)"))
 	})
 
-	It("appends text messages as output under the parent", func() {
+	It("renders text replies as notes", func() {
 		renderer := taskui.New(io.Discard, false)
-		parent := renderer.AddItem("Agent")
 		var count int
-		cb := makeProgressCallback(renderer, parent, &count)
+		cb, _ := makeProgressCallback(renderer, &count)
 
 		cb(agent.ProgressTextMessage{Text: "Thinking...\nNext step"})
-		Expect(parent.Output).To(ContainElement(ContainSubstring("Thinking...")))
-		Expect(parent.Output).To(ContainElement(ContainSubstring("Next step")))
+		items := renderer.Items()
+		Expect(items).To(HaveLen(1))
+		Expect(items[0].Note).To(BeTrue())
+		Expect(items[0].Name).To(Equal("Thinking...\nNext step"))
+	})
+
+	It("ignores empty text replies", func() {
+		renderer := taskui.New(io.Discard, false)
+		var count int
+		cb, _ := makeProgressCallback(renderer, &count)
+
+		cb(agent.ProgressTextMessage{Text: "\n  \n"})
+		Expect(renderer.Items()).To(BeEmpty())
+	})
+
+	It("finalize resolves tool calls left running without a result", func() {
+		renderer := taskui.New(io.Discard, false)
+		var count int
+		cb, finalize := makeProgressCallback(renderer, &count)
+
+		// A tool whose handler errored never emits a result event.
+		cb(agent.ProgressToolUse{AgentID: "researcher/abc", ToolID: "dispatch"})
+		// A second, normal call that does complete.
+		cb(agent.ProgressToolUse{ToolID: "read_file", ArgumentsJSON: "{}"})
+		cb(agent.ProgressToolResult{ToolID: "read_file"})
+
+		items := renderer.Items()
+		Expect(items).To(HaveLen(2))
+		Expect(items[0].Status).To(Equal(taskui.StatusRunning))
+		Expect(items[1].Status).To(Equal(taskui.StatusPassed))
+
+		finalize()
+		Expect(items[0].Status).To(Equal(taskui.StatusFailed))
+		Expect(items[0].Suffix).To(Equal("(no result)"))
+		// Already-resolved items are untouched.
+		Expect(items[1].Status).To(Equal(taskui.StatusPassed))
 	})
 })
 

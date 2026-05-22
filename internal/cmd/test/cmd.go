@@ -240,11 +240,24 @@ func (c *Cmd) Run() error {
 		renderer.Stop()
 		return err
 	}
-	defer func() {
+	// shutdown tears the sandbox down as a visible step. It is idempotent so
+	// the success path can render it before printing the summary, while the
+	// defer still guarantees cleanup on early returns. The renderer must be
+	// stopped before any raw stdout (the summary) is written, otherwise that
+	// output races the spinner and corrupts the redraw.
+	shutdownDone := false
+	shutdown := func() {
+		if shutdownDone {
+			return
+		}
+		shutdownDone = true
 		closeItem := renderer.AddItem("Shutting down sandbox")
 		renderer.SetStatus(closeItem, taskui.StatusRunning, "")
 		sess.Close()
 		renderer.SetStatus(closeItem, taskui.StatusPassed, "")
+	}
+	defer func() {
+		shutdown()
 		renderer.Stop()
 	}()
 
@@ -433,6 +446,8 @@ func (c *Cmd) Run() error {
 		}
 	}
 
+	shutdown()
+	renderer.Stop()
 	return summary.finish(nil)
 }
 

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"errors"
 	llms "github.com/aholstenson/llms-go"
@@ -310,12 +311,10 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		renderer.Stop()
 		return err
 	}
-	defer func() {
-		closeItem := renderer.AddItem("Shutting down sandbox")
-		renderer.SetStatus(closeItem, taskui.StatusRunning, "")
-		sess.Close()
-		renderer.SetStatus(closeItem, taskui.StatusPassed, "")
-	}()
+	// The sandbox must outlive diff/apply extraction (which runs after the
+	// renderer is stopped), so teardown is deferred to the very end and is not
+	// shown as a TUI step.
+	defer sess.Close()
 
 	markLastProvisionDone()
 
@@ -427,18 +426,20 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		renderer.SetStatus(healthItem, parentStatus(healthItem), "")
 	}
 
-	// Agent. A single parent item shows the running spinner; the current
-	// tool name lives in its suffix and completed tools / text messages
-	// stream as output lines under it. The taskui's rolling buffer trims
-	// the live view; verbose mode prints the full transcript at the end.
-	agentItem := renderer.AddItem("Agent")
-	renderer.SetStatus(agentItem, taskui.StatusRunning, "")
+	// Agent. Each tool call becomes its own item that freezes with its result
+	// as the next call starts, and the agent's text replies appear as notes
+	// between them. The renderer commits this stream to the scrollback as it
+	// goes, so a long run reads top-to-bottom as "call, output, call, output"
+	// while the live view stays bounded to the in-flight tool.
+	renderer.AddSection("Agent")
 
 	branch := currentBranch(c.Dir)
 	var toolCount int
 	tracker := cost.NewTracker(cost.TrackerOpts{
 		Pricing: llms.NewPricingManager(slog.Default()),
 	})
+	agentStart := time.Now()
+	progress, finalizeProgress := makeProgressCallback(renderer, &toolCount)
 	agentCtx := &agent.Context{
 		ProjectName: filepath.Base(absDir),
 		Branch:      branch,
@@ -448,20 +449,18 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		Mode:        mode,
 		Runner:      sess.GetRunner(),
 		RepoContext: rc,
-		OnProgress:  makeProgressCallback(renderer, agentItem, &toolCount),
+		OnProgress:  progress,
 		Cost:        tracker,
 	}
 
 	agentResult, agentErr := deps.Agent.Run(ctx, agentCtx)
-	finalSuffix := ""
-	if toolCount > 0 {
-		finalSuffix = fmt.Sprintf("%d tools", toolCount)
-	}
+	// Resolve any tool items left running because the LLM stream omitted a
+	// result event for a failed tool handler.
+	finalizeProgress()
+	summary.agentTools = toolCount
+	summary.agentDuration = time.Since(agentStart)
 	if agentErr != nil {
-		renderer.SetStatus(agentItem, taskui.StatusFailed, finalSuffix)
 		summary.agentFailed = true
-	} else {
-		renderer.SetStatus(agentItem, taskui.StatusPassed, finalSuffix)
 	}
 
 	// Validation. Always runs, even when the agent errored — the user may
@@ -649,59 +648,66 @@ func classifyChanges(ctx context.Context, runner sandbox.RunnerProxy, workdir st
 	return added, modified, deleted, nil
 }
 
-// makeProgressCallback builds an OnProgress callback that surfaces agent
-// activity on a single parent item: the suffix shows the running tool and
-// a running count, and completed tools + text messages stream as output
-// lines under the parent (subject to taskui's rolling buffer). Each
-// callback bumps *toolCount so the caller can put the final total in the
-// completion suffix.
+// makeProgressCallback builds an OnProgress callback that renders agent
+// activity as a stream of items under the "Agent" section: each ToolUse adds a
+// running item (labelled with the tool and a short argument preview), the
+// matching ToolResult freezes it as passed or failed, and text replies become
+// dim notes in between. Each callback bumps *toolCount for the final summary.
 //
-// ToolUse arguments are queued in a FIFO per (agentID, toolID) so that
-// when many calls to the same tool overlap, each ToolResult can be paired
-// with the args of its corresponding ToolUse.
-func makeProgressCallback(renderer *taskui.Renderer, parent *taskui.Item, toolCount *int) func(agent.ProgressEvent) {
-	pendingArgs := make(map[string][]string)
-	return func(event agent.ProgressEvent) {
+// ToolUse items are queued in a FIFO per (agentID, toolID) so that when many
+// calls to the same tool overlap, each ToolResult resolves the item of its
+// corresponding ToolUse.
+//
+// The returned finalize must be called once the agent run completes. The
+// underlying LLM stream does not emit a result event for a tool whose handler
+// returned an error (a sub-agent dispatch that fails is the common case), so
+// those items would otherwise stay "running" indefinitely; finalize resolves
+// any still-pending items so nothing spins after the run is over.
+func makeProgressCallback(renderer *taskui.Renderer, toolCount *int) (func(agent.ProgressEvent), func()) {
+	pending := make(map[string][]*taskui.Item)
+	cb := func(event agent.ProgressEvent) {
 		switch e := event.(type) {
 		case agent.ProgressToolUse:
 			*toolCount++
-			label := toolLabel(e.AgentID, e.ToolID)
-			args := shortArgs(e.ArgumentsJSON)
-			suffix := fmt.Sprintf("%s (%d tools)", label, *toolCount)
-			if args != "" {
-				suffix = fmt.Sprintf("%s %s (%d tools)", label, args, *toolCount)
+			name := toolLabel(e.AgentID, e.ToolID)
+			if args := shortArgs(e.ArgumentsJSON); args != "" {
+				name += " " + args
 			}
-			renderer.SetStatus(parent, taskui.StatusRunning, suffix)
+			item := renderer.AddItem(name)
+			renderer.SetStatus(item, taskui.StatusRunning, "")
 			key := toolKey(e.AgentID, e.ToolID)
-			pendingArgs[key] = append(pendingArgs[key], args)
+			pending[key] = append(pending[key], item)
 		case agent.ProgressToolResult:
 			key := toolKey(e.AgentID, e.ToolID)
-			args := ""
-			if q := pendingArgs[key]; len(q) > 0 {
-				args = q[0]
-				pendingArgs[key] = q[1:]
+			q := pending[key]
+			if len(q) == 0 {
+				return
 			}
-			label := toolLabel(e.AgentID, e.ToolID)
-			marker := "✓"
+			item := q[0]
+			pending[key] = q[1:]
 			if e.IsError {
-				marker = "✗"
-			}
-			line := fmt.Sprintf("%s %s", marker, label)
-			if args != "" {
-				line += " " + args
-			}
-			if e.IsError && e.Result != "" {
-				line += ": " + firstLine(e.Result)
-			}
-			renderer.AppendOutput(parent, line)
-		case agent.ProgressTextMessage:
-			for _, line := range strings.Split(strings.TrimRight(e.Text, "\n"), "\n") {
-				if line != "" {
-					renderer.AppendOutput(parent, line)
+				renderer.SetStatus(item, taskui.StatusFailed, "")
+				if e.Result != "" {
+					renderer.AppendOutput(item, firstLine(e.Result))
 				}
+			} else {
+				renderer.SetStatus(item, taskui.StatusPassed, "")
+			}
+		case agent.ProgressTextMessage:
+			if text := strings.TrimRight(e.Text, "\n"); strings.TrimSpace(text) != "" {
+				renderer.AddNote(text)
 			}
 		}
 	}
+	finalize := func() {
+		for key, q := range pending {
+			for _, item := range q {
+				renderer.SetStatus(item, taskui.StatusFailed, "(no result)")
+			}
+			delete(pending, key)
+		}
+	}
+	return cb, finalize
 }
 
 func toolLabel(agentID, toolID string) string {
@@ -841,6 +847,8 @@ type summaryState struct {
 	failedDetails  []stepOutput
 	requiredFailed bool
 	agentFailed    bool
+	agentTools     int
+	agentDuration  time.Duration
 }
 
 type stepOutput struct {
@@ -869,11 +877,14 @@ func (s *summaryState) finish(out io.Writer, err error, mode string, diffLines i
 	}
 
 	var parts []string
+	agentPart := "agent: ok"
 	if s.agentFailed {
-		parts = append(parts, "agent: failed")
-	} else {
-		parts = append(parts, "agent: ok")
+		agentPart = "agent: failed"
 	}
+	if s.agentTools > 0 {
+		agentPart += fmt.Sprintf(" (%d tools)", s.agentTools)
+	}
+	parts = append(parts, agentPart)
 	switch mode {
 	case "diff":
 		parts = append(parts, fmt.Sprintf("diff: %d lines", diffLines))
