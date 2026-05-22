@@ -20,7 +20,7 @@ type Cmd struct {
 // PullCmd downloads the disk image into the user cache, overwriting any cached
 // copy, so it can be pre-seeded for offline use.
 type PullCmd struct {
-	Version string `help:"Image version to download (e.g. v0.1.0). Defaults to the CLI build version." env:"KVARN_IMAGE_VERSION"`
+	Version string `help:"Image version or semver range to download (e.g. 0.1.0 or '>=0.1.0 <0.2.0'). Defaults to the build's compiled-in image constraint." env:"KVARN_IMAGE_VERSION"`
 	Arch    string `help:"Image architecture (arm64 or amd64). Defaults to the host architecture."`
 }
 
@@ -45,7 +45,7 @@ func (c *PullCmd) Run() error {
 // PathCmd prints the resolved disk image path, downloading it first unless
 // --no-download is set.
 type PathCmd struct {
-	Version    string `help:"Image version to resolve (e.g. v0.1.0). Defaults to the CLI build version." env:"KVARN_IMAGE_VERSION"`
+	Version    string `help:"Image version or semver range to resolve (e.g. 0.1.0 or '>=0.1.0 <0.2.0'). Defaults to the build's compiled-in image constraint." env:"KVARN_IMAGE_VERSION"`
 	Arch       string `help:"Image architecture (arm64 or amd64). Defaults to the host architecture."`
 	NoDownload bool   `help:"Only resolve a local or cached image; never download." name:"no-download"`
 }

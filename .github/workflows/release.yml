@@ -17,47 +17,12 @@ env:
   TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
-  # Build the VM disk image per arch on native runners (the apt/chroot build is
-  # too slow under emulation) and upload the qcow2 plus a per-arch checksum
-  # sidecar the CLI fetches at runtime.
-  image:
-    name: image (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-          - arch: amd64
-            runner: ubuntu-24.04
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: bufbuild/buf-setup-action@v1
-        with:
-          github_token: ${{ github.token }}
-      - name: Generate code
-        run: buf generate
-      - name: Build disk image
-        run: ARCH=${{ matrix.arch }} ./image/build-image.sh
-      - name: Package image
-        run: |
-          cp "dist/${{ matrix.arch }}/disk.qcow2" "kvarn-disk-${{ matrix.arch }}.qcow2"
-          sha256sum "kvarn-disk-${{ matrix.arch }}.qcow2" > "kvarn-disk-${{ matrix.arch }}.qcow2.sha256"
-      - name: Upload to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "$TAG" \
-            "kvarn-disk-${{ matrix.arch }}.qcow2" \
-            "kvarn-disk-${{ matrix.arch }}.qcow2.sha256" \
-            --clobber
-
-  # Linux CLI binaries, cross-compiled on one runner (no CGO needed).
+  # Linux CLI binaries, cross-compiled on one runner (no CGO needed). The image
+  # is built and published separately by image-release.yml on image-v* tags.
   cli-linux:
+    # `release: published` fires for every release (including image-v*); only
+    # build the CLI for CLI tags.
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v') }}
     name: cli-linux (${{ matrix.arch }})
     runs-on: ubuntu-24.04
     strategy:
@@ -74,13 +39,22 @@ jobs:
           github_token: ${{ github.token }}
       - name: Generate code
         run: buf generate
-      - name: Build
+      - name: Build runner
         env:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.arch }}
         run: |
           go build \
+            -ldflags "-s -w -X github.com/aholstenson/kvarn/internal/buildinfo.Version=${TAG}" \
+            -o internal/runnerbin/kvarn-runner ./cmd/runner
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          go build -tags embedrunner \
             -ldflags "-s -w -X github.com/aholstenson/kvarn/internal/buildinfo.Version=${TAG}" \
             -o kvarn ./cmd/kvarn
       - name: Package
@@ -100,6 +74,7 @@ jobs:
   # from Linux, so this runs on macOS; ad-hoc codesigning grants the
   # virtualization entitlement (without it `kvarn run`/`test` fail).
   cli-darwin:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v') }}
     name: cli-darwin (${{ matrix.arch }})
     runs-on: macos-14
     strategy:
@@ -116,13 +91,22 @@ jobs:
           github_token: ${{ github.token }}
       - name: Generate code
         run: buf generate
+      - name: Build runner
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          go build \
+            -ldflags "-s -w -X github.com/aholstenson/kvarn/internal/buildinfo.Version=${TAG}" \
+            -o internal/runnerbin/kvarn-runner ./cmd/runner
       - name: Build
         env:
           CGO_ENABLED: "1"
           GOOS: darwin
           GOARCH: ${{ matrix.arch }}
         run: |
-          go build \
+          go build -tags embedrunner \
             -ldflags "-s -w -X github.com/aholstenson/kvarn/internal/buildinfo.Version=${TAG}" \
             -o kvarn ./cmd/kvarn
       - name: Ad-hoc codesign

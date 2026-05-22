@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/egress/link"
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 	"github.com/aholstenson/kvarn/internal/project"
+	"github.com/aholstenson/kvarn/internal/runnerbin"
 	"github.com/aholstenson/kvarn/internal/vm"
 	"github.com/aholstenson/kvarn/internal/vm/disk"
 	"github.com/cockroachdb/errors"
@@ -130,11 +132,20 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 		return nil, nil, errors.Wrap(err, "generate proxy CA")
 	}
 
-	// Create cloud-init seed disk with per-VM token, vsock port, and CA.
+	// Local providers always boot host-arch VMs, so the embedded runner for
+	// runtime.GOARCH is exactly what the guest needs.
+	runnerBin, err := runnerbin.Bytes(runtime.GOARCH)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "load embedded runner")
+	}
+
+	// Create cloud-init seed disk with per-VM token, vsock port, CA, and the
+	// runner binary the in-VM setup script stages.
 	tmpSeed = tmpDisk + ".cidata.iso"
 	if err := disk.CreateCloudInitDisk(tmpSeed, disk.CloudInitOpts{
 		Token:     token,
 		VsockPort: vsockPort,
+		Runner:    runnerBin,
 		ProxyCA:   ca.CertPEM(),
 	}); err != nil {
 		return nil, nil, errors.Wrap(err, "create cloud-init seed disk")

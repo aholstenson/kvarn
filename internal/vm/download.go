@@ -4,14 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/aholstenson/kvarn/internal/buildinfo"
 	"github.com/cockroachdb/errors"
 )
@@ -27,6 +30,15 @@ const downloadWaitTimeout = 10 * time.Minute
 // releaseBaseURL is the base URL for release asset downloads. It is a package
 // var so tests can point it at an httptest server.
 var releaseBaseURL = "https://github.com/" + buildinfo.Repo + "/releases/download"
+
+// imageIndexTag is the perpetual release that hosts the image manifest. It is
+// clobbered on every image release, so a fixed URL avoids a per-boot GitHub
+// API call to discover available images.
+const imageIndexTag = "image-index"
+
+// imageManifestName is the manifest asset listing every published image
+// version and the arches it was built for.
+const imageManifestName = "images.json"
 
 // userCacheDir locates the user cache root. It is a var so tests can redirect
 // the image cache to a temp dir.
@@ -86,7 +98,7 @@ func downloadDiskImage(ctx context.Context, version, arch string, progress func(
 		return dest, nil
 	}
 
-	assetURL := fmt.Sprintf("%s/%s/kvarn-disk-%s.qcow2", releaseBaseURL, version, arch)
+	assetURL := fmt.Sprintf("%s/%s/kvarn-disk-%s.qcow2", releaseBaseURL, imageReleaseTag(version), arch)
 	wantSum, err := fetchChecksum(ctx, assetURL+".sha256")
 	if err != nil {
 		return "", err
@@ -223,6 +235,80 @@ func waitForDownload(ctx context.Context, dest, lockPath string) (string, error)
 			}
 		}
 	}
+}
+
+// imageReleaseTag maps a concrete image version to its GitHub release tag.
+// Images are released independently of the CLI under image-v<X.Y.Z> tags, so
+// the version is normalized (any leading "v" stripped) before re-prefixing.
+func imageReleaseTag(version string) string {
+	return "image-v" + strings.TrimPrefix(version, "v")
+}
+
+// imageManifest is the schema of the images.json asset on the image-index
+// release.
+type imageManifest struct {
+	Images []imageManifestEntry `json:"images"`
+}
+
+type imageManifestEntry struct {
+	Version string   `json:"version"`
+	Arches  []string `json:"arches"`
+}
+
+// fetchImageManifest downloads and parses images.json from the image-index
+// release.
+func fetchImageManifest(ctx context.Context) (*imageManifest, error) {
+	url := fmt.Sprintf("%s/%s/%s", releaseBaseURL, imageIndexTag, imageManifestName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "build image manifest request")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, errors.Wrapf(err, "download image manifest %s", url)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.Newf("download image manifest %s: unexpected status %s", url, resp.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, errors.Wrapf(err, "read image manifest %s", url)
+	}
+	var m imageManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, errors.Wrapf(err, "parse image manifest %s", url)
+	}
+	return &m, nil
+}
+
+// resolveImageVersion fetches the published image manifest and returns the
+// highest concrete version satisfying cs that was built for arch.
+func resolveImageVersion(ctx context.Context, cs *semver.Constraints, arch string) (string, error) {
+	m, err := fetchImageManifest(ctx)
+	if err != nil {
+		return "", err
+	}
+	var best *semver.Version
+	for _, img := range m.Images {
+		if !slices.Contains(img.Arches, arch) {
+			continue
+		}
+		v, err := semver.NewVersion(img.Version)
+		if err != nil {
+			continue
+		}
+		if !cs.Check(v) {
+			continue
+		}
+		if best == nil || v.GreaterThan(best) {
+			best = v
+		}
+	}
+	if best == nil {
+		return "", errors.Newf("no published image satisfies %q for %s", cs.String(), arch)
+	}
+	return best.String(), nil
 }
 
 // countingWriter reports cumulative byte counts to a progress callback.

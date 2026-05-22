@@ -1,0 +1,95 @@
+name: image-release
+
+# Builds and publishes the VM disk image independently of the CLI. Release
+# Please cuts an image-v<X.Y.Z> release only when image/ changed, so this
+# workflow runs exactly when a new image is needed. The runner is no longer
+# baked in — the image is purely the base OS userspace.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing image-v* release tag to build and upload assets for (dry-run)."
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # Target tag from either trigger: the published release, or the dispatch input.
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  # Build the VM disk image per arch on native runners (the apt/chroot build is
+  # too slow under emulation) and upload the qcow2 plus a per-arch checksum
+  # sidecar the CLI fetches at runtime.
+  image:
+    # `release: published` fires for every release; only act on image tags.
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'image-v') }}
+    name: image (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build disk image
+        run: ARCH=${{ matrix.arch }} ./image/build-image.sh
+      - name: Package image
+        run: |
+          cp "dist/${{ matrix.arch }}/disk.qcow2" "kvarn-disk-${{ matrix.arch }}.qcow2"
+          sha256sum "kvarn-disk-${{ matrix.arch }}.qcow2" > "kvarn-disk-${{ matrix.arch }}.qcow2.sha256"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            "kvarn-disk-${{ matrix.arch }}.qcow2" \
+            "kvarn-disk-${{ matrix.arch }}.qcow2.sha256" \
+            --clobber
+
+  # Regenerate images.json (appending this version) and clobber it onto the
+  # perpetual image-index release, so the CLI can resolve its image constraint
+  # without a per-boot GitHub API call.
+  manifest:
+    needs: [image]
+    name: manifest
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute version
+        run: echo "VERSION=${TAG#image-v}" >> "$GITHUB_ENV"
+      - name: Ensure image-index release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view image-index >/dev/null 2>&1 || \
+            gh release create image-index \
+              --title "Image index" \
+              --notes "Perpetual release hosting images.json, the VM image manifest. Clobbered on every image release." \
+              --prerelease
+      - name: Fetch existing manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release download image-index --pattern images.json --clobber 2>/dev/null; then
+            echo '{"images":[]}' > images.json
+          fi
+      - name: Update manifest
+        run: |
+          jq --arg v "$VERSION" '
+            .images |= ( map(select(.version != $v)) + [{version: $v, arches: ["arm64", "amd64"]}] | sort_by(.version) )
+          ' images.json > images.json.tmp
+          mv images.json.tmp images.json
+          cat images.json
+      - name: Publish manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload image-index images.json --clobber

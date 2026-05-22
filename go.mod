@@ -5,6 +5,7 @@ go 1.26
 require (
 	connectrpc.com/connect v1.19.1
 	github.com/Code-Hex/vz/v3 v3.7.1
+	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/aholstenson/llms-go v0.1.0
 	github.com/alecthomas/kong v1.15.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
@@ -33,7 +34,6 @@ require (
 	cloud.google.com/go/compute/metadata v0.7.0 // indirect
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/Code-Hex/go-infinity-channel v1.0.0 // indirect
-	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.1.6 // indirect
 	github.com/anchore/go-lzo v0.1.0 // indirect

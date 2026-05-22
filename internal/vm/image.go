@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/aholstenson/kvarn/internal/buildinfo"
 	"github.com/cockroachdb/errors"
 )
@@ -100,16 +101,17 @@ func ResolveDiskImagePath() (string, error) {
 }
 
 // EnsureDiskImage resolves the VM disk image, downloading a released image into
-// the user cache when no local copy is found. Resolution order:
-//  1. opts.Path explicit override
-//  2. local dist/ + well-known system paths
-//  3. per-version user cache
-//  4. download from the GitHub release (released versions, an explicit version
-//     override, or opts.ForceDownload)
+// the user cache when no local copy is found.
 //
-// The effective version defaults to the CLI build version, overridden by the
-// KVARN_IMAGE_VERSION env var, then opts.Version. A non-release version with no
-// local image yields an error pointing at `task image:build`.
+// The version input is opts.Version, then the KVARN_IMAGE_VERSION env var, then
+// the compiled-in buildinfo.ImageConstraint. If it is a concrete version
+// (e.g. "0.1.0") the image is resolved by exact path/cache/download. If it is a
+// semver range (e.g. ">=0.1.0 <0.2.0") it is satisfied by the highest matching
+// version, preferring a local dist/ image, then any matching cached image, then
+// the highest match in the published image manifest.
+//
+// Resolution always honors opts.Path (verbatim), opts.ForceDownload, and
+// opts.NoDownload.
 func EnsureDiskImage(ctx context.Context, opts DownloadOpts) (string, error) {
 	if opts.Path != "" {
 		if _, err := os.Stat(opts.Path); err != nil {
@@ -124,7 +126,7 @@ func EnsureDiskImage(ctx context.Context, opts DownloadOpts) (string, error) {
 	}
 	explicitVersion := version != ""
 	if version == "" {
-		version = buildinfo.Version
+		version = buildinfo.ImageConstraint
 	}
 
 	arch := opts.Arch
@@ -132,6 +134,16 @@ func EnsureDiskImage(ctx context.Context, opts DownloadOpts) (string, error) {
 		arch = runtime.GOARCH
 	}
 
+	if buildinfo.IsVersionRange(version) {
+		return ensureDiskImageForConstraint(ctx, version, arch, opts)
+	}
+
+	return ensureConcreteDiskImage(ctx, version, arch, explicitVersion, opts)
+}
+
+// ensureConcreteDiskImage resolves an exact image version: a local dist/ image,
+// the per-version cache, or a download of that release.
+func ensureConcreteDiskImage(ctx context.Context, version, arch string, explicitVersion bool, opts DownloadOpts) (string, error) {
 	if !opts.ForceDownload {
 		if path, _ := localDiskImagePath(); path != "" {
 			return path, nil
@@ -173,4 +185,75 @@ func EnsureDiskImage(ctx context.Context, opts DownloadOpts) (string, error) {
 		arch,
 		version,
 	)
+}
+
+// ensureDiskImageForConstraint satisfies a semver range. It prefers a local
+// dist/ image, then the highest cached version matching the constraint
+// (offline + fast path, honoring NoDownload), and finally resolves the
+// constraint against the published manifest and downloads the chosen version.
+func ensureDiskImageForConstraint(ctx context.Context, constraint, arch string, opts DownloadOpts) (string, error) {
+	cs, err := semver.NewConstraint(constraint)
+	if err != nil {
+		return "", errors.Wrapf(err, "parse image version constraint %q", constraint)
+	}
+
+	if !opts.ForceDownload {
+		if path, _ := localDiskImagePath(); path != "" {
+			return path, nil
+		}
+
+		if path := cachedVersionForConstraint(cs, arch); path != "" {
+			return path, nil
+		}
+
+		if opts.NoDownload {
+			return "", errors.Newf(
+				"no local or cached VM disk image satisfying %q for %s; "+
+					"omit --no-download to fetch one",
+				constraint,
+				arch,
+			)
+		}
+	}
+
+	version, err := resolveImageVersion(ctx, cs, arch)
+	if err != nil {
+		return "", err
+	}
+	return downloadDiskImage(ctx, version, arch, opts.Progress)
+}
+
+// cachedVersionForConstraint returns the cached image path for the highest
+// cached version satisfying cs for arch, or "" when none is cached.
+func cachedVersionForConstraint(cs *semver.Constraints, arch string) string {
+	root, err := userCacheDir()
+	if err != nil {
+		return ""
+	}
+	imagesRoot := filepath.Join(root, "kvarn", "images")
+	entries, err := os.ReadDir(imagesRoot)
+	if err != nil {
+		return ""
+	}
+
+	var best *semver.Version
+	var bestPath string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		v, err := semver.NewVersion(e.Name())
+		if err != nil || !cs.Check(v) {
+			continue
+		}
+		candidate := filepath.Join(imagesRoot, e.Name(), arch, cachedImageName)
+		if _, err := os.Stat(candidate); err != nil {
+			continue
+		}
+		if best == nil || v.GreaterThan(best) {
+			best = v
+			bestPath = candidate
+		}
+	}
+	return bestPath
 }

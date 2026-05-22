@@ -1,8 +1,16 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "separate-pull-requests": true,
   "packages": {
     ".": {
-      "release-type": "go"
+      "release-type": "go",
+      "component": "",
+      "include-component-in-tag": false
+    },
+    "image": {
+      "release-type": "simple",
+      "component": "image",
+      "include-component-in-tag": true
     }
   }
 }

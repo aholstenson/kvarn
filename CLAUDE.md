@@ -25,6 +25,7 @@ task --list         # see all available tasks
 - `internal/jobconfig/` — Per-repo kvarn.yml parsing and step execution
 - `internal/orchestrator/` — Orchestrator service
 - `internal/runner/` — Runner service (ConnectRPC handler)
+- `internal/runnerbin/` — Embeds the linux runner binary into the CLI (build with `-tags embedrunner`; the artifact is gitignored and produced by `task build:runner`)
 - `internal/cmd/` — CLI command handlers (startjob, verify)
 
 ## Test
@@ -47,16 +48,17 @@ task image:build:amd64   # build for amd64
 task image:clean         # remove dist/
 ```
 
-- `image/build-image.sh` cross-compiles the runner for `linux/<arch>`, then runs `image/customize.sh` in a privileged Docker container.
-- `customize.sh` downloads the Debian trixie genericcloud qcow2, mounts its rootfs, bakes in the kvarn runner (installed as `/usr/local/bin/kvarn`) plus the `image/overlay/` systemd units and scripts, loads the vsock/virtio modules at boot, and reconverts to a compressed qcow2.
-- Output: `dist/<arch>/disk.qcow2` — one self-contained image per arch.
-- The runner binary is baked into the image, so the image and the CLI/orchestrator are version-coupled by convention: the same release tag builds both.
+- `image/build-image.sh` runs `image/customize.sh` in a privileged Docker container. The image is purely the base OS userspace — it does **not** contain the runner.
+- `customize.sh` downloads a pinned, checksum-verified Debian trixie genericcloud snapshot (dated directory + recorded sha512), mounts its rootfs, installs podman/nix/tooling plus the `image/overlay/` systemd units and scripts, loads the vsock/virtio/iso9660 modules at boot, and reconverts to a compressed qcow2.
+- Output: `dist/<arch>/disk.qcow2` — one base image per arch.
+- The runner is **embedded in the CLI/orchestrator** (`internal/runnerbin`) and injected into each VM at boot: it is written as a raw `/kvarn-runner` file onto the cloud-init seed ISO, and `image/overlay/.../kvarn-runner-setup.sh` stages it to `/usr/local/bin/kvarn`. The orchestrator therefore always boots the exact runner it speaks to (no runner↔orchestrator skew); the only remaining contract is the coarser image ABI, handled by semver selection.
 
 ### Release flow
 
-- Pushes to `main` drive Release Please (`.github/workflows/release-please.yml`), which maintains a release PR from Conventional Commits. Merging it tags `vX.Y.Z` and publishes a GitHub Release.
-- `.github/workflows/release.yml` then builds and uploads, per arch, `kvarn-disk-<arch>.qcow2` + `.sha256` and the `kvarn` CLI binaries (`.tar.gz`/`.zip` + `.sha256`).
-- At runtime, VM commands resolve the image via `vm.EnsureDiskImage`: explicit `--disk-image-path` → local `dist/`/system paths → per-version user cache → download from the release. Downloads are checksum-verified and cached at `~/.cache/kvarn/images/<version>/<arch>/disk.qcow2`. `KVARN_IMAGE_VERSION` (or `--version` on `kvarn image`) overrides the version; `kvarn image pull` pre-seeds the cache.
+- Pushes to `main` drive Release Please (`.github/workflows/release-please.yml`) with two independent components: the root (`vX.Y.Z`, CLI) and `image/` (`image-vX.Y.Z`, VM image). Conventional Commits express compatibility intent (`feat(image)!` = major image bump).
+- `.github/workflows/release.yml` builds the `kvarn` CLI binaries per arch (`.tar.gz`/`.zip` + `.sha256`), embedding the cross-compiled `linux/<arch>` runner via `-tags embedrunner`.
+- `.github/workflows/image-release.yml` builds the per-arch `kvarn-disk-<arch>.qcow2` + `.sha256` on `image-v*` releases, and regenerates `images.json` (the version/arch manifest) onto a perpetual `image-index` release.
+- At runtime, VM commands resolve the image via `vm.EnsureDiskImage`. The version input is `--version`/`opts.Version` → `KVARN_IMAGE_VERSION` → the compiled-in `buildinfo.ImageConstraint` (a semver range). A concrete version resolves by exact path/cache/download; a range is satisfied by a local `dist/` image, then the highest matching cached version, then the highest match from `images.json` (downloaded from `image-v<version>`). Downloads are checksum-verified and cached at `~/.cache/kvarn/images/<version>/<arch>/disk.qcow2`; `kvarn image pull` pre-seeds the cache.
 
 ## Comments and documentation
 

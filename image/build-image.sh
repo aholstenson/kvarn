@@ -25,14 +25,8 @@ mkdir -p "$DIST_DIR"
 
 echo "==> Building for $ARCH (platform: $DOCKER_PLATFORM)"
 
-echo "==> Cross-compiling runner for linux/$ARCH..."
-cd "$ROOT_DIR"
-GOARCH="$ARCH" GOOS=linux CGO_ENABLED=0 go build -o "$DIST_DIR/kvarn-runner" ./cmd/runner
-
-cleanup() {
-    rm -f "$DIST_DIR/kvarn-runner"
-}
-trap cleanup EXIT
+# The runner is no longer baked into the image: the orchestrator embeds it and
+# injects it at boot. The image is purely the base OS userspace.
 
 echo "==> Building image in Docker..."
 docker run --rm --privileged --platform "$DOCKER_PLATFORM" \

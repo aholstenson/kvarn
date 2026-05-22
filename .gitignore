@@ -2,5 +2,8 @@ gen/
 /kvarn
 dist/
 
+# Generated runner binary embedded into the CLI by `task build`.
+/internal/runnerbin/kvarn-runner
+
 .task/
 .env*

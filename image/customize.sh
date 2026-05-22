@@ -5,7 +5,7 @@ set -euo pipefail
 # Runs inside a privileged Docker container.
 #
 # Expected mounts:
-#   /dist      — output directory (rw), also contains kvarn-runner binary
+#   /dist      — output directory (rw)
 #   /scripts   — this script directory (ro)
 #   /overlay   — overlay files to copy into rootfs (ro)
 #
@@ -15,8 +15,21 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 DEBIAN_VERSION="trixie"
-IMAGE_NAME="debian-13-genericcloud-${ARCH}.qcow2"
-BASE_URL="https://cloud.debian.org/images/cloud/${DEBIAN_VERSION}/latest"
+
+# Pinned Debian genericcloud snapshot. The dated directory is immutable, so
+# pinning it makes image builds reproducible and turns a base-OS update into an
+# explicit PR that bumps this snapshot plus the recorded checksums below — the
+# "base image updated" signal the image release stream records. When bumping,
+# copy the new digests from the snapshot's published SHA512SUMS.
+DEBIAN_SNAPSHOT="20260518-2482"
+BASE_URL="https://cloud.debian.org/images/cloud/${DEBIAN_VERSION}/${DEBIAN_SNAPSHOT}"
+IMAGE_NAME="debian-13-genericcloud-${ARCH}-${DEBIAN_SNAPSHOT}.qcow2"
+
+case "$ARCH" in
+    amd64) IMAGE_SHA512="7752ad2adce1bc49dd964dae8300ed7a239d0bf3c13112f55953b111447fe642d2cc01afeead234aa6ebe3605513f2e7c0e7c56785d675c38ff40110d5c8332b" ;;
+    arm64) IMAGE_SHA512="80a45cbd5bd74258b818f09ad0c5a004ae6030bc980fd3540ca372002257bdca92f4917f13edf1ac70cca6cfa1f534e6d22161c4bdd09ecac5684ec1a6987e3f" ;;
+    *) echo "No recorded checksum for ARCH: $ARCH" >&2; exit 1 ;;
+esac
 
 ROOTFS="/mnt/rootfs"
 
@@ -24,8 +37,11 @@ echo "==> Installing build dependencies..."
 apt-get update -qq
 apt-get install -y -qq qemu-utils fdisk e2fsprogs curl >/dev/null 2>&1
 
-echo "==> Downloading Debian ${DEBIAN_VERSION} genericcloud image..."
+echo "==> Downloading Debian ${DEBIAN_VERSION} genericcloud snapshot ${DEBIAN_SNAPSHOT}..."
 curl -fSL -o "/tmp/${IMAGE_NAME}" "${BASE_URL}/${IMAGE_NAME}"
+
+echo "==> Verifying base image checksum..."
+echo "${IMAGE_SHA512}  /tmp/${IMAGE_NAME}" | sha512sum -c -
 
 echo "==> Converting qcow2 to raw..."
 qemu-img convert -f qcow2 -O raw "/tmp/${IMAGE_NAME}" /dist/disk.img
@@ -295,10 +311,6 @@ ln -sf /home/kvarn/.nix-profile/etc/profile.d/nix.sh \
 echo "==> Copying overlay files..."
 cp -a /overlay/. "$ROOTFS/"
 
-echo "==> Installing runner binary..."
-cp /dist/kvarn-runner "$ROOTFS/usr/local/bin/kvarn"
-chmod +x "$ROOTFS/usr/local/bin/kvarn"
-
 echo "==> Making scripts executable..."
 chmod +x "$ROOTFS/usr/local/bin/kvarn-runner-setup.sh"
 
@@ -349,9 +361,6 @@ umount "$ROOTFS/sys" 2>/dev/null || true
 umount "$ROOTFS"
 losetup -d "$LOOP_DEV" 2>/dev/null || true
 trap - EXIT
-
-# Remove the runner binary from dist (only needed during build).
-rm -f /dist/kvarn-runner
 
 echo "==> Converting to qcow2..."
 qemu-img convert -f raw -O qcow2 -c /dist/disk.img /dist/disk.qcow2

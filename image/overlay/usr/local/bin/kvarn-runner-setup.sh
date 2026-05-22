@@ -1,6 +1,32 @@
 #!/bin/sh
 set -eu
 
+# Stage the runner binary injected onto the cloud-init seed ISO. The
+# orchestrator embeds and ships the exact runner it speaks to, so the image
+# carries none at rest. The iso9660 module is loaded at boot; the device may
+# take a moment to appear, so wait for it. Failures here are fatal so the
+# unit's Restart=on-failure retries instead of ExecStart launching a missing
+# binary.
+SEED_DEV=/dev/disk/by-label/cidata
+SEED_MNT=/run/kvarn-seed
+RETRIES=30
+while [ ! -e "$SEED_DEV" ] && [ "$RETRIES" -gt 0 ]; do
+	sleep 1
+	RETRIES=$((RETRIES - 1))
+done
+
+if [ ! -e "$SEED_DEV" ]; then
+	echo "kvarn-runner-setup: seed device $SEED_DEV not found after timeout" >&2
+	exit 1
+fi
+
+mkdir -p "$SEED_MNT"
+umount "$SEED_MNT" 2>/dev/null || true
+mount -o ro "$SEED_DEV" "$SEED_MNT"
+cp "$SEED_MNT/kvarn-runner" /usr/local/bin/kvarn
+chmod +x /usr/local/bin/kvarn
+umount "$SEED_MNT"
+
 # Wait for cloud-init to write the runner env file.
 RETRIES=30
 while [ ! -f /run/kvarn-runner.env ] && [ "$RETRIES" -gt 0 ]; do

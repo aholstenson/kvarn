@@ -12,12 +12,22 @@ tasks:
       - gen/**/*.go
 
   build:
-    desc: Build the kvarn binary
+    desc: Build the kvarn binary with the embedded runner
     deps: [generate]
     cmds:
-      - go build ./cmd/kvarn
+      - task: build:runner
+      - go build -tags embedrunner ./cmd/kvarn
       - task: sign
         platforms: [darwin]
+
+  build:runner:
+    desc: Cross-compile the linux runner for embedding into the CLI
+    deps: [generate]
+    vars:
+      VERSION:
+        sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+    cmds:
+      - GOOS=linux GOARCH={{ARCH}} CGO_ENABLED=0 go build -ldflags "-X github.com/aholstenson/kvarn/internal/buildinfo.Version={{.VERSION}}" -o internal/runnerbin/kvarn-runner ./cmd/runner
 
   sign:
     desc: Ad-hoc codesign with virtualization entitlement (macOS only)
