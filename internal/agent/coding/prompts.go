@@ -37,7 +37,7 @@ func (m *Mode) WritesChanges() bool { return m.Writes }
 // environment block + mode-specific body + project/skills/sub-agents trailer.
 func (m *Mode) SystemPrompt(projectName, repoURL, branch string, rc *repocontext.RepoContext, subAgents SubAgents) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, `You are %s running in a sandboxed VM. There is no interactive user. You receive a single task message (separate from this system prompt).
+	fmt.Fprintf(&sb, `You are Kvarn, %s running in a sandboxed VM. There is no interactive user. You receive a single task message (separate from this system prompt).
 
 ## Environment
 
@@ -186,6 +186,18 @@ const outputRules = `## Output
 - After completing all work and verifying it passes, provide a clear summary of what you changed and why.
 - This summary will be used for the commit message and pull request description, so be specific about what changed.`
 
+// operatingPrinciples is the cross-cutting "how you work" block shared by every
+// mode. It states task persistence, round-trip economy, and context discipline
+// in one place so the guidance stays consistent. Mode-specific mechanics (the
+// anchor re-read rule, verification workflows) live in their own sections; this
+// block is deliberately phrased to complement, not contradict, them.
+const operatingPrinciples = `## Operating principles
+
+- Drive to completion. Keep working until the task is fully resolved; don't stop at the first plausible stopping point or hand back partial work. If you are genuinely blocked by an external constraint, say so in your final summary rather than guessing.
+- Minimize round trips. When several operations are independent — reading multiple files, running several searches, spawning explore agents — issue them in a single turn instead of one at a time. This means cutting redundant work, not skipping necessary steps.
+- Reuse what you have. Don't re-read a file already in your context or re-run a search you've already run, unless something has changed it since.
+- Load only the context you need. Read the slice of a file that is relevant rather than the whole tree, and prefer spawn_agent(explore) for broad searches so the findings — not raw file dumps — land in your context.`
+
 const autoIntro = `The task message may include a feature request, a bug report, failing test output, error logs, or partial context. Read it first and decide how to approach the work.
 
 ## Choose your approach
@@ -235,13 +247,15 @@ const fixIntro = `The task message describes a bug — a reported failure, error
 
 If you cannot reproduce the bug with a test (e.g. it requires manual interaction, external infrastructure, or environment not available in the sandbox), state that explicitly, then make the smallest justified change and verify with whatever signals the project does provide.`
 
-const autoBody = autoIntro + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + outputRules
+const autoBody = autoIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + outputRules
 
-const implementBody = implementIntro + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + outputRules
+const implementBody = implementIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + outputRules
 
-const fixBody = fixIntro + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + outputRules
+const fixBody = fixIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + outputRules
 
 const reviewBody = `The task message describes what to audit — for example pending changes on a branch, a specific area of the codebase, or compliance with a guideline.
+
+` + operatingPrinciples + `
 
 ## Capabilities
 
@@ -267,6 +281,8 @@ Produce a written review. Open with a one-line verdict (e.g. "Approve with comme
 Avoid generic advice. Only flag things you can ground in the code you read.`
 
 const researchBody = `The task message asks an open-ended question about the codebase — how a feature works, where a behavior lives, what the data flow looks like, how hard a change would be, and so on.
+
+` + operatingPrinciples + `
 
 ## Capabilities
 

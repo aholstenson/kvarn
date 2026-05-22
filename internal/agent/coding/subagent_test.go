@@ -242,6 +242,18 @@ var _ = Describe("Mode", func() {
 		prompt := coding.ModeImplement.SystemPrompt("proj", "url", "main", nil, nil)
 		Expect(prompt).NotTo(ContainSubstring("<available_sub_agents>"))
 	})
+
+	It("identifies the agent as Kvarn in the opening line", func() {
+		prompt := coding.ModeImplement.SystemPrompt("proj", "url", "main", nil, nil)
+		Expect(prompt).To(ContainSubstring("You are Kvarn, an autonomous coding agent"))
+	})
+
+	It("includes the shared operating principles in write and read-only modes", func() {
+		write := coding.ModeImplement.SystemPrompt("proj", "url", "main", nil, nil)
+		readOnly := coding.ModeReview.SystemPrompt("proj", "url", "main", nil, nil)
+		Expect(write).To(ContainSubstring("## Operating principles"))
+		Expect(readOnly).To(ContainSubstring("## Operating principles"))
+	})
 })
 
 var _ = Describe("SubAgent definitions", func() {
