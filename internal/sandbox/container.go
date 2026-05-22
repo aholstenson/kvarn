@@ -2,11 +2,11 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
-	"github.com/cockroachdb/errors"
 )
 
 // ContainerProxy wraps a RunnerProxy to route Exec calls through a persistent
@@ -42,10 +42,10 @@ func (c *ContainerProxy) Start(ctx context.Context, image string, workspaceDir s
 		Privileged: false,
 	})
 	if err != nil {
-		return errors.Wrap(err, "start container")
+		return fmt.Errorf("start container: %w", err)
 	}
 	if resp.ExitCode != 0 {
-		return errors.Newf("start container failed (exit %d): %s", resp.ExitCode, resp.Stderr)
+		return fmt.Errorf("start container failed (exit %d): %s", resp.ExitCode, resp.Stderr)
 	}
 	return nil
 }

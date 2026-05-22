@@ -4,11 +4,10 @@ package link
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"sync"
-
-	"github.com/cockroachdb/errors"
 )
 
 // StreamFrameRW reads and writes ethernet frames over qemu's
@@ -36,7 +35,7 @@ func (s *StreamFrameRW) ReadFrame() ([]byte, error) {
 	}
 	n := binary.BigEndian.Uint32(s.header[:])
 	if n == 0 || n > 65536 {
-		return nil, errors.Newf("invalid frame length %d", n)
+		return nil, fmt.Errorf("invalid frame length %d", n)
 	}
 	buf := make([]byte, n)
 	if _, err := io.ReadFull(s.fd, buf); err != nil {

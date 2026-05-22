@@ -188,7 +188,7 @@ func buildNXDOMAIN(req []byte) []byte {
 	if len(resp) < 12 {
 		return resp
 	}
-	resp[2] |= 0x80         // QR
+	resp[2] |= 0x80                // QR
 	resp[3] = (resp[3] & 0xf0) | 3 // RCODE = 3 (NXDOMAIN)
 	resp[6], resp[7] = 0, 0
 	resp[8], resp[9] = 0, 0

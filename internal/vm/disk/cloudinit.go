@@ -1,12 +1,12 @@
 package disk
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/errors"
 	diskfs "github.com/diskfs/go-diskfs"
 	"github.com/diskfs/go-diskfs/disk"
 	"github.com/diskfs/go-diskfs/filesystem"
@@ -55,7 +55,7 @@ func CreateCloudInitDisk(path string, opts CloudInitOpts) error {
 
 	d, err := diskfs.Create(path, diskSize, diskfs.SectorSizeDefault)
 	if err != nil {
-		return errors.Wrap(err, "create seed disk")
+		return fmt.Errorf("create seed disk: %w", err)
 	}
 
 	// ISO9660 requires a logical block size of 2048.
@@ -68,30 +68,30 @@ func CreateCloudInitDisk(path string, opts CloudInitOpts) error {
 	}
 	fs, err := d.CreateFilesystem(fspec)
 	if err != nil {
-		return errors.Wrap(err, "create ISO9660 filesystem")
+		return fmt.Errorf("create ISO9660 filesystem: %w", err)
 	}
 
 	// Write meta-data.
 	metaData := fmt.Sprintf("instance-id: kvarn-%d\n", time.Now().UnixNano())
 	if err := writeISOFile(fs, "/meta-data", metaData); err != nil {
-		return errors.Wrap(err, "write meta-data")
+		return fmt.Errorf("write meta-data: %w", err)
 	}
 
 	userData := buildUserData(opts)
 	if err := writeISOFile(fs, "/user-data", userData); err != nil {
-		return errors.Wrap(err, "write user-data")
+		return fmt.Errorf("write user-data: %w", err)
 	}
 
 	// Static network config: the host-side userspace netstack acts as
 	// the gateway and DNS forwarder at 10.0.2.1; the VM gets 10.0.2.2.
 	if err := writeISOFile(fs, "/network-config", buildNetworkConfig()); err != nil {
-		return errors.Wrap(err, "write network-config")
+		return fmt.Errorf("write network-config: %w", err)
 	}
 
 	// Inject the runner binary as a raw file the in-VM setup script stages.
 	if len(opts.Runner) > 0 {
 		if err := writeISOBinaryFile(fs, "/kvarn-runner", opts.Runner); err != nil {
-			return errors.Wrap(err, "write runner")
+			return fmt.Errorf("write runner: %w", err)
 		}
 	}
 
@@ -105,7 +105,7 @@ func CreateCloudInitDisk(path string, opts CloudInitOpts) error {
 		VolumeIdentifier: "cidata",
 		RockRidge:        true,
 	}); err != nil {
-		return errors.Wrap(err, "finalize ISO")
+		return fmt.Errorf("finalize ISO: %w", err)
 	}
 
 	return nil

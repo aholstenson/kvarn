@@ -38,11 +38,11 @@ type ProviderImage struct {
 
 type CreateOpts struct {
 	Image            *ProviderImage
-	Token            string // one-time bootstrap token for runner registration
-	OrchestratorAddr string // for cloud providers; runner needs to know where to connect
-	DiskSizeBytes    int64  // desired disk size; 0 means use default
-	CPUs             uint   // desired vCPU count; 0 means use default
-	MemoryBytes      uint64 // desired memory in bytes; 0 means use default
+	Token            string              // one-time bootstrap token for runner registration
+	OrchestratorAddr string              // for cloud providers; runner needs to know where to connect
+	DiskSizeBytes    int64               // desired disk size; 0 means use default
+	CPUs             uint                // desired vCPU count; 0 means use default
+	MemoryBytes      uint64              // desired memory in bytes; 0 means use default
 	OnConsoleOutput  func(output string) // called with serial console chunks; nil = discard
 
 	// Network configures the per-VM userspace network and egress proxy.

@@ -1,12 +1,12 @@
 package cache
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/cockroachdb/errors"
 )
 
 // FileCache stores caches as tarballs under BaseDir/<projectID>/.
@@ -19,7 +19,7 @@ type FileCache struct {
 func DefaultFileCache() (*FileCache, error) {
 	dir, err := os.UserCacheDir()
 	if err != nil {
-		return nil, errors.Wrap(err, "determine user cache dir")
+		return nil, fmt.Errorf("determine user cache dir: %w", err)
 	}
 	return &FileCache{BaseDir: filepath.Join(dir, "kvarn")}, nil
 }
@@ -31,7 +31,7 @@ func (f *FileCache) Restore(projectID string, guestPath string) (io.ReadCloser, 
 		return nil, nil
 	}
 	if err != nil {
-		return nil, errors.Wrapf(err, "open cache tarball %s", p)
+		return nil, fmt.Errorf("open cache tarball %s: %w", p, err)
 	}
 	return file, nil
 }
@@ -39,7 +39,7 @@ func (f *FileCache) Restore(projectID string, guestPath string) (io.ReadCloser, 
 func (f *FileCache) Save(projectID string, guestPath string, data io.Reader) error {
 	dir := filepath.Join(f.BaseDir, projectID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return errors.Wrapf(err, "create cache dir %s", dir)
+		return fmt.Errorf("create cache dir %s: %w", dir, err)
 	}
 
 	// Write a small metadata file so humans can identify which project this
@@ -51,22 +51,22 @@ func (f *FileCache) Save(projectID string, guestPath string, data io.Reader) err
 	dest := f.tarballPath(projectID, guestPath)
 	tmp, err := os.CreateTemp(dir, ".cache-*.tmp")
 	if err != nil {
-		return errors.Wrap(err, "create temp file for cache")
+		return fmt.Errorf("create temp file for cache: %w", err)
 	}
 	tmpName := tmp.Name()
 
 	if _, err := io.Copy(tmp, data); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
-		return errors.Wrap(err, "write cache tarball")
+		return fmt.Errorf("write cache tarball: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
-		return errors.Wrap(err, "close cache tarball")
+		return fmt.Errorf("close cache tarball: %w", err)
 	}
 	if err := os.Rename(tmpName, dest); err != nil {
 		os.Remove(tmpName)
-		return errors.Wrap(err, "rename cache tarball")
+		return fmt.Errorf("rename cache tarball: %w", err)
 	}
 	return nil
 }

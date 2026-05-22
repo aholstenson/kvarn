@@ -118,9 +118,9 @@ var _ = Describe("GitHub Forge", func() {
 			)
 
 			creds, err := gh.ResolveCredentials(context.Background(), map[string]string{
-				"app_id":          "12345",
+				"app_id":           "12345",
 				"private_key_path": keyPath,
-				"installation_id": "67890",
+				"installation_id":  "67890",
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(creds.Token).To(Equal("ghs_test_installation_token"))
@@ -159,9 +159,9 @@ var _ = Describe("GitHub Forge", func() {
 			)
 
 			config := map[string]string{
-				"app_id":          "12345",
+				"app_id":           "12345",
 				"private_key_path": keyPath,
-				"installation_id": "99999",
+				"installation_id":  "99999",
 			}
 
 			// First call hits the server.

@@ -2,9 +2,9 @@ package proxy
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
-
-	"github.com/cockroachdb/errors"
 )
 
 // peekSNI extracts the SNI server name from the first TLS ClientHello on
@@ -14,7 +14,7 @@ func peekSNI(p *peekConn) (string, error) {
 	// TLS record header is 5 bytes: type(1) + version(2) + length(2).
 	header, err := p.Peek(5)
 	if err != nil {
-		return "", errors.Wrap(err, "peek record header")
+		return "", fmt.Errorf("peek record header: %w", err)
 	}
 	if header[0] != 0x16 { // handshake
 		return "", errors.New("not a TLS handshake record")
@@ -25,7 +25,7 @@ func peekSNI(p *peekConn) (string, error) {
 	}
 	full, err := p.Peek(5 + recordLen)
 	if err != nil {
-		return "", errors.Wrap(err, "peek full record")
+		return "", fmt.Errorf("peek full record: %w", err)
 	}
 	return parseClientHelloSNI(full[5 : 5+recordLen])
 }

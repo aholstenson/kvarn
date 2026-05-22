@@ -3,10 +3,9 @@
 package runner
 
 import (
+	"fmt"
 	"os/user"
 	"strconv"
-
-	"github.com/cockroachdb/errors"
 )
 
 // kvarnCredential holds the cached UID/GID for the kvarn user.
@@ -20,7 +19,7 @@ type kvarnCredential struct {
 func lookupKvarnUser() (*kvarnCredential, error) {
 	u, err := user.Lookup("kvarn")
 	if err != nil {
-		return nil, errors.Wrap(err, "lookup kvarn user")
+		return nil, fmt.Errorf("lookup kvarn user: %w", err)
 	}
 
 	// If we're already running as the kvarn user, no privilege change is needed.
@@ -31,12 +30,12 @@ func lookupKvarnUser() (*kvarnCredential, error) {
 
 	uid, err := strconv.ParseUint(u.Uid, 10, 32)
 	if err != nil {
-		return nil, errors.Wrap(err, "parse uid")
+		return nil, fmt.Errorf("parse uid: %w", err)
 	}
 
 	gid, err := strconv.ParseUint(u.Gid, 10, 32)
 	if err != nil {
-		return nil, errors.Wrap(err, "parse gid")
+		return nil, fmt.Errorf("parse gid: %w", err)
 	}
 
 	return &kvarnCredential{

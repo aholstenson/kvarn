@@ -2,13 +2,14 @@ package git
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/aholstenson/kvarn/internal/scm"
-	"github.com/cockroachdb/errors"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -45,7 +46,7 @@ func (g *Git) Clone(ctx context.Context, opts scm.CloneOpts) error {
 	if opts.Credentials != nil {
 		auth, err := authMethod(opts.URL, opts.Credentials)
 		if err != nil {
-			return errors.Wrap(err, "configure auth")
+			return fmt.Errorf("configure auth: %w", err)
 		}
 		cloneOpts.Auth = auth
 	}
@@ -62,13 +63,13 @@ func (g *Git) Clone(ctx context.Context, opts scm.CloneOpts) error {
 	if err != nil {
 		if err.Error() == "invalid auth method" {
 			if isSSHURL(opts.URL) && opts.Credentials != nil && (opts.Credentials.Token != "" || opts.Credentials.Username != "") {
-				return errors.Newf("clone: auth method mismatch: URL %q is SSH but credential uses token/password (use ssh_key instead)", opts.URL)
+				return fmt.Errorf("clone: auth method mismatch: URL %q is SSH but credential uses token/password (use ssh_key instead)", opts.URL)
 			}
 			if !isSSHURL(opts.URL) && opts.Credentials != nil && len(opts.Credentials.SSHKey) > 0 {
-				return errors.Newf("clone: auth method mismatch: URL %q is HTTPS but credential uses ssh_key (use token instead)", opts.URL)
+				return fmt.Errorf("clone: auth method mismatch: URL %q is HTTPS but credential uses ssh_key (use token instead)", opts.URL)
 			}
 		}
-		return errors.Wrap(err, "clone")
+		return fmt.Errorf("clone: %w", err)
 	}
 
 	slog.Info("clone complete", "url", opts.URL)
@@ -88,12 +89,12 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 
 	repo, err := gogit.PlainOpen(opts.RepoDir)
 	if err != nil {
-		return errors.Wrap(err, "open repo")
+		return fmt.Errorf("open repo: %w", err)
 	}
 
 	wt, err := repo.Worktree()
 	if err != nil {
-		return errors.Wrap(err, "get worktree")
+		return fmt.Errorf("get worktree: %w", err)
 	}
 
 	// Create the new branch pointing at HEAD. We set HEAD to the new
@@ -102,21 +103,21 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 	branchRef := plumbing.NewBranchReferenceName(opts.Branch)
 	headRef, err := repo.Head()
 	if err != nil {
-		return errors.Wrap(err, "resolve HEAD")
+		return fmt.Errorf("resolve HEAD: %w", err)
 	}
 	newRef := plumbing.NewHashReference(branchRef, headRef.Hash())
 	if err := repo.Storer.SetReference(newRef); err != nil {
-		return errors.Wrap(err, "create branch ref")
+		return fmt.Errorf("create branch ref: %w", err)
 	}
 	// Point HEAD at the new branch.
 	symRef := plumbing.NewSymbolicReference(plumbing.HEAD, branchRef)
 	if err := repo.Storer.SetReference(symRef); err != nil {
-		return errors.Wrap(err, "update HEAD")
+		return fmt.Errorf("update HEAD: %w", err)
 	}
 
 	// Stage all changes.
 	if err := wt.AddWithOptions(&gogit.AddOptions{All: true}); err != nil {
-		return errors.Wrap(err, "stage changes")
+		return fmt.Errorf("stage changes: %w", err)
 	}
 
 	// Commit.
@@ -129,7 +130,7 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 		},
 	})
 	if err != nil {
-		return errors.Wrap(err, "commit")
+		return fmt.Errorf("commit: %w", err)
 	}
 
 	slog.Info("committed changes",
@@ -155,13 +156,13 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 		}
 		auth, err := authMethod(remoteURL, opts.Credentials)
 		if err != nil {
-			return errors.Wrap(err, "configure push auth")
+			return fmt.Errorf("configure push auth: %w", err)
 		}
 		pushOpts.Auth = auth
 	}
 
 	if err := repo.PushContext(ctx, pushOpts); err != nil {
-		return errors.Wrap(err, "push")
+		return fmt.Errorf("push: %w", err)
 	}
 
 	slog.Info("pushed branch", "branch", opts.Branch)
@@ -187,11 +188,11 @@ func authMethod(url string, creds *scm.Credentials) (transport.AuthMethod, error
 		} else {
 			keyData, err := resolveSSHKey(creds.SSHKey)
 			if err != nil {
-				return nil, errors.Wrap(err, "resolve ssh key")
+				return nil, fmt.Errorf("resolve ssh key: %w", err)
 			}
 			keys, err := ssh.NewPublicKeys("git", keyData, creds.SSHKeyPass)
 			if err != nil {
-				return nil, errors.Wrap(err, "ssh key")
+				return nil, fmt.Errorf("ssh key: %w", err)
 			}
 			slog.Info("using SSH key auth")
 			return keys, nil
@@ -247,14 +248,14 @@ func resolveSSHKey(key []byte) ([]byte, error) {
 	if strings.HasPrefix(expanded, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return nil, errors.Wrap(err, "expand home dir")
+			return nil, fmt.Errorf("expand home dir: %w", err)
 		}
 		expanded = home + expanded[1:]
 	}
 
 	data, err := os.ReadFile(expanded)
 	if err != nil {
-		return nil, errors.Wrapf(err, "read key file %q", expanded)
+		return nil, fmt.Errorf("read key file %q: %w", expanded, err)
 	}
 
 	slog.Info("loaded SSH key from file", "path", expanded)

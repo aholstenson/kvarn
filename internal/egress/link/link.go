@@ -10,12 +10,12 @@ package link
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"sync"
 
-	"github.com/cockroachdb/errors"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -33,10 +33,10 @@ import (
 // 10.0.2.1. These follow the qemu user-mode network conventions so that
 // behaviour is comparable to the previous setup.
 const (
-	GatewayIP = "10.0.2.1"
-	VMIP      = "10.0.2.2"
-	Subnet    = "10.0.2.0/24"
-	Netmask   = "255.255.255.0"
+	GatewayIP  = "10.0.2.1"
+	VMIP       = "10.0.2.2"
+	Subnet     = "10.0.2.0/24"
+	Netmask    = "255.255.255.0"
 	DefaultMTU = 1500
 )
 
@@ -58,14 +58,14 @@ type Config struct {
 // Network is a per-VM userspace TCP/IP fabric. It owns a gvisor stack,
 // listeners for the egress proxy on the gateway IP, and a DNS forwarder.
 type Network struct {
-	cfg  Config
-	log  *slog.Logger
-	stk  *stack.Stack
-	nic  tcpip.NICID
+	cfg Config
+	log *slog.Logger
+	stk *stack.Stack
+	nic tcpip.NICID
 
-	mu       sync.Mutex
+	mu           sync.Mutex
 	tcpListeners map[uint16]*gonet.TCPListener
-	closed   bool
+	closed       bool
 
 	cancel context.CancelFunc
 }
@@ -89,24 +89,24 @@ func New(cfg Config) (*Network, error) {
 
 	const nicID tcpip.NICID = 1
 	if err := s.CreateNIC(nicID, cfg.Endpoint); err != nil {
-		return nil, errors.Newf("create NIC: %s", err)
+		return nil, fmt.Errorf("create NIC: %s", err)
 	}
 
 	// Spoofing + promiscuous: the stack accepts traffic for any destination
 	// IP, not just our virtual gateway. This is what lets us pose as
 	// arbitrary upstream IPs that the VM resolved through DNS.
 	if err := s.SetSpoofing(nicID, true); err != nil {
-		return nil, errors.Newf("set spoofing: %s", err)
+		return nil, fmt.Errorf("set spoofing: %s", err)
 	}
 	if err := s.SetPromiscuousMode(nicID, true); err != nil {
-		return nil, errors.Newf("set promiscuous: %s", err)
+		return nil, fmt.Errorf("set promiscuous: %s", err)
 	}
 
 	gw := tcpip.AddrFromSlice(net.ParseIP(GatewayIP).To4())
 	addrWithPrefix := tcpip.AddressWithPrefix{Address: gw, PrefixLen: 24}
 	protoAddr := tcpip.ProtocolAddress{Protocol: ipv4.ProtocolNumber, AddressWithPrefix: addrWithPrefix}
 	if err := s.AddProtocolAddress(nicID, protoAddr, stack.AddressProperties{}); err != nil {
-		return nil, errors.Newf("add gateway IP: %s", err)
+		return nil, fmt.Errorf("add gateway IP: %s", err)
 	}
 
 	// Default route: anything goes to our NIC; spoofing covers the rest.
@@ -134,7 +134,7 @@ func (n *Network) Run(ctx context.Context) error {
 	// DNS forwarder on gateway:53.
 	dns, err := n.startDNS(ctx)
 	if err != nil {
-		return errors.Wrap(err, "start DNS")
+		return fmt.Errorf("start DNS: %w", err)
 	}
 	defer dns.Close()
 
@@ -158,7 +158,7 @@ func (n *Network) Listen(port uint16) (net.Listener, error) {
 	}
 	ln, err := gonet.ListenTCP(n.stk, addr, ipv4.ProtocolNumber)
 	if err != nil {
-		return nil, errors.Wrap(err, "listen TCP")
+		return nil, fmt.Errorf("listen TCP: %w", err)
 	}
 	n.tcpListeners[port] = ln
 	return ln, nil
@@ -181,7 +181,7 @@ func (n *Network) ListenAny(port uint16) (net.Listener, error) {
 	addr := tcpip.FullAddress{NIC: n.nic, Port: port}
 	ln, err := gonet.ListenTCP(n.stk, addr, ipv4.ProtocolNumber)
 	if err != nil {
-		return nil, errors.Wrap(err, "listen TCP wildcard")
+		return nil, fmt.Errorf("listen TCP wildcard: %w", err)
 	}
 	n.tcpListeners[port] = ln
 	return ln, nil
@@ -213,7 +213,7 @@ func (n *Network) startDNS(ctx context.Context) (interface{ Close() error }, err
 	wq := &waiter.Queue{}
 	ep, e := n.stk.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, wq)
 	if e != nil {
-		return nil, errors.Newf("new udp endpoint: %s", e)
+		return nil, fmt.Errorf("new udp endpoint: %s", e)
 	}
 	addr := tcpip.FullAddress{
 		NIC:  n.nic,
@@ -222,7 +222,7 @@ func (n *Network) startDNS(ctx context.Context) (interface{ Close() error }, err
 	}
 	if err := ep.Bind(addr); err != nil {
 		ep.Close()
-		return nil, errors.Newf("bind udp 53: %s", err)
+		return nil, fmt.Errorf("bind udp 53: %s", err)
 	}
 	conn := gonet.NewUDPConn(wq, ep)
 	srv := &dnsForwarder{

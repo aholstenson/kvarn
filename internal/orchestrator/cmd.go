@@ -2,10 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
-
-	llms "github.com/aholstenson/llms-go"
-	"github.com/cockroachdb/errors"
 
 	"github.com/aholstenson/kvarn/internal/agent/coding"
 	credtoml "github.com/aholstenson/kvarn/internal/config/credential/tomlstore"
@@ -15,12 +13,13 @@ import (
 	projtoml "github.com/aholstenson/kvarn/internal/config/project/tomlstore"
 	secrettoml "github.com/aholstenson/kvarn/internal/config/secret/tomlstore"
 	"github.com/aholstenson/kvarn/internal/forge"
-	forgegithub "github.com/aholstenson/kvarn/internal/forge/github"
 	forgegit "github.com/aholstenson/kvarn/internal/forge/git"
+	forgegithub "github.com/aholstenson/kvarn/internal/forge/github"
+	"github.com/aholstenson/kvarn/internal/sandbox/transfer"
+	"github.com/aholstenson/kvarn/internal/session"
 	"github.com/aholstenson/kvarn/internal/vm"
 	"github.com/aholstenson/kvarn/internal/vm/local"
-	"github.com/aholstenson/kvarn/internal/session"
-	"github.com/aholstenson/kvarn/internal/sandbox/transfer"
+	llms "github.com/aholstenson/llms-go"
 )
 
 type Cmd struct {
@@ -48,7 +47,7 @@ func (c *Cmd) Run() error {
 		},
 	})
 	if err != nil {
-		return errors.Wrap(err, "find disk image")
+		return fmt.Errorf("find disk image: %w", err)
 	}
 
 	p := local.NewProvider()
@@ -58,7 +57,7 @@ func (c *Cmd) Run() error {
 
 	image, err := p.PrepareImage(ctx, base)
 	if err != nil {
-		return errors.Wrap(err, "prepare image")
+		return fmt.Errorf("prepare image: %w", err)
 	}
 
 	projectsPath := c.ProjectsFile
@@ -81,7 +80,7 @@ func (c *Cmd) Run() error {
 	logger := slog.Default()
 	mgr, err := llms.NewManager(llms.WithManagerLogger(logger))
 	if err != nil {
-		return errors.Wrap(err, "create llms manager")
+		return fmt.Errorf("create llms manager: %w", err)
 	}
 
 	agentsStore := modeltoml.OpenDefault(c.AgentsFile)

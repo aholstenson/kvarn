@@ -6,9 +6,10 @@ import (
 	"sort"
 	"strings"
 
+	"fmt"
+
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/project"
-	"github.com/cockroachdb/errors"
 )
 
 // defaultCachePaths are always added to cachePaths in VM mode, regardless
@@ -246,7 +247,7 @@ func writeProfileScripts(ctx context.Context, proxy RunnerProxy, aug augmentatio
 		WorkingDir: "/etc/profile.d",
 		Files:      files,
 	}); err != nil {
-		return errors.Wrap(err, "upload profile.d scripts")
+		return fmt.Errorf("upload profile.d scripts: %w", err)
 	}
 	return nil
 }

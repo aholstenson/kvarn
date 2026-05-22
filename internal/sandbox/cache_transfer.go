@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,7 +10,6 @@ import (
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
-	"github.com/cockroachdb/errors"
 )
 
 // RestoreCache uploads cached tarballs to the guest and extracts them.
@@ -82,7 +82,7 @@ func SaveCache(ctx context.Context, proxy RunnerProxy, provider cache.Provider, 
 		}
 		if err := saveCachePath(ctx, proxy, provider, projectID, guestPath); err != nil {
 			slog.Warn("failed to save cache", "path", guestPath, "error", err)
-			errs = append(errs, errors.Wrapf(err, "save cache %s", guestPath))
+			errs = append(errs, fmt.Errorf("save cache %s: %w", guestPath, err))
 		}
 	}
 	if onEvent != nil {
@@ -99,7 +99,7 @@ func saveCachePath(ctx context.Context, proxy RunnerProxy, provider cache.Provid
 		Privileged: true,
 	})
 	if err != nil {
-		return errors.Wrap(err, "check cache dir")
+		return fmt.Errorf("check cache dir: %w", err)
 	}
 	if resp.ExitCode != 0 {
 		slog.Debug("cache directory does not exist, skipping", "path", guestPath)
@@ -119,10 +119,10 @@ func saveCachePath(ctx context.Context, proxy RunnerProxy, provider cache.Provid
 		Privileged: true,
 	})
 	if err != nil {
-		return errors.Wrap(err, "create tarball")
+		return fmt.Errorf("create tarball: %w", err)
 	}
 	if resp.ExitCode != 0 {
-		return errors.Newf("tar failed (exit %d): %s", resp.ExitCode, resp.Stderr)
+		return fmt.Errorf("tar failed (exit %d): %s", resp.ExitCode, resp.Stderr)
 	}
 
 	// Stream tarball from guest directly into the cache provider.
@@ -138,12 +138,12 @@ func saveCachePath(ctx context.Context, proxy RunnerProxy, provider cache.Provid
 	// Stream file from guest into the pipe writer.
 	if err := proxy.StreamFromGuest(ctx, tmpFile, pw); err != nil {
 		pw.Close()
-		return errors.Wrap(err, "stream tarball from guest")
+		return fmt.Errorf("stream tarball from guest: %w", err)
 	}
 	pw.Close()
 
 	if err := <-saveErrCh; err != nil {
-		return errors.Wrap(err, "store tarball")
+		return fmt.Errorf("store tarball: %w", err)
 	}
 
 	// Clean up temp file in guest.

@@ -4,8 +4,9 @@ import (
 	"io"
 	"sync"
 
+	"errors"
+
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
-	"github.com/cockroachdb/errors"
 )
 
 // PendingTransfer tracks an in-flight file transfer between orchestrator and runner.
@@ -13,7 +14,7 @@ type PendingTransfer struct {
 	Reader io.ReadCloser       // for downloads (orchestrator→runner)
 	Writer io.WriteCloser      // for uploads (runner→orchestrator)
 	Meta   *v1.FileStreamStart // metadata for the transfer
-	Done   chan struct{}        // closed when the transfer completes
+	Done   chan struct{}       // closed when the transfer completes
 }
 
 // PendingRunner holds the channels used to communicate with a runner that has

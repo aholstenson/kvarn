@@ -17,8 +17,9 @@ import (
 	"syscall"
 	"time"
 
+	"errors"
+
 	"connectrpc.com/connect"
-	"github.com/cockroachdb/errors"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"golang.org/x/net/http2"
@@ -80,12 +81,12 @@ func (h *Handler) CreateSession(_ context.Context, req *connect.Request[v1.Creat
 	h.sessionMu.Unlock()
 
 	if count >= maxSessions {
-		return nil, connect.NewError(connect.CodeResourceExhausted, errors.Newf("too many sessions (%d), limit is %d", count, maxSessions))
+		return nil, connect.NewError(connect.CodeResourceExhausted, fmt.Errorf("too many sessions (%d), limit is %d", count, maxSessions))
 	}
 
 	sess, err := newShellSession(msg.WorkingDir, msg.Container, h.kvarnCred)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, errors.Wrap(err, "create shell session"))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create shell session: %w", err))
 	}
 
 	id := fmt.Sprintf("sess-%d", h.nextSessID.Add(1))
@@ -111,7 +112,7 @@ func (h *Handler) SessionExecWithOutput(ctx context.Context, msg *v1.SessionExec
 	h.sessionMu.Unlock()
 
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errors.Newf("session %q not found", msg.SessionId))
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("session %q not found", msg.SessionId))
 	}
 
 	timeout := time.Duration(msg.TimeoutSeconds) * time.Second
@@ -144,7 +145,7 @@ func (h *Handler) CloseSession(_ context.Context, req *connect.Request[v1.CloseS
 	h.sessionMu.Unlock()
 
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errors.Newf("session %q not found", msg.SessionId))
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("session %q not found", msg.SessionId))
 	}
 
 	sess.Close()
@@ -323,7 +324,7 @@ func (h *Handler) ReadFile(ctx context.Context, req *connect.Request[v1.ReadFile
 	content, err := os.ReadFile(resolved)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.Newf("file not found: %s", msg.Path))
+			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("file not found: %s", msg.Path))
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -412,7 +413,7 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 	info, err := os.Stat(resolved)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, connect.NewError(connect.CodeNotFound, errors.Newf("file not found: %s", msg.Path))
+			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("file not found: %s", msg.Path))
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -696,7 +697,7 @@ func (h *Handler) WriteFile(ctx context.Context, req *connect.Request[v1.WriteFi
 	} else {
 		if statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {
-				return nil, connect.NewError(connect.CodeNotFound, errors.Newf("file not found: %s", msg.Path))
+				return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("file not found: %s", msg.Path))
 			}
 			return nil, connect.NewError(connect.CodeInternal, statErr)
 		}

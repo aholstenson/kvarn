@@ -2,13 +2,13 @@ package transfer
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
-	"github.com/cockroachdb/errors"
 )
 
 const maxBatchSize = 4 * 1024 * 1024 // 4MB per UploadFiles call
@@ -66,7 +66,7 @@ func (t *BatchTransferer) Upload(ctx context.Context, uploader Uploader, localDi
 
 		relPath, err := filepath.Rel(localDir, path)
 		if err != nil {
-			return errors.Wrap(err, "rel path")
+			return fmt.Errorf("rel path: %w", err)
 		}
 
 		if t.SkipFile != nil && t.SkipFile(relPath, d.IsDir()) {
@@ -86,7 +86,7 @@ func (t *BatchTransferer) Upload(ctx context.Context, uploader Uploader, localDi
 		if d.Type()&fs.ModeSymlink != 0 {
 			target, err := os.Readlink(path)
 			if err != nil {
-				return errors.Wrapf(err, "readlink %s", relPath)
+				return fmt.Errorf("readlink %s: %w", relPath, err)
 			}
 
 			slog.Debug("transferring symlink", "path", relPath, "target", target)
@@ -99,12 +99,12 @@ func (t *BatchTransferer) Upload(ctx context.Context, uploader Uploader, localDi
 
 		content, err := os.ReadFile(path)
 		if err != nil {
-			return errors.Wrapf(err, "read %s", relPath)
+			return fmt.Errorf("read %s: %w", relPath, err)
 		}
 
 		info, err := d.Info()
 		if err != nil {
-			return errors.Wrapf(err, "stat %s", relPath)
+			return fmt.Errorf("stat %s: %w", relPath, err)
 		}
 
 		fileSize := len(content)
@@ -155,7 +155,7 @@ func sendBatch(ctx context.Context, uploader Uploader, remoteDir string, files [
 		Files:      files,
 	})
 	if err != nil {
-		return errors.Wrap(err, "upload batch")
+		return fmt.Errorf("upload batch: %w", err)
 	}
 	return nil
 }

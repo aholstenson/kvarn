@@ -12,7 +12,6 @@ import (
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/project"
 	"github.com/bmatcuk/doublestar/v4"
-	"github.com/cockroachdb/errors"
 )
 
 // StepResult captures the outcome of a single step execution.
@@ -53,10 +52,10 @@ func PullImage(ctx context.Context, runner RunnerProxy, image string) error {
 		Privileged: false,
 	})
 	if err != nil {
-		return errors.Wrapf(err, "podman pull %s", image)
+		return fmt.Errorf("podman pull %s: %w", image, err)
 	}
 	if resp.ExitCode != 0 {
-		return errors.Newf("podman pull %s failed (exit %d): %s", image, resp.ExitCode, resp.Stderr)
+		return fmt.Errorf("podman pull %s failed (exit %d): %s", image, resp.ExitCode, resp.Stderr)
 	}
 	return nil
 }
@@ -86,10 +85,10 @@ func RunSetup(ctx context.Context, runner RunnerProxy, cfg *project.Config, sess
 			onDone(sr, "setup")
 		}
 		if sr.Err != nil {
-			return result, errors.Wrapf(sr.Err, "setup step %q", step.Name)
+			return result, fmt.Errorf("setup step %q: %w", step.Name, sr.Err)
 		}
 		if sr.ExitCode != 0 {
-			return result, errors.Newf("setup step %q failed with exit code %s", step.Name, formatExitCode(sr.ExitCode))
+			return result, fmt.Errorf("setup step %q failed with exit code %s", step.Name, formatExitCode(sr.ExitCode))
 		}
 	}
 
@@ -100,10 +99,10 @@ func RunSetup(ctx context.Context, runner RunnerProxy, cfg *project.Config, sess
 			onDone(sr, "health_check")
 		}
 		if sr.Err != nil {
-			return result, errors.Wrapf(sr.Err, "health check %q", step.Name)
+			return result, fmt.Errorf("health check %q: %w", step.Name, sr.Err)
 		}
 		if sr.ExitCode != 0 {
-			return result, errors.Newf("health check %q failed with exit code %s", step.Name, formatExitCode(sr.ExitCode))
+			return result, fmt.Errorf("health check %q failed with exit code %s", step.Name, formatExitCode(sr.ExitCode))
 		}
 	}
 
@@ -172,7 +171,7 @@ func ChangedFiles(ctx context.Context, runner RunnerProxy, workspaceDir string) 
 		WorkingDir: workspaceDir,
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "git diff")
+		return nil, fmt.Errorf("git diff: %w", err)
 	}
 
 	return parseFileList(resp.Stdout), nil
@@ -266,10 +265,10 @@ func ExtractChanges(ctx context.Context, runner RunnerProxy, workspaceDir string
 		WorkingDir: workspaceDir,
 	})
 	if err != nil {
-		return errors.Wrap(err, "git add -A")
+		return fmt.Errorf("git add -A: %w", err)
 	}
 	if resp.ExitCode != 0 {
-		return errors.Newf("git add -A failed (exit %d): %s", resp.ExitCode, resp.Stderr)
+		return fmt.Errorf("git add -A failed (exit %d): %s", resp.ExitCode, resp.Stderr)
 	}
 
 	// Get changed/added files.
@@ -279,7 +278,7 @@ func ExtractChanges(ctx context.Context, runner RunnerProxy, workspaceDir string
 		WorkingDir: workspaceDir,
 	})
 	if err != nil {
-		return errors.Wrap(err, "git diff changed files")
+		return fmt.Errorf("git diff changed files: %w", err)
 	}
 	changedFiles := parseFileList(resp.Stdout)
 
@@ -290,7 +289,7 @@ func ExtractChanges(ctx context.Context, runner RunnerProxy, workspaceDir string
 		WorkingDir: workspaceDir,
 	})
 	if err != nil {
-		return errors.Wrap(err, "git diff deleted files")
+		return fmt.Errorf("git diff deleted files: %w", err)
 	}
 	deletedFiles := parseFileList(resp.Stdout)
 
@@ -305,19 +304,19 @@ func ExtractChanges(ctx context.Context, runner RunnerProxy, workspaceDir string
 	for _, f := range changedFiles {
 		destPath := filepath.Join(destDir, f)
 		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-			return errors.Wrapf(err, "create dir for %s", f)
+			return fmt.Errorf("create dir for %s: %w", f, err)
 		}
 		out, err := os.Create(destPath)
 		if err != nil {
-			return errors.Wrapf(err, "create file %s", f)
+			return fmt.Errorf("create file %s: %w", f, err)
 		}
 		srcPath := filepath.Join(workspaceDir, f)
 		if err := runner.StreamFromGuest(ctx, srcPath, out); err != nil {
 			out.Close()
-			return errors.Wrapf(err, "stream file %s from VM", f)
+			return fmt.Errorf("stream file %s from VM: %w", f, err)
 		}
 		if err := out.Close(); err != nil {
-			return errors.Wrapf(err, "close file %s", f)
+			return fmt.Errorf("close file %s: %w", f, err)
 		}
 	}
 
@@ -325,7 +324,7 @@ func ExtractChanges(ctx context.Context, runner RunnerProxy, workspaceDir string
 	for _, f := range deletedFiles {
 		destPath := filepath.Join(destDir, f)
 		if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
-			return errors.Wrapf(err, "remove deleted file %s", f)
+			return fmt.Errorf("remove deleted file %s: %w", f, err)
 		}
 	}
 

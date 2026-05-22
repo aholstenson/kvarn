@@ -13,8 +13,8 @@ import (
 
 type unsupportedFrameRW struct{}
 
-func (unsupportedFrameRW) ReadFrame() ([]byte, error)  { return nil, errors.ErrUnsupported }
-func (unsupportedFrameRW) WriteFrame([]byte) error     { return errors.ErrUnsupported }
-func (unsupportedFrameRW) Close() error                { return nil }
+func (unsupportedFrameRW) ReadFrame() ([]byte, error) { return nil, errors.ErrUnsupported }
+func (unsupportedFrameRW) WriteFrame([]byte) error    { return errors.ErrUnsupported }
+func (unsupportedFrameRW) Close() error               { return nil }
 
 func CreateSocketPair() (*os.File, *os.File, error) { return nil, nil, errors.ErrUnsupported }

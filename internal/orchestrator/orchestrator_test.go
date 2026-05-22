@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"connectrpc.com/connect"
+	stderrors "errors"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/agent"
@@ -27,7 +28,6 @@ import (
 	"github.com/aholstenson/kvarn/internal/scm"
 	"github.com/aholstenson/kvarn/internal/session"
 	"github.com/aholstenson/kvarn/internal/vm"
-	stderrors "errors"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -188,11 +188,11 @@ type testSandbox struct {
 	workingDir     string
 }
 
-func (m *testSandbox) GetRunner() sandbox.RunnerProxy   { return m.runner }
+func (m *testSandbox) GetRunner() sandbox.RunnerProxy    { return m.runner }
 func (m *testSandbox) GetShellSessionID() string         { return m.shellSessionID }
 func (m *testSandbox) GetWorkingDir() string             { return m.workingDir }
 func (m *testSandbox) SaveCache(_ context.Context) error { return nil }
-func (m *testSandbox) Close()                            {}
+func (m *testSandbox) Close()                            { _ = os.RemoveAll(m.workingDir) }
 
 func (m *testSandbox) RunSetup(ctx context.Context, cfg *projconfig.Config, onDone sandbox.OnStepDone, onOutput sandbox.OnOutput) (*sandbox.SetupResult, error) {
 	if cfg == nil {

@@ -3,9 +3,9 @@
 package link
 
 import (
+	"fmt"
 	"os"
 
-	"github.com/cockroachdb/errors"
 	"golang.org/x/sys/unix"
 )
 
@@ -33,7 +33,7 @@ func (s *SocketPairFrameRW) ReadFrame() ([]byte, error) {
 
 func (s *SocketPairFrameRW) WriteFrame(frame []byte) error {
 	if err := unix.Sendmsg(int(s.fd.Fd()), frame, nil, nil, 0); err != nil {
-		return errors.Wrap(err, "sendmsg")
+		return fmt.Errorf("sendmsg: %w", err)
 	}
 	return nil
 }
@@ -47,7 +47,7 @@ func (s *SocketPairFrameRW) Close() error {
 func CreateSocketPair() (host, vm *os.File, err error) {
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "socketpair")
+		return nil, nil, fmt.Errorf("socketpair: %w", err)
 	}
 	host = os.NewFile(uintptr(fds[0]), "kvarn-vm-net-host")
 	vm = os.NewFile(uintptr(fds[1]), "kvarn-vm-net-vm")

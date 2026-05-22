@@ -172,7 +172,6 @@ validation:
 	})
 })
 
-
 var _ = Describe("Step retry", func() {
 	var dir string
 

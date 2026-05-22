@@ -8,7 +8,6 @@ import (
 	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
-	"github.com/cockroachdb/errors"
 )
 
 const verifyToken = "kvarn-verify-ok"
@@ -38,11 +37,11 @@ func (c *Cmd) Run() error {
 		Args:    args,
 	}))
 	if err != nil {
-		return errors.Wrap(err, "verify failed")
+		return fmt.Errorf("verify failed: %w", err)
 	}
 
 	if resp.Msg.ExitCode != 0 {
-		return errors.Newf("verify failed: exit code %d\nstderr: %s", resp.Msg.ExitCode, resp.Msg.Stderr)
+		return fmt.Errorf("verify failed: exit code %d\nstderr: %s", resp.Msg.ExitCode, resp.Msg.Stderr)
 	}
 
 	fmt.Printf("OK: command executed successfully on VM %s (exit code %d)\n", resp.Msg.VmId, resp.Msg.ExitCode)

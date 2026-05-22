@@ -12,8 +12,7 @@ import (
 	"time"
 
 	"crypto/tls"
-
-	"github.com/cockroachdb/errors"
+	"fmt"
 )
 
 // CA is a self-signed certificate authority used to sign on-the-fly leaf
@@ -34,12 +33,12 @@ type CA struct {
 func GenerateCA() (*CA, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, errors.Wrap(err, "generate CA key")
+		return nil, fmt.Errorf("generate CA key: %w", err)
 	}
 
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		return nil, errors.Wrap(err, "generate CA serial")
+		return nil, fmt.Errorf("generate CA serial: %w", err)
 	}
 
 	template := &x509.Certificate{
@@ -55,12 +54,12 @@ func GenerateCA() (*CA, error) {
 
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
-		return nil, errors.Wrap(err, "self-sign CA cert")
+		return nil, fmt.Errorf("self-sign CA cert: %w", err)
 	}
 
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
-		return nil, errors.Wrap(err, "parse CA cert")
+		return nil, fmt.Errorf("parse CA cert: %w", err)
 	}
 
 	pemCert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
@@ -88,12 +87,12 @@ func (c *CA) LeafCert(host string) (*tls.Certificate, error) {
 
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, errors.Wrap(err, "generate leaf key")
+		return nil, fmt.Errorf("generate leaf key: %w", err)
 	}
 
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		return nil, errors.Wrap(err, "generate leaf serial")
+		return nil, fmt.Errorf("generate leaf serial: %w", err)
 	}
 
 	template := &x509.Certificate{
@@ -108,7 +107,7 @@ func (c *CA) LeafCert(host string) (*tls.Certificate, error) {
 
 	der, err := x509.CreateCertificate(rand.Reader, template, c.cert, &leafKey.PublicKey, c.key)
 	if err != nil {
-		return nil, errors.Wrap(err, "sign leaf cert")
+		return nil, fmt.Errorf("sign leaf cert: %w", err)
 	}
 
 	cert := &tls.Certificate{

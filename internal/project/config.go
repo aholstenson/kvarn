@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/errors"
+	"errors"
+	"fmt"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -99,11 +101,11 @@ func (d Dependencies) Resolve() ([]ResolvedDep, error) {
 			return nil, err
 		}
 		if len(attrs) == 0 {
-			return nil, errors.Newf("dependency source %q has no attributes", source)
+			return nil, fmt.Errorf("dependency source %q has no attributes", source)
 		}
 		for _, attr := range attrs {
 			if !nixAttrRe.MatchString(attr) {
-				return nil, errors.Newf("invalid attribute %q for source %q: must match %s",
+				return nil, fmt.Errorf("invalid attribute %q for source %q: must match %s",
 					attr, source, nixAttrRe.String())
 			}
 			out = append(out, ResolvedDep{
@@ -132,10 +134,10 @@ func resolveFlakeRef(source string) (flakeURI, host string, err error) {
 	case strings.HasPrefix(s, "nixpkgs/"):
 		channel := strings.TrimPrefix(s, "nixpkgs/")
 		if channel == "" {
-			return "", "", errors.Newf("invalid nixpkgs source %q: channel must not be empty", source)
+			return "", "", fmt.Errorf("invalid nixpkgs source %q: channel must not be empty", source)
 		}
 		if !nixpkgsChannelRe.MatchString(channel) {
-			return "", "", errors.Newf("invalid nixpkgs channel %q: must match %s",
+			return "", "", fmt.Errorf("invalid nixpkgs channel %q: must match %s",
 				channel, nixpkgsChannelRe.String())
 		}
 		return "github:NixOS/nixpkgs/" + channel, "github.com", nil
@@ -158,12 +160,12 @@ func resolveFlakeRef(source string) (flakeURI, host string, err error) {
 		raw = strings.TrimPrefix(raw, "tarball+")
 		u, err := url.Parse(raw)
 		if err != nil || u.Hostname() == "" {
-			return "", "", errors.Newf("invalid dependency source %q: %v", source, err)
+			return "", "", fmt.Errorf("invalid dependency source %q: %v", source, err)
 		}
 		return s, u.Hostname(), nil
 	}
 
-	return "", "", errors.Newf("unsupported dependency source %q: expected `nixpkgs`, "+
+	return "", "", fmt.Errorf("unsupported dependency source %q: expected `nixpkgs`, "+
 		"`nixpkgs/<channel>`, `github:owner/repo[/ref]`, `gitlab:owner/repo[/ref]`, "+
 		"`git+https://...`, `git+ssh://...`, `https://...`, or `tarball+https://...`", source)
 }
@@ -217,14 +219,14 @@ func parseSize(s string) (int64, error) {
 	}
 
 	if numStr == "" {
-		return 0, errors.Newf("invalid size %q: no numeric value", s)
+		return 0, fmt.Errorf("invalid size %q: no numeric value", s)
 	}
 
 	// Parse as integer (no fractional sizes).
 	var value int64
 	for _, c := range numStr {
 		if c < '0' || c > '9' {
-			return 0, errors.Newf("invalid size %q: non-integer value", s)
+			return 0, fmt.Errorf("invalid size %q: non-integer value", s)
 		}
 		value = value*10 + int64(c-'0')
 	}
@@ -235,7 +237,7 @@ func parseSize(s string) (int64, error) {
 	case "G", "GIB":
 		return value * 1024 * 1024 * 1024, nil
 	default:
-		return 0, errors.Newf("invalid size %q: unsupported suffix %q (use M, MiB, G, or GiB)", s, suffix)
+		return 0, fmt.Errorf("invalid size %q: unsupported suffix %q (use M, MiB, G, or GiB)", s, suffix)
 	}
 }
 
@@ -287,14 +289,14 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	// Try duration string (e.g. "10m", "1h30m", "30s").
 	var s string
 	if err := value.Decode(&s); err != nil {
-		return errors.Newf("timeout must be a number (seconds) or duration string (e.g. \"10m\")")
+		return fmt.Errorf("timeout must be a number (seconds) or duration string (e.g. \"10m\")")
 	}
 	parsed, err := time.ParseDuration(s)
 	if err != nil {
-		return errors.Newf("invalid timeout %q: must be a number (seconds) or duration string (e.g. \"10m\")", s)
+		return fmt.Errorf("invalid timeout %q: must be a number (seconds) or duration string (e.g. \"10m\")", s)
 	}
 	if parsed < 0 {
-		return errors.Newf("timeout must not be negative")
+		return fmt.Errorf("timeout must not be negative")
 	}
 	*d = Duration(parsed)
 	return nil
@@ -327,7 +329,7 @@ func Load(dir string) (*Config, error) {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return nil, errors.Wrapf(err, "read %s", name)
+			return nil, fmt.Errorf("read %s: %w", name, err)
 		}
 
 		// yaml.v3 silently drops unknown fields on the typed unmarshal; sniff
@@ -336,18 +338,18 @@ func Load(dir string) (*Config, error) {
 		var raw map[string]yaml.Node
 		if unmarshalErr := yaml.Unmarshal(data, &raw); unmarshalErr == nil {
 			if _, ok := raw["tools"]; ok {
-				return nil, errors.Newf("`tools:` has been replaced by `dependencies:` in %s; "+
+				return nil, fmt.Errorf("`tools:` has been replaced by `dependencies:` in %s; "+
 					"see https://github.com/aholstenson/kvarn for migration", name)
 			}
 		}
 
 		var cfg Config
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
-			return nil, errors.Wrapf(err, "parse %s", name)
+			return nil, fmt.Errorf("parse %s: %w", name, err)
 		}
 
 		if err := cfg.validate(); err != nil {
-			return nil, errors.Wrapf(err, "validate %s", name)
+			return nil, fmt.Errorf("validate %s: %w", name, err)
 		}
 
 		return &cfg, nil
@@ -372,31 +374,31 @@ func (c *Config) validate() error {
 	// Surface dependency schema errors at load time.
 	if len(c.Dependencies) > 0 {
 		if _, err := c.Dependencies.Resolve(); err != nil {
-			return errors.Wrap(err, "dependencies")
+			return fmt.Errorf("dependencies: %w", err)
 		}
 	}
 
 	if c.VM.Disk != "" {
 		size, err := parseSize(c.VM.Disk)
 		if err != nil {
-			return errors.Wrap(err, "vm.disk")
+			return fmt.Errorf("vm.disk: %w", err)
 		}
 		if size < MinDiskSize {
-			return errors.Newf("vm.disk %q is below minimum of 4G", c.VM.Disk)
+			return fmt.Errorf("vm.disk %q is below minimum of 4G", c.VM.Disk)
 		}
 	}
 
 	if c.VM.CPUs != 0 && c.VM.CPUs < MinCPUs {
-		return errors.Newf("vm.cpus %d is below minimum of %d", c.VM.CPUs, MinCPUs)
+		return fmt.Errorf("vm.cpus %d is below minimum of %d", c.VM.CPUs, MinCPUs)
 	}
 
 	if c.VM.Memory != "" {
 		size, err := parseSize(c.VM.Memory)
 		if err != nil {
-			return errors.Wrap(err, "vm.memory")
+			return fmt.Errorf("vm.memory: %w", err)
 		}
 		if uint64(size) < MinMemory {
-			return errors.Newf("vm.memory %q is below minimum of 512M", c.VM.Memory)
+			return fmt.Errorf("vm.memory %q is below minimum of 512M", c.VM.Memory)
 		}
 	}
 
@@ -406,33 +408,33 @@ func (c *Config) validate() error {
 			return errors.New("network.allowed_hosts contains empty entry")
 		}
 		if strings.Contains(host, "://") {
-			return errors.Newf("network.allowed_hosts entry %q must not contain a scheme", host)
+			return fmt.Errorf("network.allowed_hosts entry %q must not contain a scheme", host)
 		}
 		if strings.Contains(host, "/") {
-			return errors.Newf("network.allowed_hosts entry %q must not contain a path", host)
+			return fmt.Errorf("network.allowed_hosts entry %q must not contain a path", host)
 		}
 		// Check for port, but skip IPv6 addresses (which contain colons).
 		if net.ParseIP(host) == nil && strings.Contains(host, ":") {
-			return errors.Newf("network.allowed_hosts entry %q must not contain a port", host)
+			return fmt.Errorf("network.allowed_hosts entry %q must not contain a port", host)
 		}
 		if net.ParseIP(host) == nil && !hostnameRe.MatchString(host) {
-			return errors.Newf("network.allowed_hosts entry %q is not a valid hostname or IP", host)
+			return fmt.Errorf("network.allowed_hosts entry %q is not a valid hostname or IP", host)
 		}
 	}
 
 	// Validate cache paths.
 	for _, p := range c.Cache.Paths {
 		if !filepath.IsAbs(p) {
-			return errors.Newf("cache.paths entry %q must be absolute", p)
+			return fmt.Errorf("cache.paths entry %q must be absolute", p)
 		}
 		if strings.HasPrefix(p, "/home/kvarn/workspace") {
-			return errors.Newf("cache.paths entry %q must not be under /home/kvarn/workspace", p)
+			return fmt.Errorf("cache.paths entry %q must not be under /home/kvarn/workspace", p)
 		}
 		// Caching the Nix store as a plain tarball would corrupt the install
 		// (db, gcroots, and profile generations need to round-trip atomically
 		// with store contents). A first-class /nix cache is planned.
 		if p == "/nix" || p == "/nix/store" || strings.HasPrefix(p, "/nix/") {
-			return errors.Newf("cache.paths entry %q is not allowed; "+
+			return fmt.Errorf("cache.paths entry %q is not allowed; "+
 				"caching /nix will be a first-class feature", p)
 		}
 	}
@@ -443,10 +445,10 @@ func (c *Config) validate() error {
 			return errors.New("environment contains empty key")
 		}
 		if !envNameRe.MatchString(k) {
-			return errors.Newf("environment key %q is not a valid POSIX env-var name", k)
+			return fmt.Errorf("environment key %q is not a valid POSIX env-var name", k)
 		}
 		if strings.ContainsAny(v, "\x00\n") {
-			return errors.Newf("environment value for %q must not contain NUL or newline", k)
+			return fmt.Errorf("environment value for %q must not contain NUL or newline", k)
 		}
 	}
 
@@ -459,13 +461,13 @@ func (c *Config) validate() error {
 			return errors.New("secrets contains empty entry")
 		}
 		if !envNameRe.MatchString(name) {
-			return errors.Newf("secret name %q is not a valid POSIX env-var name", name)
+			return fmt.Errorf("secret name %q is not a valid POSIX env-var name", name)
 		}
 		if seenSecrets[name] {
-			return errors.Newf("secret name %q is duplicated", name)
+			return fmt.Errorf("secret name %q is duplicated", name)
 		}
 		if _, ok := c.Environment[name]; ok {
-			return errors.Newf("secret name %q overlaps with environment key", name)
+			return fmt.Errorf("secret name %q overlaps with environment key", name)
 		}
 		seenSecrets[name] = true
 	}
@@ -481,14 +483,14 @@ func (c *Config) validate() error {
 			return errors.New("step has empty name")
 		}
 		if strings.TrimSpace(s.Run) == "" {
-			return errors.Newf("step %q has empty run command", s.Name)
+			return fmt.Errorf("step %q has empty run command", s.Name)
 		}
 		if s.WorkingDir != "" && filepath.IsAbs(s.WorkingDir) {
-			return errors.Newf("step %q has absolute working_dir %q (must be relative)", s.Name, s.WorkingDir)
+			return fmt.Errorf("step %q has absolute working_dir %q (must be relative)", s.Name, s.WorkingDir)
 		}
 		const maxRetry = 10
 		if s.Retry > maxRetry {
-			return errors.Newf("step %q has retry count %d which exceeds maximum of %d", s.Name, s.Retry, maxRetry)
+			return fmt.Errorf("step %q has retry count %d which exceeds maximum of %d", s.Name, s.Retry, maxRetry)
 		}
 	}
 

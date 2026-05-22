@@ -4,9 +4,8 @@ package runnerbin
 
 import (
 	_ "embed"
+	"fmt"
 	"runtime"
-
-	"github.com/cockroachdb/errors"
 )
 
 // runner is the linux runner binary baked into the CLI at build time. The
@@ -21,7 +20,7 @@ var runner []byte
 // request for any other arch is a programming error.
 func Bytes(goarch string) ([]byte, error) {
 	if goarch != runtime.GOARCH {
-		return nil, errors.Newf("embedded runner is for %s, not %s", runtime.GOARCH, goarch)
+		return nil, fmt.Errorf("embedded runner is for %s, not %s", runtime.GOARCH, goarch)
 	}
 	return runner, nil
 }

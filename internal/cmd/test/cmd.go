@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"errors"
 	"github.com/aholstenson/kvarn/internal/cmd/imageutil"
 	projectstore "github.com/aholstenson/kvarn/internal/config/project"
 	projecttoml "github.com/aholstenson/kvarn/internal/config/project/tomlstore"
@@ -23,8 +24,8 @@ import (
 	"github.com/aholstenson/kvarn/internal/sandbox/transfer"
 	"github.com/aholstenson/kvarn/internal/taskui"
 	"github.com/aholstenson/kvarn/internal/vm"
+
 	"github.com/aholstenson/kvarn/internal/vm/local"
-	"github.com/cockroachdb/errors"
 )
 
 // Cmd is the CLI command for testing project configuration locally.
@@ -54,7 +55,7 @@ func (c *Cmd) Run() error {
 		Progress: imageutil.NewProgress(os.Stderr, "Downloading VM image…"),
 	})
 	if err != nil {
-		return errors.Wrap(err, "find disk image")
+		return fmt.Errorf("find disk image: %w", err)
 	}
 
 	renderer := taskui.New(os.Stdout, c.Verbose)
@@ -64,7 +65,7 @@ func (c *Cmd) Run() error {
 	cfg, err := project.Load(c.Dir)
 	if err != nil {
 		renderer.Stop()
-		return errors.Wrap(err, "load config")
+		return fmt.Errorf("load config: %w", err)
 	}
 	if cfg == nil {
 		renderer.Stop()
@@ -93,7 +94,7 @@ func (c *Cmd) Run() error {
 		secretEnv, bearerPlaceholders, err = secret.Resolve(ctx, store, projectName, cfg.Secrets)
 		if err != nil {
 			renderer.Stop()
-			return errors.Wrap(err, "resolve secrets")
+			return fmt.Errorf("resolve secrets: %w", err)
 		}
 	}
 
@@ -102,14 +103,14 @@ func (c *Cmd) Run() error {
 	img, err := provider.PrepareImage(ctx, vm.BaseImage{DiskImagePath: diskImagePath})
 	if err != nil {
 		renderer.Stop()
-		return errors.Wrap(err, "prepare image")
+		return fmt.Errorf("prepare image: %w", err)
 	}
 
 	// Set up file transfer with gitignore filtering.
 	skipFile, err := transfer.GitIgnoreFilter(c.Dir)
 	if err != nil {
 		renderer.Stop()
-		return errors.Wrap(err, "set up gitignore filter")
+		return fmt.Errorf("set up gitignore filter: %w", err)
 	}
 
 	// Resolve cache provider unless --no-cache is set.
@@ -119,13 +120,13 @@ func (c *Cmd) Run() error {
 		fc, err := cache.DefaultFileCache()
 		if err != nil {
 			renderer.Stop()
-			return errors.Wrap(err, "set up cache")
+			return fmt.Errorf("set up cache: %w", err)
 		}
 		cacheProvider = fc
 		absDir, err := filepath.Abs(c.Dir)
 		if err != nil {
 			renderer.Stop()
-			return errors.Wrap(err, "resolve absolute dir")
+			return fmt.Errorf("resolve absolute dir: %w", err)
 		}
 		projectID = cache.ProjectID(absDir)
 	}
@@ -500,12 +501,12 @@ func openSecretStore(path string) (secret.Store, error) {
 	}
 	if _, err := os.Stat(resolved); err != nil {
 		if os.IsNotExist(err) {
-			return nil, errors.Newf(
+			return nil, fmt.Errorf(
 				"no secret store at %s. Declare secrets with "+
 					"`kvarn secrets set <project> <NAME>` before running `kvarn test`.",
 				resolved)
 		}
-		return nil, errors.Wrapf(err, "stat %s", resolved)
+		return nil, fmt.Errorf("stat %s: %w", resolved, err)
 	}
 	return store, nil
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"io"
 
+	"errors"
+	"fmt"
+
 	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
-	"github.com/cockroachdb/errors"
 )
 
 const streamChunkSize = 512 * 1024 // 512KB
@@ -125,7 +127,7 @@ func (h *Handler) DownloadFile(_ context.Context, req *connect.Request[v1.Downlo
 			break
 		}
 		if readErr != nil {
-			return errors.Wrap(readErr, "read transfer data")
+			return fmt.Errorf("read transfer data: %w", readErr)
 		}
 	}
 
@@ -181,7 +183,7 @@ func (h *Handler) UploadFile(_ context.Context, clientStream *connect.ClientStre
 		n, err := t.Writer.Write(data)
 		if err != nil {
 			writeErr = err
-			return nil, errors.Wrap(err, "write transfer data")
+			return nil, fmt.Errorf("write transfer data: %w", err)
 		}
 		total += int64(n)
 	}

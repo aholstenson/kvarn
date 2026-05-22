@@ -2,11 +2,11 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/project"
-	"github.com/cockroachdb/errors"
 )
 
 // dependencyInstallTimeoutSeconds caps a single `nix profile add` call.
@@ -48,13 +48,13 @@ func InstallDependencies(
 		TimeoutSeconds: dependencyInstallTimeoutSeconds,
 	})
 	if err != nil {
-		return errors.Wrap(err, "exec nix profile add")
+		return fmt.Errorf("exec nix profile add: %w", err)
 	}
 	if onOutput != nil {
 		onOutput(resp.Stdout, resp.Stderr)
 	}
 	if resp.ExitCode != 0 {
-		return errors.Newf("nix profile add failed (exit %d): %s", resp.ExitCode, resp.Stderr)
+		return fmt.Errorf("nix profile add failed (exit %d): %s", resp.ExitCode, resp.Stderr)
 	}
 	return nil
 }

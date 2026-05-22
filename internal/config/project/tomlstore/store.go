@@ -2,12 +2,12 @@ package tomlstore
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/aholstenson/kvarn/internal/config/project"
-	"github.com/cockroachdb/errors"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -20,12 +20,12 @@ type jobEntry struct {
 }
 
 type projectEntry struct {
-	Repo            string              `toml:"repo"`
-	DefaultBranch   string              `toml:"default_branch,omitempty"`
-	Forge           string              `toml:"forge,omitempty"`
-	MaxCostUSD      *float64            `toml:"max_cost_usd,omitempty"`
-	ReportCostOnPR  *bool               `toml:"report_cost_on_pr,omitempty"`
-	Jobs            map[string]jobEntry `toml:"jobs,omitempty"`
+	Repo           string              `toml:"repo"`
+	DefaultBranch  string              `toml:"default_branch,omitempty"`
+	Forge          string              `toml:"forge,omitempty"`
+	MaxCostUSD     *float64            `toml:"max_cost_usd,omitempty"`
+	ReportCostOnPR *bool               `toml:"report_cost_on_pr,omitempty"`
+	Jobs           map[string]jobEntry `toml:"jobs,omitempty"`
 }
 
 // Store is a TOML file-backed project store.
@@ -56,7 +56,7 @@ func (s *Store) load() (*fileData, error) {
 
 	var fd fileData
 	if err := toml.Unmarshal(data, &fd); err != nil {
-		return nil, errors.Wrapf(err, "parse %s", s.path)
+		return nil, fmt.Errorf("parse %s: %w", s.path, err)
 	}
 	if fd.Projects == nil {
 		fd.Projects = make(map[string]*projectEntry)
@@ -125,7 +125,7 @@ func (s *Store) Get(_ context.Context, name string) (*project.Project, error) {
 
 	entry, ok := fd.Projects[name]
 	if !ok {
-		return nil, errors.Newf("project %q not found", name)
+		return nil, fmt.Errorf("project %q not found", name)
 	}
 
 	return entryToProject(name, entry), nil
@@ -171,7 +171,7 @@ func (s *Store) Delete(_ context.Context, name string) error {
 	}
 
 	if _, ok := fd.Projects[name]; !ok {
-		return errors.Newf("project %q not found", name)
+		return fmt.Errorf("project %q not found", name)
 	}
 
 	delete(fd.Projects, name)

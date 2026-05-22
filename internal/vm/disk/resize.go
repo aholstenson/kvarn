@@ -1,9 +1,8 @@
 package disk
 
 import (
+	"fmt"
 	"os"
-
-	"github.com/cockroachdb/errors"
 )
 
 // ResizeDisk extends the disk image file to sizeBytes. The partition table
@@ -12,7 +11,7 @@ import (
 func ResizeDisk(path string, sizeBytes int64) error {
 	info, err := os.Stat(path)
 	if err != nil {
-		return errors.Wrap(err, "stat disk image")
+		return fmt.Errorf("stat disk image: %w", err)
 	}
 
 	if sizeBytes <= info.Size() {
@@ -20,7 +19,7 @@ func ResizeDisk(path string, sizeBytes int64) error {
 	}
 
 	if err := os.Truncate(path, sizeBytes); err != nil {
-		return errors.Wrap(err, "truncate disk image")
+		return fmt.Errorf("truncate disk image: %w", err)
 	}
 
 	return nil

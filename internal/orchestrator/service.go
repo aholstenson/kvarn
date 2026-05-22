@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	llms "github.com/aholstenson/llms-go"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/agent"
 	"github.com/aholstenson/kvarn/internal/agent/coding"
@@ -36,7 +36,7 @@ import (
 	gitscm "github.com/aholstenson/kvarn/internal/scm/git"
 	"github.com/aholstenson/kvarn/internal/session"
 	"github.com/aholstenson/kvarn/internal/vm"
-	"github.com/cockroachdb/errors"
+	llms "github.com/aholstenson/llms-go"
 )
 
 // worklogEntry is one line in the per-job work log posted as a PR comment.
@@ -292,12 +292,12 @@ func (s *Service) ExecuteJob(ctx context.Context, req *connect.Request[v1.Execut
 
 	token, err := generateToken()
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, errors.Wrap(err, "generate token"))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("generate token: %w", err))
 	}
 
 	pr, err := s.registry.Register(token)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, errors.Wrap(err, "register token"))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("register token: %w", err))
 	}
 	defer s.registry.Remove(token)
 
@@ -307,7 +307,7 @@ func (s *Service) ExecuteJob(ctx context.Context, req *connect.Request[v1.Execut
 	instance, runnerConn, err := s.provider.Create(ctx, opts)
 	if err != nil {
 		slog.Error("failed to create VM", "error", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.Wrap(err, "failed to create VM"))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to create VM: %w", err))
 	}
 
 	defer func() {
@@ -354,7 +354,7 @@ func (s *Service) ExecuteJob(ctx context.Context, req *connect.Request[v1.Execut
 	select {
 	case result := <-pr.ResultCh:
 		if result.Error != "" {
-			return nil, connect.NewError(connect.CodeInternal, errors.Newf("runner error: %s", result.Error))
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("runner error: %s", result.Error))
 		}
 		execResult := result.GetExec()
 		if execResult == nil {
@@ -389,14 +389,14 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 	proj, err := s.projectStore.Get(ctx, msg.Project)
 	if err != nil {
 		slog.Error("project not found", "project", msg.Project, "error", err)
-		return nil, connect.NewError(connect.CodeNotFound, errors.Wrapf(err, "project %q", msg.Project))
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("project %q: %w", msg.Project, err))
 	}
 
 	slog.Info("resolved project", "project", proj.Name, "repo", proj.RepoURL, "forge", proj.Forge)
 
 	sess, err := s.sessionMgr.Create(ctx, msg.Project, msg.Prompt, mode.ModeName())
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, errors.Wrap(err, "create session"))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create session: %w", err))
 	}
 
 	branch := msg.Branch
@@ -471,7 +471,7 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 		forgeCfg, err = s.forgeConfigStore.Get(ctx, proj.Forge)
 		if err != nil {
 			log.Error("failed to load forge config", "forge", proj.Forge, "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, errors.Wrapf(err, "load forge config %q", proj.Forge))
+			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("load forge config %q: %w", proj.Forge, err))
 			return
 		}
 
@@ -480,7 +480,7 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 		}
 		if forgeImpl == nil {
 			log.Error("unknown forge type", "type", forgeCfg.Type)
-			s.sessionMgr.Fail(ctx, sessionID, errors.Newf("unknown forge type %q", forgeCfg.Type))
+			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("unknown forge type %q", forgeCfg.Type))
 			return
 		}
 
@@ -488,7 +488,7 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 		cloneURL, err = forgeImpl.ResolveCloneURL(proj.RepoURL)
 		if err != nil {
 			log.Error("failed to resolve clone URL", "repo", proj.RepoURL, "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, errors.Wrap(err, "resolve clone URL"))
+			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("resolve clone URL: %w", err))
 			return
 		}
 
@@ -497,14 +497,14 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 			cred, err := s.credentialStore.Get(ctx, forgeCfg.Credential)
 			if err != nil {
 				log.Error("failed to load credentials", "credential", forgeCfg.Credential, "error", err)
-				s.sessionMgr.Fail(ctx, sessionID, errors.Wrapf(err, "load credential %q", forgeCfg.Credential))
+				s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("load credential %q: %w", forgeCfg.Credential, err))
 				return
 			}
 
 			creds, err = forgeImpl.ResolveCredentials(ctx, cred.Config)
 			if err != nil {
 				log.Error("failed to resolve credentials", "error", err)
-				s.sessionMgr.Fail(ctx, sessionID, errors.Wrap(err, "resolve credentials"))
+				s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("resolve credentials: %w", err))
 				return
 			}
 		}
@@ -517,7 +517,7 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 	cloneDir, err := os.MkdirTemp("", "kvarn-clone-*")
 	if err != nil {
 		log.Error("failed to create temp dir", "error", err)
-		s.sessionMgr.Fail(ctx, sessionID, errors.Wrap(err, "create temp dir"))
+		s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("create temp dir: %w", err))
 		return
 	}
 	defer os.RemoveAll(cloneDir)
@@ -542,7 +542,7 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 
 	if err := scmImpl.Clone(ctx, cloneOpts); err != nil {
 		log.Error("clone failed", "error", err)
-		s.sessionMgr.Fail(ctx, sessionID, errors.Wrap(err, "clone repository"))
+		s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("clone repository: %w", err))
 		return
 	}
 	log.Info("clone complete")
@@ -551,7 +551,7 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 	cfg, err := projconfig.Load(cloneDir)
 	if err != nil {
 		log.Error("failed to load project config", "error", err)
-		s.sessionMgr.Fail(ctx, sessionID, errors.Wrap(err, "load project config"))
+		s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("load project config: %w", err))
 		return
 	}
 
@@ -617,7 +617,7 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 		onOutput := s.makeOutputCallback(ctx, sessionID)
 		if _, err := sess.RunSetup(ctx, cfg, onStepDone, onOutput); err != nil {
 			log.Error("setup failed", "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, errors.Wrap(err, "setup"))
+			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("setup: %w", err))
 			return
 		}
 		log.Info("setup complete")
@@ -688,9 +688,9 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 			// because the cost cap was hit.
 			cause := context.Cause(rootCtx)
 			if errors.Is(cause, cost.ErrBudgetExceeded) {
-				s.sessionMgr.Fail(context.Background(), sessionID, errors.Wrap(cause, "agent"))
+				s.sessionMgr.Fail(context.Background(), sessionID, fmt.Errorf("agent: %w", cause))
 			} else {
-				s.sessionMgr.Fail(context.Background(), sessionID, errors.Wrap(err, "agent"))
+				s.sessionMgr.Fail(context.Background(), sessionID, fmt.Errorf("agent: %w", err))
 			}
 			return
 		}
@@ -706,7 +706,7 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 		changedFiles, err := sess.ChangedFiles(ctx)
 		if err != nil {
 			log.Error("failed to get changed files", "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, errors.Wrap(err, "changed files"))
+			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("changed files: %w", err))
 			return
 		}
 
@@ -715,7 +715,7 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 		valResult, err := sess.RunValidation(ctx, cfg, changedFiles, onStepDone, onOutput)
 		if err != nil {
 			log.Error("validation failed", "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, errors.Wrap(err, "validation"))
+			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("validation: %w", err))
 			return
 		}
 

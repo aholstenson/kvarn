@@ -9,7 +9,6 @@ import (
 	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
-	"github.com/cockroachdb/errors"
 )
 
 type Cmd struct {
@@ -31,7 +30,7 @@ func (c *Cmd) Run() error {
 		Mode:    c.Mode,
 	}))
 	if err != nil {
-		return errors.Wrap(err, "start job")
+		return fmt.Errorf("start job: %w", err)
 	}
 
 	sessionID := resp.Msg.SessionId
@@ -45,7 +44,7 @@ func (c *Cmd) Run() error {
 		SessionId: sessionID,
 	}))
 	if err != nil {
-		return errors.Wrap(err, "watch session")
+		return fmt.Errorf("watch session: %w", err)
 	}
 	defer stream.Close()
 
@@ -92,7 +91,7 @@ func (c *Cmd) Run() error {
 	}
 
 	if err := stream.Err(); err != nil {
-		return errors.Wrap(err, "watch stream")
+		return fmt.Errorf("watch stream: %w", err)
 	}
 
 	return nil

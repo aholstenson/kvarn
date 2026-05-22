@@ -2,7 +2,7 @@
 
 package runnerbin
 
-import "github.com/cockroachdb/errors"
+import "errors"
 
 // Bytes returns the embedded linux runner binary for goarch.
 //

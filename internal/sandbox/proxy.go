@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,7 +13,6 @@ import (
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/dispatch"
-	"github.com/cockroachdb/errors"
 )
 
 // OutputCallback is called with new stdout/stderr content as it becomes available
@@ -143,7 +143,7 @@ func (p *BridgeProxy) sendAndWait(ctx context.Context, cmd *v1.RunnerCommand) (*
 	select {
 	case result := <-w.resultCh:
 		if result.Error != "" {
-			return nil, errors.Newf("runner error: %s", result.Error)
+			return nil, fmt.Errorf("runner error: %s", result.Error)
 		}
 		return result, nil
 	case <-ctx.Done():
@@ -205,7 +205,7 @@ func (p *BridgeProxy) SessionExec(ctx context.Context, req *v1.SessionExecReques
 			}
 		drained:
 			if result.Error != "" {
-				return nil, errors.Newf("runner error: %s", result.Error)
+				return nil, fmt.Errorf("runner error: %s", result.Error)
 			}
 			resp := result.GetSessionExec()
 			if resp == nil {
@@ -312,7 +312,7 @@ func (p *BridgeProxy) WriteFile(ctx context.Context, req *v1.WriteFileRequest) (
 func (p *BridgeProxy) generateTransferID() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		return "", errors.Wrap(err, "generate transfer ID")
+		return "", fmt.Errorf("generate transfer ID: %w", err)
 	}
 	return hex.EncodeToString(b), nil
 }
@@ -352,7 +352,7 @@ func (p *BridgeProxy) StreamToGuest(ctx context.Context, destPath string, src io
 		}},
 	}); err != nil {
 		p.runner.RemoveTransfer(transferID)
-		return errors.Wrap(err, "stream to guest")
+		return fmt.Errorf("stream to guest: %w", err)
 	}
 
 	return nil
@@ -399,11 +399,11 @@ func (p *BridgeProxy) StreamFromGuest(ctx context.Context, srcPath string, dest 
 		p.runner.RemoveTransfer(transferID)
 		pr.Close()
 		pw.Close()
-		return errors.Wrap(err, "stream from guest")
+		return fmt.Errorf("stream from guest: %w", err)
 	}
 
 	if err := <-copyErrCh; err != nil {
-		return errors.Wrap(err, "copy from guest stream")
+		return fmt.Errorf("copy from guest stream: %w", err)
 	}
 
 	return nil

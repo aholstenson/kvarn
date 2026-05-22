@@ -106,12 +106,12 @@ func (e *EthernetEndpoint) Close() {
 
 // stack.LinkEndpoint implementation
 
-func (e *EthernetEndpoint) MTU() uint32 { return e.mtu }
+func (e *EthernetEndpoint) MTU() uint32       { return e.mtu }
 func (e *EthernetEndpoint) SetMTU(mtu uint32) { e.mtu = mtu }
 
 func (e *EthernetEndpoint) MaxHeaderLength() uint16 { return header.EthernetMinimumSize }
 
-func (e *EthernetEndpoint) LinkAddress() tcpip.LinkAddress { return e.addr }
+func (e *EthernetEndpoint) LinkAddress() tcpip.LinkAddress     { return e.addr }
 func (e *EthernetEndpoint) SetLinkAddress(a tcpip.LinkAddress) { e.addr = a }
 
 func (e *EthernetEndpoint) Capabilities() stack.LinkEndpointCapabilities {

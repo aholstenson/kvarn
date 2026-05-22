@@ -2,13 +2,13 @@ package tomlstore
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 
 	"github.com/aholstenson/kvarn/internal/config/secret"
-	"github.com/cockroachdb/errors"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -60,7 +60,7 @@ func (s *Store) load() (fileData, error) {
 
 	var fd fileData
 	if err := toml.Unmarshal(data, &fd); err != nil {
-		return nil, errors.Wrapf(err, "parse %s", s.path)
+		return nil, fmt.Errorf("parse %s: %w", s.path, err)
 	}
 	if fd == nil {
 		fd = fileData{}
@@ -86,7 +86,7 @@ func validateType(t string) error {
 	case secret.TypeEnv, secret.TypeBearer:
 		return nil
 	}
-	return errors.Newf("invalid secret type %q: must be %q or %q",
+	return fmt.Errorf("invalid secret type %q: must be %q or %q",
 		t, secret.TypeEnv, secret.TypeBearer)
 }
 
@@ -101,11 +101,11 @@ func (s *Store) Get(_ context.Context, project, name string) (*secret.Secret, er
 
 	proj, ok := fd[project]
 	if !ok {
-		return nil, errors.Newf("secret %q not found for project %q", name, project)
+		return nil, fmt.Errorf("secret %q not found for project %q", name, project)
 	}
 	entry, ok := proj[name]
 	if !ok {
-		return nil, errors.Newf("secret %q not found for project %q", name, project)
+		return nil, fmt.Errorf("secret %q not found for project %q", name, project)
 	}
 
 	return &secret.Secret{
@@ -183,10 +183,10 @@ func (s *Store) Delete(_ context.Context, project, name string) error {
 
 	proj, ok := fd[project]
 	if !ok {
-		return errors.Newf("secret %q not found for project %q", name, project)
+		return fmt.Errorf("secret %q not found for project %q", name, project)
 	}
 	if _, ok := proj[name]; !ok {
-		return errors.Newf("secret %q not found for project %q", name, project)
+		return fmt.Errorf("secret %q not found for project %q", name, project)
 	}
 	delete(proj, name)
 	if len(proj) == 0 {

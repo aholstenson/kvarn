@@ -79,18 +79,18 @@ type entry struct {
 
 // Renderer draws a live task list to a terminal.
 type Renderer struct {
-	mu         sync.Mutex
-	w          io.Writer
-	isTTY      bool
-	verbose    bool
-	liveLines  int
+	mu          sync.Mutex
+	w           io.Writer
+	isTTY       bool
+	verbose     bool
+	liveLines   int
 	bufferLines int
-	termWidth  int
-	entries    []entry
-	drawnLines int
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	spinIdx  int
+	termWidth   int
+	entries     []entry
+	drawnLines  int
+	stopCh      chan struct{}
+	stopOnce    sync.Once
+	spinIdx     int
 }
 
 // New creates a renderer. It detects whether w is a TTY (when w is os.Stdout

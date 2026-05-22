@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,10 +15,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sync"
-	"sync/atomic"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aholstenson/kvarn/internal/egress/link"
@@ -26,7 +27,6 @@ import (
 	"github.com/aholstenson/kvarn/internal/runnerbin"
 	"github.com/aholstenson/kvarn/internal/vm"
 	"github.com/aholstenson/kvarn/internal/vm/disk"
-	"github.com/cockroachdb/errors"
 	"github.com/mdlayher/vsock"
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -36,10 +36,10 @@ import (
 // across common Linux distributions.
 var ovmfSearchDirs = []string{
 	"/usr/share/OVMF",          // Debian/Ubuntu
-	"/usr/share/edk2/ovmf",    // Fedora
+	"/usr/share/edk2/ovmf",     // Fedora
 	"/usr/share/edk2-ovmf/x64", // Arch (edk2-ovmf)
-	"/usr/share/edk2-ovmf",    // Arch (older)
-	"/usr/share/qemu",         // openSUSE
+	"/usr/share/edk2-ovmf",     // Arch (older)
+	"/usr/share/qemu",          // openSUSE
 }
 
 // ovmfFirmware holds a matched pair of OVMF CODE and VARS files.
@@ -159,13 +159,13 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	// Copy qcow2 disk to a temp file for this VM instance.
 	tmpDiskFile, err := os.CreateTemp("", "kvarn-disk-*.qcow2")
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create temp disk file")
+		return nil, nil, fmt.Errorf("create temp disk file: %w", err)
 	}
 	tmpDisk = tmpDiskFile.Name()
 	tmpDiskFile.Close()
 
 	if err := copyFile(base.DiskImagePath, tmpDisk); err != nil {
-		return nil, nil, errors.Wrap(err, "copy disk image")
+		return nil, nil, fmt.Errorf("copy disk image: %w", err)
 	}
 
 	// Resize qcow2 disk to requested size.
@@ -174,7 +174,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 		diskSize = project.DefaultDiskSize
 	}
 	if err := disk.ResizeQcow2(tmpDisk, diskSize); err != nil {
-		return nil, nil, errors.Wrap(err, "resize disk")
+		return nil, nil, fmt.Errorf("resize disk: %w", err)
 	}
 
 	// Allocate unique CID and vsock port for this VM.
@@ -185,14 +185,14 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	// certificate into the cloud-init seed for the in-VM trust store.
 	ca, err := egressproxy.GenerateCA()
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "generate proxy CA")
+		return nil, nil, fmt.Errorf("generate proxy CA: %w", err)
 	}
 
 	// Local providers always boot host-arch VMs, so the embedded runner for
 	// runtime.GOARCH is exactly what the guest needs.
 	runnerBin, err := runnerbin.Bytes(runtime.GOARCH)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "load embedded runner")
+		return nil, nil, fmt.Errorf("load embedded runner: %w", err)
 	}
 
 	// Create cloud-init seed disk.
@@ -203,19 +203,19 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 		Runner:    runnerBin,
 		ProxyCA:   ca.CertPEM(),
 	}); err != nil {
-		return nil, nil, errors.Wrap(err, "create cloud-init seed disk")
+		return nil, nil, fmt.Errorf("create cloud-init seed disk: %w", err)
 	}
 
 	// Copy OVMF_VARS to a writable per-VM temp file.
 	tmpVarsFile, err := os.CreateTemp("", "kvarn-ovmf-vars-*.fd")
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create temp OVMF vars file")
+		return nil, nil, fmt.Errorf("create temp OVMF vars file: %w", err)
 	}
 	tmpVars = tmpVarsFile.Name()
 	tmpVarsFile.Close()
 
 	if err := copyFile(ovmf.varsPath, tmpVars); err != nil {
-		return nil, nil, errors.Wrap(err, "copy OVMF vars")
+		return nil, nil, fmt.Errorf("copy OVMF vars: %w", err)
 	}
 
 	// Create QMP socket path.
@@ -237,7 +237,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	// proxy is the only reachable network endpoint.
 	hostFd, vmFd, err := unixSocketpairStream()
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create network socket pair")
+		return nil, nil, fmt.Errorf("create network socket pair: %w", err)
 	}
 	hostFile := os.NewFile(uintptr(hostFd), "kvarn-vm-net-host")
 	vmFile := os.NewFile(uintptr(vmFd), "kvarn-vm-net-vm")
@@ -268,7 +268,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	// Capture serial output from stdout.
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create stdout pipe")
+		return nil, nil, fmt.Errorf("create stdout pipe: %w", err)
 	}
 
 	cmd.Stderr = cmd.Stdout // merge stderr into stdout
@@ -276,7 +276,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	log.Info("starting QEMU", "cid", cid, "vsockPort", vsockPort, "cpus", cpus, "memoryMB", memoryMB)
 
 	if err := cmd.Start(); err != nil {
-		return nil, nil, errors.Wrap(err, "start QEMU")
+		return nil, nil, fmt.Errorf("start QEMU: %w", err)
 	}
 
 	// Bring up the netstack on the host side of the socket pair. qemu
@@ -292,7 +292,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	if err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
-		return nil, nil, errors.Wrap(err, "create userspace network")
+		return nil, nil, fmt.Errorf("create userspace network: %w", err)
 	}
 
 	netCtx, cancel := context.WithCancel(context.Background())
@@ -303,7 +303,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	if err := startProxy(netCtx, network, ca, opts.Network); err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
-		return nil, nil, errors.Wrap(err, "start egress proxy")
+		return nil, nil, fmt.Errorf("start egress proxy: %w", err)
 	}
 
 	// Forward serial console output.
@@ -325,7 +325,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	if err := qmpHandshake(qmpSock); err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
-		return nil, nil, errors.Wrap(err, "QMP handshake")
+		return nil, nil, fmt.Errorf("QMP handshake: %w", err)
 	}
 
 	// Listen on vsock for the runner to connect.
@@ -333,7 +333,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	if err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
-		return nil, nil, errors.Wrap(err, "vsock listen")
+		return nil, nil, fmt.Errorf("vsock listen: %w", err)
 	}
 
 	id := fmt.Sprintf("local-%d", time.Now().UnixNano())
@@ -382,7 +382,7 @@ func (p *Provider) Destroy(_ context.Context, id string) error {
 	p.mu.Unlock()
 
 	if !ok {
-		return errors.Newf("VM %s not found", id)
+		return fmt.Errorf("VM %s not found", id)
 	}
 
 	// Attempt graceful shutdown via QMP.
@@ -553,7 +553,7 @@ func findOVMF() (*ovmfFirmware, error) {
 		}
 	}
 
-	return nil, errors.Newf("OVMF firmware not found; searched directories: %v", ovmfSearchDirs)
+	return nil, fmt.Errorf("OVMF firmware not found; searched directories: %v", ovmfSearchDirs)
 }
 
 func copyFile(src, dst string) error {
@@ -594,7 +594,7 @@ func qmpHandshake(sockPath string) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if err != nil {
-		return errors.Wrap(err, "connect to QMP socket")
+		return fmt.Errorf("connect to QMP socket: %w", err)
 	}
 	defer conn.Close()
 
@@ -604,18 +604,18 @@ func qmpHandshake(sockPath string) error {
 	dec := json.NewDecoder(conn)
 	var greeting json.RawMessage
 	if err := dec.Decode(&greeting); err != nil {
-		return errors.Wrap(err, "read QMP greeting")
+		return fmt.Errorf("read QMP greeting: %w", err)
 	}
 
 	// Send qmp_capabilities to exit capabilities negotiation mode.
 	if _, err := conn.Write([]byte(`{"execute":"qmp_capabilities"}` + "\n")); err != nil {
-		return errors.Wrap(err, "send qmp_capabilities")
+		return fmt.Errorf("send qmp_capabilities: %w", err)
 	}
 
 	// Read the success response.
 	var resp json.RawMessage
 	if err := dec.Decode(&resp); err != nil {
-		return errors.Wrap(err, "read qmp_capabilities response")
+		return fmt.Errorf("read qmp_capabilities response: %w", err)
 	}
 
 	return nil
@@ -625,7 +625,7 @@ func qmpHandshake(sockPath string) error {
 func qmpShutdown(sockPath string) error {
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
-		return errors.Wrap(err, "connect to QMP socket")
+		return fmt.Errorf("connect to QMP socket: %w", err)
 	}
 	defer conn.Close()
 
@@ -636,25 +636,25 @@ func qmpShutdown(sockPath string) error {
 	// Read greeting.
 	var greeting json.RawMessage
 	if err := dec.Decode(&greeting); err != nil {
-		return errors.Wrap(err, "read QMP greeting")
+		return fmt.Errorf("read QMP greeting: %w", err)
 	}
 
 	// Negotiate capabilities.
 	if _, err := conn.Write([]byte(`{"execute":"qmp_capabilities"}` + "\n")); err != nil {
-		return errors.Wrap(err, "send qmp_capabilities")
+		return fmt.Errorf("send qmp_capabilities: %w", err)
 	}
 	var capResp json.RawMessage
 	if err := dec.Decode(&capResp); err != nil {
-		return errors.Wrap(err, "read qmp_capabilities response")
+		return fmt.Errorf("read qmp_capabilities response: %w", err)
 	}
 
 	// Send system_powerdown.
 	if _, err := conn.Write([]byte(`{"execute":"system_powerdown"}` + "\n")); err != nil {
-		return errors.Wrap(err, "send system_powerdown")
+		return fmt.Errorf("send system_powerdown: %w", err)
 	}
 	var pdResp json.RawMessage
 	if err := dec.Decode(&pdResp); err != nil {
-		return errors.Wrap(err, "read system_powerdown response")
+		return fmt.Errorf("read system_powerdown response: %w", err)
 	}
 
 	return nil

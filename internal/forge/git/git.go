@@ -2,11 +2,11 @@ package forgegit
 
 import (
 	"context"
+	"errors"
 
 	"github.com/aholstenson/kvarn/internal/forge"
 	"github.com/aholstenson/kvarn/internal/scm"
 	scmgit "github.com/aholstenson/kvarn/internal/scm/git"
-	"github.com/cockroachdb/errors"
 )
 
 // Git is a forge implementation for plain git repositories without a hosting

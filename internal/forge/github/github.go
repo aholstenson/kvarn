@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,7 +18,6 @@ import (
 	"github.com/aholstenson/kvarn/internal/forge"
 	"github.com/aholstenson/kvarn/internal/scm"
 	"github.com/aholstenson/kvarn/internal/scm/git"
-	"github.com/cockroachdb/errors"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -74,7 +74,7 @@ func (g *GitHub) ResolveCloneURL(repo string) (string, error) {
 	// Shorthand "org/repo" -> full HTTPS URL.
 	parts := strings.SplitN(repo, "/", 3)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", errors.Newf("invalid repo reference %q, expected \"owner/repo\"", repo)
+		return "", fmt.Errorf("invalid repo reference %q, expected \"owner/repo\"", repo)
 	}
 	return fmt.Sprintf("https://github.com/%s/%s.git", parts[0], parts[1]), nil
 }
@@ -92,7 +92,7 @@ func (g *GitHub) ResolveCredentials(ctx context.Context, config map[string]strin
 	if appID != "" && privateKeyPath != "" && installationID != "" {
 		token, err := g.getInstallationToken(ctx, appID, privateKeyPath, installationID)
 		if err != nil {
-			return nil, errors.Wrap(err, "resolve GitHub App credentials")
+			return nil, fmt.Errorf("resolve GitHub App credentials: %w", err)
 		}
 		return &scm.Credentials{Token: token}, nil
 	}
@@ -115,12 +115,12 @@ func (g *GitHub) getInstallationToken(ctx context.Context, appID, privateKeyPath
 	// Read and parse private key.
 	keyData, err := os.ReadFile(privateKeyPath)
 	if err != nil {
-		return "", errors.Wrapf(err, "read private key %q", privateKeyPath)
+		return "", fmt.Errorf("read private key %q: %w", privateKeyPath, err)
 	}
 
 	key, err := jwt.ParseRSAPrivateKeyFromPEM(keyData)
 	if err != nil {
-		return "", errors.Wrap(err, "parse RSA private key")
+		return "", fmt.Errorf("parse RSA private key: %w", err)
 	}
 
 	// Create JWT.
@@ -134,20 +134,20 @@ func (g *GitHub) getInstallationToken(ctx context.Context, appID, privateKeyPath
 	url := fmt.Sprintf("%s/app/installations/%s/access_tokens", g.apiBase, installationID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return "", errors.Wrap(err, "create token request")
+		return "", fmt.Errorf("create token request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		return "", errors.Wrap(err, "request installation token")
+		return "", fmt.Errorf("request installation token: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {
-		return "", errors.Newf("create installation token: HTTP %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("create installation token: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
 	var tokenResp struct {
@@ -155,7 +155,7 @@ func (g *GitHub) getInstallationToken(ctx context.Context, appID, privateKeyPath
 		ExpiresAt time.Time `json:"expires_at"`
 	}
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return "", errors.Wrap(err, "parse token response")
+		return "", fmt.Errorf("parse token response: %w", err)
 	}
 
 	// Cache with 5-minute safety margin.
@@ -178,7 +178,7 @@ func (g *GitHub) signJWT(appID string, key *rsa.PrivateKey, now time.Time) (stri
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	signed, err := token.SignedString(key)
 	if err != nil {
-		return "", errors.Wrap(err, "sign JWT")
+		return "", fmt.Errorf("sign JWT: %w", err)
 	}
 	return signed, nil
 }
@@ -203,13 +203,13 @@ func (g *GitHub) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts)
 	}
 	bodyJSON, err := json.Marshal(prBody)
 	if err != nil {
-		return nil, errors.Wrap(err, "marshal PR body")
+		return nil, fmt.Errorf("marshal PR body: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls", g.apiBase, owner, repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyJSON))
 	if err != nil {
-		return nil, errors.Wrap(err, "create PR request")
+		return nil, fmt.Errorf("create PR request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -217,13 +217,13 @@ func (g *GitHub) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts)
 
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		return nil, errors.Wrap(err, "send PR request")
+		return nil, fmt.Errorf("send PR request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {
-		return nil, errors.Newf("create PR: HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("create PR: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var prResp struct {
@@ -231,7 +231,7 @@ func (g *GitHub) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts)
 		HTMLURL string `json:"html_url"`
 	}
 	if err := json.Unmarshal(respBody, &prResp); err != nil {
-		return nil, errors.Wrap(err, "parse PR response")
+		return nil, fmt.Errorf("parse PR response: %w", err)
 	}
 
 	slog.Info("pull request created",
@@ -266,13 +266,13 @@ func (g *GitHub) PostComment(ctx context.Context, opts forge.PostCommentOpts) er
 	body := map[string]any{"body": opts.Body}
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
-		return errors.Wrap(err, "marshal comment body")
+		return fmt.Errorf("marshal comment body: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", g.apiBase, owner, repo, opts.Number)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyJSON))
 	if err != nil {
-		return errors.Wrap(err, "create comment request")
+		return fmt.Errorf("create comment request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -280,13 +280,13 @@ func (g *GitHub) PostComment(ctx context.Context, opts forge.PostCommentOpts) er
 
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		return errors.Wrap(err, "send comment request")
+		return fmt.Errorf("send comment request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(resp.Body)
-		return errors.Newf("post comment: HTTP %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("post comment: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	return nil
@@ -316,7 +316,7 @@ func (g *GitHub) addLabels(ctx context.Context, owner, repo string, number int, 
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return errors.Newf("add labels: HTTP %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("add labels: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	return nil
@@ -329,7 +329,7 @@ func ParseRepoURL(repoURL string) (owner, repo string, err error) {
 	if strings.HasPrefix(repoURL, "git@") {
 		parts := strings.SplitN(repoURL, ":", 2)
 		if len(parts) != 2 {
-			return "", "", errors.Newf("invalid SSH URL: %s", repoURL)
+			return "", "", fmt.Errorf("invalid SSH URL: %s", repoURL)
 		}
 		path := strings.TrimSuffix(parts[1], ".git")
 		return splitOwnerRepo(path, repoURL)
@@ -343,7 +343,7 @@ func ParseRepoURL(repoURL string) (owner, repo string, err error) {
 			// Remove host part.
 			slashIdx := strings.Index(path, "/")
 			if slashIdx < 0 {
-				return "", "", errors.Newf("invalid HTTPS URL: %s", repoURL)
+				return "", "", fmt.Errorf("invalid HTTPS URL: %s", repoURL)
 			}
 			path = path[slashIdx+1:]
 			path = strings.TrimSuffix(path, ".git")
@@ -351,13 +351,13 @@ func ParseRepoURL(repoURL string) (owner, repo string, err error) {
 		}
 	}
 
-	return "", "", errors.Newf("unsupported URL format: %s", repoURL)
+	return "", "", fmt.Errorf("unsupported URL format: %s", repoURL)
 }
 
 func splitOwnerRepo(path, originalURL string) (string, string, error) {
 	parts := strings.SplitN(path, "/", 3)
 	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", errors.Newf("cannot extract owner/repo from URL: %s", originalURL)
+		return "", "", fmt.Errorf("cannot extract owner/repo from URL: %s", originalURL)
 	}
 	return parts[0], parts[1], nil
 }

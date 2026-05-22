@@ -6,7 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/cockroachdb/errors"
+	"fmt"
+
 	"github.com/pelletier/go-toml/v2"
 
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
@@ -88,7 +89,7 @@ func (s *Store) load() (fileData, error) {
 	}
 	var fd fileData
 	if err := toml.Unmarshal(data, &fd); err != nil {
-		return fileData{}, errors.Wrapf(err, "parse %s", s.path)
+		return fileData{}, fmt.Errorf("parse %s: %w", s.path, err)
 	}
 	return fd, nil
 }

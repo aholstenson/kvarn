@@ -2,12 +2,12 @@ package tomlstore
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/aholstenson/kvarn/internal/config/credential"
-	"github.com/cockroachdb/errors"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -43,7 +43,7 @@ func (s *Store) load() (*fileData, error) {
 
 	var fd fileData
 	if err := toml.Unmarshal(data, &fd); err != nil {
-		return nil, errors.Wrapf(err, "parse %s", s.path)
+		return nil, fmt.Errorf("parse %s: %w", s.path, err)
 	}
 	if fd.Credentials == nil {
 		fd.Credentials = make(map[string]map[string]string)
@@ -75,7 +75,7 @@ func (s *Store) Get(_ context.Context, name string) (*credential.Credential, err
 
 	entry, ok := fd.Credentials[name]
 	if !ok {
-		return nil, errors.Newf("credential %q not found", name)
+		return nil, fmt.Errorf("credential %q not found", name)
 	}
 
 	config := make(map[string]string, len(entry))
@@ -140,7 +140,7 @@ func (s *Store) Delete(_ context.Context, name string) error {
 	}
 
 	if _, ok := fd.Credentials[name]; !ok {
-		return errors.Newf("credential %q not found", name)
+		return fmt.Errorf("credential %q not found", name)
 	}
 
 	delete(fd.Credentials, name)

@@ -2,9 +2,9 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
-
-	"github.com/cockroachdb/errors"
 )
 
 type Cmd struct {
@@ -27,7 +27,7 @@ func (c *Cmd) Run() error {
 			var err error
 			httpClient, addr, err = vsockClient(c.VsockPort)
 			if err != nil {
-				return errors.Wrap(err, "vsock client")
+				return fmt.Errorf("vsock client: %w", err)
 			}
 		} else {
 			addr = c.OrchestratorAddr

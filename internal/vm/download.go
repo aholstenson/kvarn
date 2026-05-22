@@ -14,9 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"errors"
+
 	"github.com/Masterminds/semver/v3"
 	"github.com/aholstenson/kvarn/internal/buildinfo"
-	"github.com/cockroachdb/errors"
 )
 
 // cachedImageName is the filename used for a downloaded disk image inside its
@@ -49,7 +50,7 @@ var userCacheDir = os.UserCacheDir
 func imageCacheDir(version, arch string) (string, error) {
 	dir, err := userCacheDir()
 	if err != nil {
-		return "", errors.Wrap(err, "determine user cache dir")
+		return "", fmt.Errorf("determine user cache dir: %w", err)
 	}
 	return filepath.Join(dir, "kvarn", "images", version, arch), nil
 }
@@ -79,7 +80,7 @@ func downloadDiskImage(ctx context.Context, version, arch string, progress func(
 	dest := filepath.Join(dir, cachedImageName)
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", errors.Wrapf(err, "create image cache dir %s", dir)
+		return "", fmt.Errorf("create image cache dir %s: %w", dir, err)
 	}
 
 	// Best-effort cross-process lock so two kvarn invocations don't both pull
@@ -106,7 +107,7 @@ func downloadDiskImage(ctx context.Context, version, arch string, progress func(
 
 	tmp, err := os.CreateTemp(dir, ".disk-*.qcow2.tmp")
 	if err != nil {
-		return "", errors.Wrap(err, "create temp file for image")
+		return "", fmt.Errorf("create temp file for image: %w", err)
 	}
 	tmpName := tmp.Name()
 
@@ -114,19 +115,19 @@ func downloadDiskImage(ctx context.Context, version, arch string, progress func(
 	if err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
-		return "", errors.Wrap(err, "build image request")
+		return "", fmt.Errorf("build image request: %w", err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
-		return "", errors.Wrapf(err, "download image %s", assetURL)
+		return "", fmt.Errorf("download image %s: %w", assetURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		tmp.Close()
 		os.Remove(tmpName)
-		return "", errors.Newf("download image %s: unexpected status %s", assetURL, resp.Status)
+		return "", fmt.Errorf("download image %s: unexpected status %s", assetURL, resp.Status)
 	}
 
 	// Hash while streaming so we never read the file back. The counting writer
@@ -139,17 +140,17 @@ func downloadDiskImage(ctx context.Context, version, arch string, progress func(
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
-		return "", errors.Wrap(err, "write image")
+		return "", fmt.Errorf("write image: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
-		return "", errors.Wrap(err, "close image temp file")
+		return "", fmt.Errorf("close image temp file: %w", err)
 	}
 
 	gotSum := hex.EncodeToString(hasher.Sum(nil))
 	if !strings.EqualFold(gotSum, wantSum) {
 		os.Remove(tmpName)
-		return "", errors.Newf(
+		return "", fmt.Errorf(
 			"image checksum mismatch for %s:\n  want %s\n  got  %s",
 			assetURL, wantSum, gotSum,
 		)
@@ -157,7 +158,7 @@ func downloadDiskImage(ctx context.Context, version, arch string, progress func(
 
 	if err := os.Rename(tmpName, dest); err != nil {
 		os.Remove(tmpName)
-		return "", errors.Wrapf(err, "move image into place %s", dest)
+		return "", fmt.Errorf("move image into place %s: %w", dest, err)
 	}
 	return dest, nil
 }
@@ -167,23 +168,23 @@ func downloadDiskImage(ctx context.Context, version, arch string, progress func(
 func fetchChecksum(ctx context.Context, url string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", errors.Wrap(err, "build checksum request")
+		return "", fmt.Errorf("build checksum request: %w", err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", errors.Wrapf(err, "download checksum %s", url)
+		return "", fmt.Errorf("download checksum %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", errors.Newf("download checksum %s: unexpected status %s", url, resp.Status)
+		return "", fmt.Errorf("download checksum %s: unexpected status %s", url, resp.Status)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil {
-		return "", errors.Wrapf(err, "read checksum %s", url)
+		return "", fmt.Errorf("read checksum %s: %w", url, err)
 	}
 	fields := strings.Fields(string(data))
 	if len(fields) == 0 {
-		return "", errors.Newf("checksum %s is empty", url)
+		return "", fmt.Errorf("checksum %s is empty", url)
 	}
 	return fields[0], nil
 }
@@ -228,7 +229,7 @@ func waitForDownload(ctx context.Context, dest, lockPath string) (string, error)
 			return "", ctx.Err()
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				return "", errors.Newf(
+				return "", fmt.Errorf(
 					"timed out waiting for a concurrent image download; remove %s if it is stale",
 					lockPath,
 				)
@@ -261,23 +262,23 @@ func fetchImageManifest(ctx context.Context) (*imageManifest, error) {
 	url := fmt.Sprintf("%s/%s/%s", releaseBaseURL, imageIndexTag, imageManifestName)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, errors.Wrap(err, "build image manifest request")
+		return nil, fmt.Errorf("build image manifest request: %w", err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, errors.Wrapf(err, "download image manifest %s", url)
+		return nil, fmt.Errorf("download image manifest %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.Newf("download image manifest %s: unexpected status %s", url, resp.Status)
+		return nil, fmt.Errorf("download image manifest %s: unexpected status %s", url, resp.Status)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, errors.Wrapf(err, "read image manifest %s", url)
+		return nil, fmt.Errorf("read image manifest %s: %w", url, err)
 	}
 	var m imageManifest
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, errors.Wrapf(err, "parse image manifest %s", url)
+		return nil, fmt.Errorf("parse image manifest %s: %w", url, err)
 	}
 	return &m, nil
 }
@@ -306,7 +307,7 @@ func resolveImageVersion(ctx context.Context, cs *semver.Constraints, arch strin
 		}
 	}
 	if best == nil {
-		return "", errors.Newf("no published image satisfies %q for %s", cs.String(), arch)
+		return "", fmt.Errorf("no published image satisfies %q for %s", cs.String(), arch)
 	}
 	return best.String(), nil
 }

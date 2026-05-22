@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
-	"github.com/cockroachdb/errors"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -59,7 +58,7 @@ func (t *StreamingTransferer) Upload(ctx context.Context, uploader Uploader, loc
 		return nil
 	})
 	if err != nil {
-		return errors.Wrap(err, "compute transfer size")
+		return fmt.Errorf("compute transfer size: %w", err)
 	}
 
 	// Ensure temp directory exists on the guest.
@@ -69,7 +68,7 @@ func (t *StreamingTransferer) Upload(ctx context.Context, uploader Uploader, loc
 		Args:    []string{"-p", transferTmpDir},
 	})
 	if err != nil {
-		return errors.Wrap(err, "create transfer tmp dir")
+		return fmt.Errorf("create transfer tmp dir: %w", err)
 	}
 
 	// Set up pipe: tar+zstd goroutine writes to pw, StreamToGuest reads from pr.
@@ -97,10 +96,10 @@ func (t *StreamingTransferer) Upload(ctx context.Context, uploader Uploader, loc
 	<-done
 
 	if tarErr != nil {
-		return errors.Wrap(tarErr, "create tarball")
+		return fmt.Errorf("create tarball: %w", tarErr)
 	}
 	if streamErr != nil {
-		return errors.Wrap(streamErr, "stream to guest")
+		return fmt.Errorf("stream to guest: %w", streamErr)
 	}
 
 	// Extract on guest.
@@ -115,10 +114,10 @@ func (t *StreamingTransferer) Upload(ctx context.Context, uploader Uploader, loc
 		},
 	})
 	if err != nil {
-		return errors.Wrap(err, "extract tarball on guest")
+		return fmt.Errorf("extract tarball on guest: %w", err)
 	}
 	if resp.ExitCode != 0 {
-		return errors.Newf("extract failed (exit %d): %s", resp.ExitCode, resp.Stderr)
+		return fmt.Errorf("extract failed (exit %d): %s", resp.ExitCode, resp.Stderr)
 	}
 
 	return nil
@@ -128,7 +127,7 @@ func (t *StreamingTransferer) Upload(ctx context.Context, uploader Uploader, loc
 func (t *StreamingTransferer) writeTarball(w io.Writer, localDir string, bytesSent *atomic.Int64, totalBytes int64) error {
 	zw, err := zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
-		return errors.Wrap(err, "create zstd encoder")
+		return fmt.Errorf("create zstd encoder: %w", err)
 	}
 	defer zw.Close()
 
@@ -142,7 +141,7 @@ func (t *StreamingTransferer) writeTarball(w io.Writer, localDir string, bytesSe
 
 		relPath, err := filepath.Rel(localDir, path)
 		if err != nil {
-			return errors.Wrap(err, "rel path")
+			return fmt.Errorf("rel path: %w", err)
 		}
 
 		if t.SkipFile != nil && t.SkipFile(relPath, d.IsDir()) {
@@ -163,7 +162,7 @@ func (t *StreamingTransferer) writeTarball(w io.Writer, localDir string, bytesSe
 		if d.Type()&fs.ModeSymlink != 0 {
 			target, err := os.Readlink(path)
 			if err != nil {
-				return errors.Wrapf(err, "readlink %s", relPath)
+				return fmt.Errorf("readlink %s: %w", relPath, err)
 			}
 			slog.Debug("transferring symlink", "path", relPath, "target", target)
 			return tw.WriteHeader(&tar.Header{
@@ -175,7 +174,7 @@ func (t *StreamingTransferer) writeTarball(w io.Writer, localDir string, bytesSe
 
 		info, err := d.Info()
 		if err != nil {
-			return errors.Wrapf(err, "stat %s", relPath)
+			return fmt.Errorf("stat %s: %w", relPath, err)
 		}
 
 		if d.IsDir() {
@@ -194,23 +193,23 @@ func (t *StreamingTransferer) writeTarball(w io.Writer, localDir string, bytesSe
 			Size:     info.Size(),
 			Mode:     int64(info.Mode().Perm()),
 		}); err != nil {
-			return errors.Wrapf(err, "write header %s", relPath)
+			return fmt.Errorf("write header %s: %w", relPath, err)
 		}
 
 		f, err := os.Open(path)
 		if err != nil {
-			return errors.Wrapf(err, "open %s", relPath)
+			return fmt.Errorf("open %s: %w", relPath, err)
 		}
 		defer f.Close()
 
 		cr := &countingReader{
-			r:           f,
-			bytesSent:   bytesSent,
-			totalBytes:  totalBytes,
-			onProgress:  t.OnProgress,
+			r:          f,
+			bytesSent:  bytesSent,
+			totalBytes: totalBytes,
+			onProgress: t.OnProgress,
 		}
 		if _, err := io.Copy(tw, cr); err != nil {
-			return errors.Wrapf(err, "write %s", relPath)
+			return fmt.Errorf("write %s: %w", relPath, err)
 		}
 
 		return nil
@@ -222,10 +221,10 @@ func (t *StreamingTransferer) writeTarball(w io.Writer, localDir string, bytesSe
 
 	// Close tar then zstd to flush all data.
 	if err := tw.Close(); err != nil {
-		return errors.Wrap(err, "close tar writer")
+		return fmt.Errorf("close tar writer: %w", err)
 	}
 	if err := zw.Close(); err != nil {
-		return errors.Wrap(err, "close zstd writer")
+		return fmt.Errorf("close zstd writer: %w", err)
 	}
 
 	return nil

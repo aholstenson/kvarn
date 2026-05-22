@@ -8,7 +8,6 @@ import (
 
 	"github.com/aholstenson/kvarn/internal/cmd/imageutil"
 	"github.com/aholstenson/kvarn/internal/vm"
-	"github.com/cockroachdb/errors"
 )
 
 // Cmd is the parent command for `kvarn image <subcommand>`.
@@ -35,7 +34,7 @@ func (c *PullCmd) Run() error {
 		Progress:      imageutil.NewProgress(os.Stderr, "Downloading VM image…"),
 	})
 	if err != nil {
-		return errors.Wrap(err, "pull image")
+		return fmt.Errorf("pull image: %w", err)
 	}
 
 	fmt.Fprintln(os.Stdout, path)

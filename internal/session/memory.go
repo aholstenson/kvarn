@@ -4,10 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"sync"
 	"time"
-
-	"github.com/cockroachdb/errors"
 
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 )
@@ -44,7 +43,7 @@ func generateID() (string, error) {
 func (m *MemoryManager) Create(_ context.Context, projectName string, prompt string, mode string) (*Session, error) {
 	id, err := generateID()
 	if err != nil {
-		return nil, errors.Wrap(err, "generate session id")
+		return nil, fmt.Errorf("generate session id: %w", err)
 	}
 
 	now := time.Now()
@@ -71,7 +70,7 @@ func (m *MemoryManager) Get(_ context.Context, id string) (*Session, error) {
 
 	s, ok := m.sessions[id]
 	if !ok {
-		return nil, errors.Newf("session %q not found", id)
+		return nil, fmt.Errorf("session %q not found", id)
 	}
 	return copySession(s), nil
 }
@@ -93,7 +92,7 @@ func (m *MemoryManager) UpdateState(_ context.Context, id string, state State, m
 
 	s, ok := m.sessions[id]
 	if !ok {
-		return errors.Newf("session %q not found", id)
+		return fmt.Errorf("session %q not found", id)
 	}
 
 	s.State = state
@@ -110,7 +109,7 @@ func (m *MemoryManager) Fail(_ context.Context, id string, err error) error {
 
 	s, ok := m.sessions[id]
 	if !ok {
-		return errors.Newf("session %q not found", id)
+		return fmt.Errorf("session %q not found", id)
 	}
 
 	s.State = StateFailed
@@ -127,7 +126,7 @@ func (m *MemoryManager) UpdateCost(_ context.Context, id string, report cost.Rep
 
 	s, ok := m.sessions[id]
 	if !ok {
-		return errors.Newf("session %q not found", id)
+		return fmt.Errorf("session %q not found", id)
 	}
 
 	s.Cost = report
@@ -140,7 +139,7 @@ func (m *MemoryManager) EmitEvent(_ context.Context, id string, event Event) err
 	defer m.mu.RUnlock()
 
 	if _, ok := m.sessions[id]; !ok {
-		return errors.Newf("session %q not found", id)
+		return fmt.Errorf("session %q not found", id)
 	}
 
 	m.broadcast(id, event)
@@ -153,7 +152,7 @@ func (m *MemoryManager) Watch(ctx context.Context, id string) (<-chan Event, err
 
 	s, ok := m.sessions[id]
 	if !ok {
-		return nil, errors.Newf("session %q not found", id)
+		return nil, fmt.Errorf("session %q not found", id)
 	}
 
 	// If already terminal, return a closed channel with the final state.

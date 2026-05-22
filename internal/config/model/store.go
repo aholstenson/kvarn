@@ -3,8 +3,9 @@ package model
 import (
 	"context"
 
+	"fmt"
+
 	llms "github.com/aholstenson/llms-go"
-	"github.com/cockroachdb/errors"
 )
 
 // Entry holds the resolved configuration for a model alias.
@@ -69,7 +70,7 @@ func Resolve(
 ) (map[string]llms.Model, map[string]Entry, error) {
 	overrides, err := store.All(ctx)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "load model config")
+		return nil, nil, fmt.Errorf("load model config: %w", err)
 	}
 
 	resolved := make(map[string]Entry, len(defaults))
@@ -101,7 +102,7 @@ func Resolve(
 		}
 		m, err := mgr.GetModel(ctx, name)
 		if err != nil {
-			return nil, nil, errors.Wrapf(err, "resolve model %q", name)
+			return nil, nil, fmt.Errorf("resolve model %q: %w", name, err)
 		}
 		models[alias] = m
 	}

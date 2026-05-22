@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -18,7 +19,6 @@ import (
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
 	"github.com/aholstenson/kvarn/internal/sandbox/transfer"
 	"github.com/aholstenson/kvarn/internal/vm"
-	"github.com/cockroachdb/errors"
 )
 
 // Event is emitted during sandbox startup to report progress.
@@ -264,7 +264,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	// Set up dispatch registry for runner communication.
 	token, err := generateToken()
 	if err != nil {
-		return nil, errors.Wrap(err, "generate token")
+		return nil, fmt.Errorf("generate token: %w", err)
 	}
 
 	registry := opts.Registry
@@ -276,7 +276,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 
 	pr, err := registry.Register(token)
 	if err != nil {
-		return nil, errors.Wrap(err, "register token")
+		return nil, fmt.Errorf("register token: %w", err)
 	}
 	sess.addCloser(func() { registry.Remove(token) })
 
@@ -286,7 +286,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		var err error
 		deps, err = opts.Config.Dependencies.Resolve()
 		if err != nil {
-			return nil, errors.Wrap(err, "resolve dependencies")
+			return nil, fmt.Errorf("resolve dependencies: %w", err)
 		}
 	}
 
@@ -358,7 +358,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 
 	instance, runnerConn, err := opts.Provider.Create(ctx, createOpts)
 	if err != nil {
-		return nil, errors.Wrap(err, "create VM")
+		return nil, fmt.Errorf("create VM: %w", err)
 	}
 	sess.addCloser(func() {
 		slog.Info("destroying VM", "vm_id", instance.ID)
@@ -375,7 +375,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	} else if handler != nil {
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
-			return nil, errors.Wrap(err, "listen for bridge")
+			return nil, fmt.Errorf("listen for bridge: %w", err)
 		}
 		go dispatch.Serve(listener, handler)
 		sess.addCloser(func() { listener.Close() })
@@ -412,7 +412,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 			}
 		}
 		if err := opts.Transferer.Upload(ctx, proxy, opts.SourceDir, workingDir); err != nil {
-			return nil, errors.Wrap(err, "transfer files")
+			return nil, fmt.Errorf("transfer files: %w", err)
 		}
 	}
 
@@ -424,7 +424,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		emit(opts, CacheRestoringEvent{})
 		emitFn := func(e Event) { emit(opts, e) }
 		if err := RestoreCache(ctx, proxy, opts.CacheProvider, opts.ProjectID, cachePaths, emitFn); err != nil {
-			return nil, errors.Wrap(err, "restore cache")
+			return nil, fmt.Errorf("restore cache: %w", err)
 		}
 		sess.cacheProvider = opts.CacheProvider
 		sess.projectID = opts.ProjectID
@@ -438,7 +438,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		if err := InstallDependencies(ctx, proxy, deps, func(stdout, stderr string) {
 			emit(opts, DependencyOutputEvent{Stdout: stdout, Stderr: stderr})
 		}); err != nil {
-			return nil, errors.Wrap(err, "install dependencies")
+			return nil, fmt.Errorf("install dependencies: %w", err)
 		}
 		emit(opts, DependenciesInstalledEvent{})
 	}
@@ -448,7 +448,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	// (container exec doesn't source the VM's profile.d).
 	if opts.Config != nil && opts.Config.Image == "" {
 		if err := writeProfileScripts(ctx, proxy, aug, opts.Config.Environment, opts.Secrets); err != nil {
-			return nil, errors.Wrap(err, "write profile.d scripts")
+			return nil, fmt.Errorf("write profile.d scripts: %w", err)
 		}
 	}
 
@@ -457,13 +457,13 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	if cfg != nil && strings.TrimSpace(cfg.Image) != "" {
 		if len(opts.RegistryMirrors) > 0 {
 			if err := configureRegistryMirrors(ctx, proxy, opts.RegistryMirrors); err != nil {
-				return nil, errors.Wrap(err, "configure registry mirrors")
+				return nil, fmt.Errorf("configure registry mirrors: %w", err)
 			}
 		}
 
 		emit(opts, ImagePullingEvent{Image: cfg.Image})
 		if err := PullImage(ctx, proxy, cfg.Image); err != nil {
-			return nil, errors.Wrap(err, "pull image")
+			return nil, fmt.Errorf("pull image: %w", err)
 		}
 	}
 
@@ -473,7 +473,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		emit(opts, ContainerStartingEvent{})
 		containerProxy := NewContainerProxy(proxy, "kvarn-workspace")
 		if err := containerProxy.Start(ctx, cfg.Image, workingDir); err != nil {
-			return nil, errors.Wrap(err, "start container")
+			return nil, fmt.Errorf("start container: %w", err)
 		}
 		emit(opts, ContainerStartedEvent{})
 		sess.addCloser(func() {
@@ -491,7 +491,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		WorkingDir: workingDir,
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "create shell session")
+		return nil, fmt.Errorf("create shell session: %w", err)
 	}
 	sess.ShellSessionID = sessionResp.SessionId
 	emit(opts, SessionCreatedEvent{})
@@ -546,7 +546,7 @@ func configureRegistryMirrors(ctx context.Context, proxy RunnerProxy, mirrors []
 		},
 	})
 	if err != nil {
-		return errors.Wrap(err, "upload registries.conf")
+		return fmt.Errorf("upload registries.conf: %w", err)
 	}
 
 	return nil

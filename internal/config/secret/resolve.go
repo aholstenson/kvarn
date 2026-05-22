@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"strings"
 
-	"github.com/cockroachdb/errors"
+	"fmt"
 )
 
 // Resolve looks up every named secret against the per-project secret
@@ -20,7 +20,7 @@ func Resolve(ctx context.Context, store Store, projectName string, names []strin
 		return nil, nil, nil
 	}
 	if store == nil {
-		return nil, nil, errors.Newf("kvarn.yml declares secrets but no secret store is configured")
+		return nil, nil, fmt.Errorf("kvarn.yml declares secrets but no secret store is configured")
 	}
 
 	envSecrets := make(map[string]string, len(names))
@@ -40,17 +40,17 @@ func Resolve(ctx context.Context, store Store, projectName string, names []strin
 		case TypeBearer:
 			placeholder, err := generateBearerPlaceholder()
 			if err != nil {
-				return nil, nil, errors.Wrap(err, "generate bearer placeholder")
+				return nil, nil, fmt.Errorf("generate bearer placeholder: %w", err)
 			}
 			envSecrets[name] = placeholder
 			bearerPlaceholders[placeholder] = sec.Value
 		default:
-			return nil, nil, errors.Newf("secret %q has unknown type %q", name, sec.Type)
+			return nil, nil, fmt.Errorf("secret %q has unknown type %q", name, sec.Type)
 		}
 	}
 
 	if len(missing) > 0 {
-		return nil, nil, errors.Newf("missing secrets for project %q: %s",
+		return nil, nil, fmt.Errorf("missing secrets for project %q: %s",
 			projectName, strings.Join(missing, ", "))
 	}
 

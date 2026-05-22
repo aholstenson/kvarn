@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
+	"errors"
 	llms "github.com/aholstenson/llms-go"
-	"github.com/cockroachdb/errors"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/agent"
@@ -83,7 +83,7 @@ func (c *Cmd) Run() error {
 	// credentials before booting a VM.
 	mgr, err := llms.NewManager(llms.WithManagerLogger(slog.Default()))
 	if err != nil {
-		return errors.Wrap(err, "create llms manager")
+		return fmt.Errorf("create llms manager: %w", err)
 	}
 	models, configs, err := modelcfg.Resolve(
 		ctx, mgr,
@@ -127,7 +127,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		Progress: imageutil.NewProgress(os.Stderr, "Downloading VM image…"),
 	})
 	if err != nil {
-		return errors.Wrap(err, "find disk image")
+		return fmt.Errorf("find disk image: %w", err)
 	}
 
 	renderer := taskui.New(deps.Stdout, c.Verbose)
@@ -136,7 +136,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 	cfg, err := project.Load(c.Dir)
 	if err != nil {
 		renderer.Stop()
-		return errors.Wrap(err, "load config")
+		return fmt.Errorf("load config: %w", err)
 	}
 	if cfg == nil {
 		renderer.Stop()
@@ -164,7 +164,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		secretEnv, bearerPlaceholders, err = secret.Resolve(ctx, store, projectName, cfg.Secrets)
 		if err != nil {
 			renderer.Stop()
-			return errors.Wrap(err, "resolve secrets")
+			return fmt.Errorf("resolve secrets: %w", err)
 		}
 	}
 
@@ -179,19 +179,19 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 	img, err := deps.Provider.PrepareImage(ctx, vm.BaseImage{DiskImagePath: diskImagePath})
 	if err != nil {
 		renderer.Stop()
-		return errors.Wrap(err, "prepare image")
+		return fmt.Errorf("prepare image: %w", err)
 	}
 
 	skipFile, err := transfer.GitIgnoreFilter(c.Dir)
 	if err != nil {
 		renderer.Stop()
-		return errors.Wrap(err, "set up gitignore filter")
+		return fmt.Errorf("set up gitignore filter: %w", err)
 	}
 
 	absDir, err := filepath.Abs(c.Dir)
 	if err != nil {
 		renderer.Stop()
-		return errors.Wrap(err, "resolve absolute dir")
+		return fmt.Errorf("resolve absolute dir: %w", err)
 	}
 
 	var cacheProvider cache.Provider
@@ -200,7 +200,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		fc, err := cache.DefaultFileCache()
 		if err != nil {
 			renderer.Stop()
-			return errors.Wrap(err, "set up cache")
+			return fmt.Errorf("set up cache: %w", err)
 		}
 		cacheProvider = fc
 		projectID = cache.ProjectID(absDir)
@@ -584,10 +584,10 @@ func emitDiff(ctx context.Context, runner sandbox.RunnerProxy, workdir string, o
 		WorkingDir: workdir,
 	})
 	if err != nil {
-		return 0, errors.Wrap(err, "git diff HEAD")
+		return 0, fmt.Errorf("git diff HEAD: %w", err)
 	}
 	if _, err := io.WriteString(out, resp.Stdout); err != nil {
-		return 0, errors.Wrap(err, "write diff")
+		return 0, fmt.Errorf("write diff: %w", err)
 	}
 	if resp.Stdout == "" {
 		return 0, nil
@@ -600,10 +600,10 @@ func emitDiff(ctx context.Context, runner sandbox.RunnerProxy, workdir string, o
 func emitApply(ctx context.Context, sess extractor, destDir string, out io.Writer) (int, error) {
 	added, modified, deleted, err := classifyChanges(ctx, sess.GetRunner(), sess.GetWorkingDir())
 	if err != nil {
-		return 0, errors.Wrap(err, "classify changes")
+		return 0, fmt.Errorf("classify changes: %w", err)
 	}
 	if err := sess.ExtractChanges(ctx, destDir); err != nil {
-		return 0, errors.Wrap(err, "extract changes")
+		return 0, fmt.Errorf("extract changes: %w", err)
 	}
 	fmt.Fprintf(out, "Applied %d files (added %d, modified %d, removed %d)\n",
 		added+modified, added, modified, deleted)
@@ -622,7 +622,7 @@ func classifyChanges(ctx context.Context, runner sandbox.RunnerProxy, workdir st
 		return 0, 0, 0, err
 	}
 	if stage.ExitCode != 0 {
-		return 0, 0, 0, errors.Newf("git add -A failed (exit %d): %s", stage.ExitCode, stage.Stderr)
+		return 0, 0, 0, fmt.Errorf("git add -A failed (exit %d): %s", stage.ExitCode, stage.Stderr)
 	}
 
 	resp, err := runner.Exec(ctx, &v1.ExecRequest{
@@ -775,7 +775,8 @@ func (c *Cmd) resolveProjectName(ctx context.Context) (string, error) {
 	return "", errors.New(
 		"kvarn.yml declares secrets but no project is configured for this checkout. " +
 			"Pass --project <name>, or register the project and add secrets with " +
-			"`kvarn projects add` and `kvarn secrets set <project> <NAME>`.")
+			"`kvarn projects add` and `kvarn secrets set <project> <NAME>`.",
+	)
 }
 
 func gitOriginURL(dir string) (string, bool) {
@@ -800,12 +801,12 @@ func openSecretStore(path string) (secret.Store, error) {
 	}
 	if _, err := os.Stat(resolved); err != nil {
 		if os.IsNotExist(err) {
-			return nil, errors.Newf(
+			return nil, fmt.Errorf(
 				"no secret store at %s. Declare secrets with "+
 					"`kvarn secrets set <project> <NAME>` before running `kvarn run`.",
 				resolved)
 		}
-		return nil, errors.Wrapf(err, "stat %s", resolved)
+		return nil, fmt.Errorf("stat %s: %w", resolved, err)
 	}
 	return store, nil
 }
@@ -895,5 +896,6 @@ func (s *summaryState) finish(out io.Writer, err error, mode string, diffLines i
 	if s.requiredFailed || s.failed > 0 {
 		return errors.New("validation failed")
 	}
+
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -12,8 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	cerrors "github.com/cockroachdb/errors"
 )
 
 // Dialer dials an upstream address. Override in tests.
@@ -89,7 +88,7 @@ func (p *Proxy) serve(ctx context.Context, ln net.Listener, handle func(context.
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return nil
 			}
-			return cerrors.Wrap(err, "accept")
+			return fmt.Errorf("accept: %w", err)
 		}
 		go handle(ctx, conn)
 	}

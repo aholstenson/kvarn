@@ -5,6 +5,7 @@ package local
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,7 +21,6 @@ import (
 	"github.com/aholstenson/kvarn/internal/runnerbin"
 	"github.com/aholstenson/kvarn/internal/vm"
 	"github.com/aholstenson/kvarn/internal/vm/disk"
-	"github.com/cockroachdb/errors"
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
@@ -100,19 +100,19 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	// Verify disk image exists.
 	info, err := os.Stat(base.DiskImagePath)
 	if err != nil {
-		return nil, nil, errors.Wrapf(err, "disk image path %q", base.DiskImagePath)
+		return nil, nil, fmt.Errorf("disk image path %q: %w", base.DiskImagePath, err)
 	}
 	log.Info("image file", "file", "disk", "size", info.Size())
 
 	// Convert qcow2 to raw in a temp file for this VM instance.
 	tmpDiskFile, err := os.CreateTemp("", "kvarn-disk-*.img")
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create temp disk file")
+		return nil, nil, fmt.Errorf("create temp disk file: %w", err)
 	}
 	tmpDisk = tmpDiskFile.Name()
 	tmpDiskFile.Close()
 	if err := disk.ConvertQcow2ToRaw(base.DiskImagePath, tmpDisk); err != nil {
-		return nil, nil, errors.Wrap(err, "convert disk image")
+		return nil, nil, fmt.Errorf("convert disk image: %w", err)
 	}
 
 	// Resize disk to requested size (or default).
@@ -121,7 +121,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 		diskSize = project.DefaultDiskSize
 	}
 	if err := disk.ResizeDisk(tmpDisk, diskSize); err != nil {
-		return nil, nil, errors.Wrap(err, "resize disk")
+		return nil, nil, fmt.Errorf("resize disk: %w", err)
 	}
 	token := opts.Token
 
@@ -129,14 +129,14 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	// certificate into the cloud-init seed for the in-VM trust store.
 	ca, err := egressproxy.GenerateCA()
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "generate proxy CA")
+		return nil, nil, fmt.Errorf("generate proxy CA: %w", err)
 	}
 
 	// Local providers always boot host-arch VMs, so the embedded runner for
 	// runtime.GOARCH is exactly what the guest needs.
 	runnerBin, err := runnerbin.Bytes(runtime.GOARCH)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "load embedded runner")
+		return nil, nil, fmt.Errorf("load embedded runner: %w", err)
 	}
 
 	// Create cloud-init seed disk with per-VM token, vsock port, CA, and the
@@ -148,19 +148,19 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 		Runner:    runnerBin,
 		ProxyCA:   ca.CertPEM(),
 	}); err != nil {
-		return nil, nil, errors.Wrap(err, "create cloud-init seed disk")
+		return nil, nil, fmt.Errorf("create cloud-init seed disk: %w", err)
 	}
 
 	// Create NVRAM for EFI variable store.
 	nvramPath = tmpDisk + ".nvram"
 	efiStore, err := vz.NewEFIVariableStore(nvramPath, vz.WithCreatingEFIVariableStore())
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create EFI variable store")
+		return nil, nil, fmt.Errorf("create EFI variable store: %w", err)
 	}
 
 	bootLoader, err := vz.NewEFIBootLoader(vz.WithEFIVariableStore(efiStore))
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create EFI boot loader")
+		return nil, nil, fmt.Errorf("create EFI boot loader: %w", err)
 	}
 
 	cpus := uint(opts.CPUs)
@@ -174,27 +174,27 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 
 	config, err := vz.NewVirtualMachineConfiguration(bootLoader, cpus, memory)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create VM config")
+		return nil, nil, fmt.Errorf("create VM config: %w", err)
 	}
 
 	// Disk attachment — use cached mode to avoid disk corruption on ARM Macs
 	diskAttachment, err := vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(tmpDisk, false, vz.DiskImageCachingModeCached, vz.DiskImageSynchronizationModeFsync)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create disk attachment")
+		return nil, nil, fmt.Errorf("create disk attachment: %w", err)
 	}
 	blockDevice, err := vz.NewVirtioBlockDeviceConfiguration(diskAttachment)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create block device")
+		return nil, nil, fmt.Errorf("create block device: %w", err)
 	}
 
 	// Cloud-init seed disk (read-only).
 	seedAttachment, err := vz.NewDiskImageStorageDeviceAttachment(tmpSeed, true)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create seed disk attachment")
+		return nil, nil, fmt.Errorf("create seed disk attachment: %w", err)
 	}
 	seedDevice, err := vz.NewVirtioBlockDeviceConfiguration(seedAttachment)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create seed block device")
+		return nil, nil, fmt.Errorf("create seed block device: %w", err)
 	}
 
 	config.SetStorageDevicesVirtualMachineConfiguration([]vz.StorageDeviceConfiguration{blockDevice, seedDevice})
@@ -205,17 +205,17 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	// reachable network endpoint.
 	hostFile, vmFile, err := link.CreateSocketPair()
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create network socket pair")
+		return nil, nil, fmt.Errorf("create network socket pair: %w", err)
 	}
 	netFiles = []*os.File{hostFile, vmFile}
 
 	netAttachment, err := vz.NewFileHandleNetworkDeviceAttachment(vmFile)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create file handle attachment")
+		return nil, nil, fmt.Errorf("create file handle attachment: %w", err)
 	}
 	networkDevice, err := vz.NewVirtioNetworkDeviceConfiguration(netAttachment)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create network device")
+		return nil, nil, fmt.Errorf("create network device: %w", err)
 	}
 	config.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{networkDevice})
 
@@ -227,7 +227,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 
 	network, err = link.New(link.Config{Endpoint: ethEndpoint})
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create userspace network")
+		return nil, nil, fmt.Errorf("create userspace network: %w", err)
 	}
 
 	netCtx, cancel := context.WithCancel(context.Background())
@@ -236,13 +236,13 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	go func() { _ = network.Run(netCtx) }()
 
 	if err := startProxy(netCtx, network, ca, opts.Network); err != nil {
-		return nil, nil, errors.Wrap(err, "start egress proxy")
+		return nil, nil, fmt.Errorf("start egress proxy: %w", err)
 	}
 
 	// Vsock device for runner communication.
 	vsockDevice, err := vz.NewVirtioSocketDeviceConfiguration()
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create vsock device")
+		return nil, nil, fmt.Errorf("create vsock device: %w", err)
 	}
 	config.SetSocketDevicesVirtualMachineConfiguration([]vz.SocketDeviceConfiguration{vsockDevice})
 
@@ -250,23 +250,23 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	{
 		devNull, err := os.Open(os.DevNull)
 		if err != nil {
-			return nil, nil, errors.Wrap(err, "open devnull")
+			return nil, nil, fmt.Errorf("open devnull: %w", err)
 		}
 
 		pr, pw, err := os.Pipe()
 		if err != nil {
 			devNull.Close()
-			return nil, nil, errors.Wrap(err, "create serial pipe")
+			return nil, nil, fmt.Errorf("create serial pipe: %w", err)
 		}
 		serialFiles = []*os.File{devNull, pr, pw}
 
 		serialAttachment, err := vz.NewFileHandleSerialPortAttachment(devNull, pw)
 		if err != nil {
-			return nil, nil, errors.Wrap(err, "create serial attachment")
+			return nil, nil, fmt.Errorf("create serial attachment: %w", err)
 		}
 		consoleConfig, err := vz.NewVirtioConsoleDeviceSerialPortConfiguration(serialAttachment)
 		if err != nil {
-			return nil, nil, errors.Wrap(err, "create console config")
+			return nil, nil, fmt.Errorf("create console config: %w", err)
 		}
 		config.SetSerialPortsVirtualMachineConfiguration([]*vz.VirtioConsoleDeviceSerialPortConfiguration{consoleConfig})
 
@@ -287,14 +287,14 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 
 	valid, err := config.Validate()
 	if err != nil || !valid {
-		return nil, nil, errors.Wrap(err, "invalid VM config")
+		return nil, nil, fmt.Errorf("invalid VM config: %w", err)
 	}
 
 	log.Info("VM config validated, creating VM", "cpus", cpus, "memory", memory, "diskSize", diskSize)
 
 	machine, err := vz.NewVirtualMachine(config)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "create VM")
+		return nil, nil, fmt.Errorf("create VM: %w", err)
 	}
 
 	log.Info("VM created", "state", machine.State(), "canStart", machine.CanStart())
@@ -308,7 +308,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 
 	if err := machine.Start(); err != nil {
 		log.Error("VM failed to start", "state", machine.State(), "error", err)
-		return nil, nil, errors.Wrap(err, "start VM")
+		return nil, nil, fmt.Errorf("start VM: %w", err)
 	}
 
 	log.Info("VM started", "state", machine.State())
@@ -323,7 +323,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	listener, err := socketDevices[0].Listen(vsockPort)
 	if err != nil {
 		machine.Stop()
-		return nil, nil, errors.Wrap(err, "vsock listen")
+		return nil, nil, fmt.Errorf("vsock listen: %w", err)
 	}
 
 	id := fmt.Sprintf("local-%d", time.Now().UnixNano())
@@ -364,7 +364,7 @@ func (p *Provider) Destroy(_ context.Context, id string) error {
 	p.mu.Unlock()
 
 	if !ok {
-		return errors.Newf("VM %s not found", id)
+		return fmt.Errorf("VM %s not found", id)
 	}
 
 	if err := inst.machine.Stop(); err != nil {

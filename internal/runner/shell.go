@@ -20,8 +20,8 @@ type shellSession struct {
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
 	waitCh  chan struct{} // closed when cmd.Wait() returns
-	mu      sync.Mutex   // serializes command execution
-	tempDir string       // directory for output demarcation files
+	mu      sync.Mutex    // serializes command execution
+	tempDir string        // directory for output demarcation files
 	nextID  atomic.Int64
 
 	// Fields for respawning on shell death.

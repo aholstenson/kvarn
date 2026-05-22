@@ -2,12 +2,12 @@ package tomlstore
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
-	"github.com/cockroachdb/errors"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -52,7 +52,7 @@ func (s *Store) load() (*fileData, error) {
 
 	var fd fileData
 	if err := toml.Unmarshal(data, &fd); err != nil {
-		return nil, errors.Wrapf(err, "parse %s", s.path)
+		return nil, fmt.Errorf("parse %s: %w", s.path, err)
 	}
 	if fd.Forges == nil {
 		fd.Forges = make(map[string]*forgeEntry)
@@ -84,7 +84,7 @@ func (s *Store) Get(_ context.Context, name string) (*forgeconfig.ForgeConfig, e
 
 	entry, ok := fd.Forges[name]
 	if !ok {
-		return nil, errors.Newf("forge config %q not found", name)
+		return nil, fmt.Errorf("forge config %q not found", name)
 	}
 
 	return entryToConfig(name, entry), nil
@@ -137,7 +137,7 @@ func (s *Store) Delete(_ context.Context, name string) error {
 	}
 
 	if _, ok := fd.Forges[name]; !ok {
-		return errors.Newf("forge config %q not found", name)
+		return fmt.Errorf("forge config %q not found", name)
 	}
 
 	delete(fd.Forges, name)

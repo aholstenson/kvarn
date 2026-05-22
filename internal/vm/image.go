@@ -2,6 +2,7 @@ package vm
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,7 +10,6 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/aholstenson/kvarn/internal/buildinfo"
-	"github.com/cockroachdb/errors"
 )
 
 // searchPaths are well-known locations to look for the disk image, in order.
@@ -93,7 +93,7 @@ func ResolveDiskImagePath() (string, error) {
 		checked = append(checked, cached)
 	}
 
-	return "", errors.Newf(
+	return "", fmt.Errorf(
 		"could not find disk image for %s in any of:\n  %s",
 		runtime.GOARCH,
 		strings.Join(checked, "\n  "),
@@ -115,7 +115,7 @@ func ResolveDiskImagePath() (string, error) {
 func EnsureDiskImage(ctx context.Context, opts DownloadOpts) (string, error) {
 	if opts.Path != "" {
 		if _, err := os.Stat(opts.Path); err != nil {
-			return "", errors.Wrapf(err, "disk image %s", opts.Path)
+			return "", fmt.Errorf("disk image %s: %w", opts.Path, err)
 		}
 		return opts.Path, nil
 	}
@@ -158,7 +158,7 @@ func ensureConcreteDiskImage(ctx context.Context, version, arch string, explicit
 		}
 
 		if opts.NoDownload {
-			return "", errors.Newf(
+			return "", fmt.Errorf(
 				"no local or cached VM disk image found for %s (version %q); "+
 					"omit --no-download to fetch it",
 				arch,
@@ -170,7 +170,7 @@ func ensureConcreteDiskImage(ctx context.Context, version, arch string, explicit
 	if opts.ForceDownload || explicitVersion || buildinfo.IsRelease(version) {
 		if !explicitVersion && !buildinfo.IsRelease(version) {
 			// e.g. `kvarn image pull` on a dev build with no version set.
-			return "", errors.Newf(
+			return "", fmt.Errorf(
 				"cannot download an image for non-release version %q; "+
 					"set KVARN_IMAGE_VERSION or pass --version vX.Y.Z",
 				version,
@@ -179,7 +179,7 @@ func ensureConcreteDiskImage(ctx context.Context, version, arch string, explicit
 		return downloadDiskImage(ctx, version, arch, opts.Progress)
 	}
 
-	return "", errors.Newf(
+	return "", fmt.Errorf(
 		"no VM disk image found for %s, and version %q has no published release to download.\n"+
 			"Build one locally with `task image:build`, or pass --disk-image-path to point at an existing image.",
 		arch,
@@ -194,7 +194,7 @@ func ensureConcreteDiskImage(ctx context.Context, version, arch string, explicit
 func ensureDiskImageForConstraint(ctx context.Context, constraint, arch string, opts DownloadOpts) (string, error) {
 	cs, err := semver.NewConstraint(constraint)
 	if err != nil {
-		return "", errors.Wrapf(err, "parse image version constraint %q", constraint)
+		return "", fmt.Errorf("parse image version constraint %q: %w", constraint, err)
 	}
 
 	if !opts.ForceDownload {
@@ -207,7 +207,7 @@ func ensureDiskImageForConstraint(ctx context.Context, constraint, arch string, 
 		}
 
 		if opts.NoDownload {
-			return "", errors.Newf(
+			return "", fmt.Errorf(
 				"no local or cached VM disk image satisfying %q for %s; "+
 					"omit --no-download to fetch one",
 				constraint,

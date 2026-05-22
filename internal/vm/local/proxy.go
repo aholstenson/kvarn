@@ -6,10 +6,11 @@ import (
 	"context"
 	"log/slog"
 
+	"fmt"
+
 	"github.com/aholstenson/kvarn/internal/egress/link"
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 	"github.com/aholstenson/kvarn/internal/vm"
-	"github.com/cockroachdb/errors"
 )
 
 // startProxy binds HTTP and HTTPS listeners on the per-VM gateway IP and
@@ -29,12 +30,12 @@ func startProxy(ctx context.Context, n *link.Network, ca *egressproxy.CA, cfg vm
 
 	httpsLn, err := n.ListenAny(443)
 	if err != nil {
-		return errors.Wrap(err, "listen 443")
+		return fmt.Errorf("listen 443: %w", err)
 	}
 	httpLn, err := n.ListenAny(80)
 	if err != nil {
 		httpsLn.Close()
-		return errors.Wrap(err, "listen 80")
+		return fmt.Errorf("listen 80: %w", err)
 	}
 
 	go func() { _ = p.ServeHTTPS(ctx, httpsLn) }()

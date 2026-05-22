@@ -6,8 +6,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"fmt"
+
 	"github.com/aholstenson/kvarn/internal/config/secret"
-	"github.com/cockroachdb/errors"
 )
 
 // memStore is a small in-memory secret.Store for testing Resolve.
@@ -25,7 +26,7 @@ func (m *memStore) Get(_ context.Context, project, name string) (*secret.Secret,
 			return s, nil
 		}
 	}
-	return nil, errors.Newf("secret %q not found for project %q", name, project)
+	return nil, fmt.Errorf("secret %q not found for project %q", name, project)
 }
 
 func (m *memStore) List(_ context.Context, project string) ([]*secret.Secret, error) {

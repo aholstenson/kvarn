@@ -10,7 +10,6 @@ import (
 
 	"github.com/aholstenson/kvarn/internal/config/secret"
 	secrettoml "github.com/aholstenson/kvarn/internal/config/secret/tomlstore"
-	"github.com/cockroachdb/errors"
 )
 
 // Cmd is the parent command for `kvarn secrets <subcommand>`.
@@ -40,7 +39,7 @@ func (c *SetCmd) Run() error {
 		fmt.Fprint(os.Stderr, "Reading secret value from stdin (end with EOF)...\n")
 		data, err := io.ReadAll(bufio.NewReader(os.Stdin))
 		if err != nil {
-			return errors.Wrap(err, "read value from stdin")
+			return fmt.Errorf("read value from stdin: %w", err)
 		}
 		value = strings.TrimRight(string(data), "\r\n")
 	}
@@ -52,7 +51,7 @@ func (c *SetCmd) Run() error {
 		Type:    c.Type,
 		Value:   value,
 	}); err != nil {
-		return errors.Wrap(err, "put secret")
+		return fmt.Errorf("put secret: %w", err)
 	}
 
 	fmt.Fprintf(os.Stdout, "Set secret %s/%s (type=%s)\n", c.Project, c.Name, c.Type)
@@ -70,7 +69,7 @@ func (c *ListCmd) Run() error {
 	store := openStore(c.SecretsFile)
 	secrets, err := store.List(context.Background(), c.Project)
 	if err != nil {
-		return errors.Wrap(err, "list secrets")
+		return fmt.Errorf("list secrets: %w", err)
 	}
 
 	if len(secrets) == 0 {
@@ -94,7 +93,7 @@ type RemoveCmd struct {
 func (c *RemoveCmd) Run() error {
 	store := openStore(c.SecretsFile)
 	if err := store.Delete(context.Background(), c.Project, c.Name); err != nil {
-		return errors.Wrap(err, "delete secret")
+		return fmt.Errorf("delete secret: %w", err)
 	}
 	fmt.Fprintf(os.Stdout, "Removed secret %s/%s\n", c.Project, c.Name)
 	return nil

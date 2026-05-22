@@ -11,18 +11,18 @@ import (
 type State string
 
 const (
-	StatePending      State = "pending"
-	StateCloning      State = "cloning"
-	StateProvisioning State = "provisioning"
-	StateTransferring        State = "transferring"
+	StatePending                State = "pending"
+	StateCloning                State = "cloning"
+	StateProvisioning           State = "provisioning"
+	StateTransferring           State = "transferring"
 	StateInstallingDependencies State = "installing_dependencies"
-	StatePullingImage   State = "pulling_image"
-	StateSetup          State = "setup"
-	StateRunning      State = "running"
-	StateValidating   State = "validating"
-	StateSubmitting   State = "submitting"
-	StateCompleted    State = "completed"
-	StateFailed       State = "failed"
+	StatePullingImage           State = "pulling_image"
+	StateSetup                  State = "setup"
+	StateRunning                State = "running"
+	StateValidating             State = "validating"
+	StateSubmitting             State = "submitting"
+	StateCompleted              State = "completed"
+	StateFailed                 State = "failed"
 )
 
 // IsTerminal returns true if the state is a final state.
@@ -127,13 +127,13 @@ func (StepOutputEvent) isSessionEvent() {}
 
 // VmInfoEvent carries VM hardware/resource information reported by the runner.
 type VmInfoEvent struct {
-	SessionID    string
-	CpuCount     int32
-	CpuModel     string
-	MemTotalMB   int64
-	MemAvailMB   int64
-	DiskUsedMB   int64
-	DiskTotalMB  int64
+	SessionID   string
+	CpuCount    int32
+	CpuModel    string
+	MemTotalMB  int64
+	MemAvailMB  int64
+	DiskUsedMB  int64
+	DiskTotalMB int64
 }
 
 func (VmInfoEvent) isSessionEvent() {}

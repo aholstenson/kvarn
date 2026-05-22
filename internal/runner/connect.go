@@ -11,10 +11,12 @@ import (
 	"strconv"
 	"time"
 
+	"errors"
+	"fmt"
+
 	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
-	"github.com/cockroachdb/errors"
 )
 
 const streamChunkSize = 512 * 1024 // 512KB
@@ -41,7 +43,7 @@ func connectToOrchestrator(ctx context.Context, httpClient *http.Client, addr st
 		slog.Warn("failed to register with orchestrator, retrying", "attempt", attempt+1, "error", err)
 		select {
 		case <-ctx.Done():
-			return errors.Wrap(ctx.Err(), "register with orchestrator")
+			return fmt.Errorf("register with orchestrator: %w", ctx.Err())
 		case <-time.After(time.Second):
 		}
 	}
@@ -146,12 +148,12 @@ func connectToOrchestrator(ctx context.Context, httpClient *http.Client, addr st
 		}
 
 		if _, err := client.ReportResult(ctx, connect.NewRequest(result)); err != nil {
-			return errors.Wrapf(err, "report result for command %s", cmd.CommandId)
+			return fmt.Errorf("report result for command %s: %w", cmd.CommandId, err)
 		}
 	}
 
 	if err := stream.Err(); err != nil {
-		return errors.Wrap(err, "command stream error")
+		return fmt.Errorf("command stream error: %w", err)
 	}
 
 	return nil
@@ -165,7 +167,7 @@ func handleDownloadFile(ctx context.Context, client kvarnv1connect.BridgeService
 		Token:      token,
 	}))
 	if err != nil {
-		return 0, errors.Wrap(err, "call DownloadFile")
+		return 0, fmt.Errorf("call DownloadFile: %w", err)
 	}
 	defer stream.Close()
 
@@ -184,7 +186,7 @@ func handleDownloadFile(ctx context.Context, client kvarnv1connect.BridgeService
 
 	destPath := cmd.Path
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-		return 0, errors.Wrap(err, "create parent dirs")
+		return 0, fmt.Errorf("create parent dirs: %w", err)
 	}
 
 	mode := os.FileMode(0o644)
@@ -194,7 +196,7 @@ func handleDownloadFile(ctx context.Context, client kvarnv1connect.BridgeService
 
 	f, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
-		return 0, errors.Wrap(err, "create destination file")
+		return 0, fmt.Errorf("create destination file: %w", err)
 	}
 	defer f.Close()
 
@@ -206,7 +208,7 @@ func handleDownloadFile(ctx context.Context, client kvarnv1connect.BridgeService
 		}
 		n, writeErr := f.Write(data)
 		if writeErr != nil {
-			return total, errors.Wrap(writeErr, "write file")
+			return total, fmt.Errorf("write file: %w", writeErr)
 		}
 		total += int64(n)
 	}
@@ -224,13 +226,13 @@ func handleDownloadFile(ctx context.Context, client kvarnv1connect.BridgeService
 func handleUploadFile(ctx context.Context, client kvarnv1connect.BridgeServiceClient, token string, cmd *v1.UploadFileCommand) (int64, error) {
 	f, err := os.Open(cmd.Path)
 	if err != nil {
-		return 0, errors.Wrap(err, "open source file")
+		return 0, fmt.Errorf("open source file: %w", err)
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
-		return 0, errors.Wrap(err, "stat source file")
+		return 0, fmt.Errorf("stat source file: %w", err)
 	}
 
 	uploadStream := client.UploadFile(ctx)
@@ -253,7 +255,7 @@ func handleUploadFile(ctx context.Context, client kvarnv1connect.BridgeServiceCl
 			Mode:       uint32(info.Mode().Perm()),
 		}},
 	}); err != nil {
-		return 0, errors.Wrap(err, "send start metadata")
+		return 0, fmt.Errorf("send start metadata: %w", err)
 	}
 
 	// Stream file data in chunks.
@@ -267,7 +269,7 @@ func handleUploadFile(ctx context.Context, client kvarnv1connect.BridgeServiceCl
 			if err := uploadStream.Send(&v1.FileStreamChunk{
 				Payload: &v1.FileStreamChunk_Data{Data: chunk},
 			}); err != nil {
-				return total, errors.Wrap(err, "send data chunk")
+				return total, fmt.Errorf("send data chunk: %w", err)
 			}
 			total += int64(n)
 		}
@@ -275,14 +277,14 @@ func handleUploadFile(ctx context.Context, client kvarnv1connect.BridgeServiceCl
 			break
 		}
 		if readErr != nil {
-			return total, errors.Wrap(readErr, "read source file")
+			return total, fmt.Errorf("read source file: %w", readErr)
 		}
 	}
 
 	streamClosed = true
 	resp, err := uploadStream.CloseAndReceive()
 	if err != nil {
-		return total, errors.Wrap(err, "close upload stream")
+		return total, fmt.Errorf("close upload stream: %w", err)
 	}
 
 	return resp.Msg.BytesWritten, nil
