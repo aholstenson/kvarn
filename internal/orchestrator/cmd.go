@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/aholstenson/kvarn/internal/agent/coding"
+	apikeytoml "github.com/aholstenson/kvarn/internal/config/apikey/tomlstore"
 	credtoml "github.com/aholstenson/kvarn/internal/config/credential/tomlstore"
 	forgetoml "github.com/aholstenson/kvarn/internal/config/forge/tomlstore"
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
@@ -30,6 +31,8 @@ type Cmd struct {
 	SecretsFile     string `help:"Path to per-project secrets TOML file." default:""`
 	ForgesFile      string `help:"Path to forges TOML file." default:""`
 	AgentsFile      string `help:"Path to agents config TOML file." default:""`
+	APIKeysFile     string `help:"Path to API keys TOML file." default:""`
+	NoAuth          bool   `help:"Disable API-key auth (local dev only)." env:"KVARN_NO_AUTH"`
 	Model           string `help:"LLM model alias for the coding agent." default:"coding-agent"`
 }
 
@@ -76,6 +79,19 @@ func (c *Cmd) Run() error {
 	if forgesPath == "" {
 		forgesPath = forgetoml.DefaultPath()
 	}
+	apiKeysPath := c.APIKeysFile
+	if apiKeysPath == "" {
+		apiKeysPath = apikeytoml.DefaultPath()
+	}
+	apiKeyStore := apikeytoml.New(apiKeysPath)
+
+	if c.NoAuth {
+		slog.Warn("API-key auth disabled — do not expose the orchestrator to untrusted networks")
+	} else if keys, err := apiKeyStore.List(ctx); err != nil {
+		slog.Warn("failed to read API key store; requests will be rejected until it is readable", "path", apiKeysPath, "error", err)
+	} else if len(keys) == 0 {
+		slog.Warn("API-key auth enabled but no keys configured; all requests will be rejected until `kvarn key create`", "path", apiKeysPath)
+	}
 
 	logger := slog.Default()
 	mgr, err := llms.NewManager(llms.WithManagerLogger(logger))
@@ -110,5 +126,7 @@ func (c *Cmd) Run() error {
 		Transferer:     &transfer.StreamingTransferer{},
 		DefaultsStore:  agentsStore,
 		PricingManager: llms.NewPricingManager(logger),
+		APIKeyStore:    apiKeyStore,
+		AuthEnabled:    !c.NoAuth,
 	})
 }

@@ -1,0 +1,121 @@
+package auth
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"time"
+
+	"connectrpc.com/connect"
+	"github.com/aholstenson/kvarn/internal/config/apikey"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+// memStore is an in-memory apikey.Store for interceptor tests.
+type memStore struct {
+	keys   map[string]*apikey.APIKey
+	getErr error
+}
+
+func (m *memStore) Get(_ context.Context, keyID string) (*apikey.APIKey, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	k, ok := m.keys[keyID]
+	if !ok {
+		return nil, apikey.ErrNotFound
+	}
+	return k, nil
+}
+
+func (m *memStore) List(context.Context) ([]*apikey.APIKey, error) { return nil, nil }
+func (m *memStore) Put(context.Context, *apikey.APIKey) error      { return nil }
+func (m *memStore) Delete(context.Context, string) error           { return nil }
+
+// header builds an Authorization header carrying the given bearer value.
+func header(value string) http.Header {
+	h := http.Header{}
+	if value != "" {
+		h.Set("Authorization", value)
+	}
+	return h
+}
+
+var _ = Describe("Interceptor.authenticate", func() {
+	var (
+		store  *memStore
+		token  string
+		keyID  string
+		hash   string
+		secret string
+	)
+
+	BeforeEach(func() {
+		var err error
+		token, keyID, hash, err = apikey.GenerateToken()
+		Expect(err).NotTo(HaveOccurred())
+		_, secret, _ = apikey.ParseToken(token)
+
+		store = &memStore{keys: map[string]*apikey.APIKey{
+			keyID: {
+				KeyID:    keyID,
+				Name:     "ci",
+				Hash:     hash,
+				Projects: []string{"proj-a"},
+				Created:  time.Now().UTC(),
+			},
+		}}
+	})
+
+	It("accepts a valid token and returns the identity", func() {
+		id, err := NewInterceptor(store).authenticate(header("Bearer " + token))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(id.KeyName).To(Equal("ci"))
+		Expect(id.Projects).To(Equal([]string{"proj-a"}))
+	})
+
+	It("rejects a missing Authorization header as Unauthenticated", func() {
+		_, err := NewInterceptor(store).authenticate(header(""))
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
+	})
+
+	It("rejects a non-bearer Authorization header", func() {
+		_, err := NewInterceptor(store).authenticate(header("Basic " + token))
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
+	})
+
+	It("rejects a malformed token", func() {
+		_, err := NewInterceptor(store).authenticate(header("Bearer not-a-real-token"))
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
+	})
+
+	It("rejects an unknown key ID", func() {
+		_, err := NewInterceptor(store).authenticate(header("Bearer kvarn_unknownid_" + secret))
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
+	})
+
+	It("rejects a wrong secret", func() {
+		_, err := NewInterceptor(store).authenticate(header("Bearer kvarn_" + keyID + "_wrongsecret"))
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
+	})
+
+	It("rejects a disabled key", func() {
+		store.keys[keyID].Disabled = true
+		_, err := NewInterceptor(store).authenticate(header("Bearer " + token))
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
+	})
+
+	It("rejects an expired key", func() {
+		past := time.Now().Add(-time.Hour)
+		store.keys[keyID].Expires = &past
+		_, err := NewInterceptor(store).authenticate(header("Bearer " + token))
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
+	})
+
+	It("fails closed with Unavailable on a store error", func() {
+		store.getErr = errors.New("disk on fire")
+		_, err := NewInterceptor(store).authenticate(header("Bearer " + token))
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnavailable))
+	})
+})

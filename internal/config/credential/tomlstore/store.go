@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/aholstenson/kvarn/internal/config/atomicfile"
 	"github.com/aholstenson/kvarn/internal/config/credential"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -61,7 +62,7 @@ func (s *Store) save(fd *fileData) error {
 		return err
 	}
 
-	return os.WriteFile(s.path, data, 0600)
+	return atomicfile.Write(s.path, data, 0600)
 }
 
 func (s *Store) Get(_ context.Context, name string) (*credential.Credential, error) {

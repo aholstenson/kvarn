@@ -215,17 +215,43 @@ The orchestrator reads its configuration from `~/.config/kvarn/` by default. You
 | `secrets.toml` | `--secrets-file` | Per-project runtime secrets. Prefer `kvarn secrets` to edit this file. |
 | `forges.toml` | `--forges-file` | Named forge instances such as GitHub or plain Git. |
 | `agents.toml` | `--agents-file` | Model aliases for the coding agent. |
+| `apikeys.toml` | `--api-keys-file` | API keys that authenticate orchestrator clients. Mode `0600`; edit with `kvarn key`. |
 
 Common orchestrator flags:
 
 - `--addr`, default `:8080`, chooses the listen address.
 - `--model`, default `coding-agent`, overrides the main coding-agent model alias.
 - `--disk-image-path` points at the VM disk image when auto-discovery is not enough.
+- `--no-auth` disables API-key authentication (local dev only — never expose an unauthenticated orchestrator to an untrusted network).
 
-Once the orchestrator is running, the `startjob` and `verify` commands act as clients that talk to it over HTTP at `--addr` (default `http://localhost:8080`), so they can run from anywhere that can reach the host. (`kvarn secrets` is separate — it edits the orchestrator's local `secrets.toml`, so it runs on the host where that file lives.) After starting the orchestrator, smoke-test the pipeline before sending real work — `verify` boots a VM and runs a command end to end:
+Once the orchestrator is running, the `startjob` command acts as a client that talks to it over HTTP at `--addr` (default `http://localhost:8080`), so it can run from anywhere that can reach the host. (`kvarn secrets` and `kvarn key` are separate — they edit the orchestrator's local TOML files, so they run on the host where those files live.)
+
+### Authentication
+
+External clients authenticate with an API key sent as `Authorization: Bearer <token>`. Authentication is **enforced by default**; pass `--no-auth` to disable it for local development.
+
+The orchestrator speaks cleartext HTTP/2 (h2c) and does not terminate TLS itself. A bearer token is only safe over an encrypted channel, so **always run the orchestrator behind a TLS-terminating reverse proxy** when it is reachable over a network.
+
+Keys are stored hashed (`sha256` of the secret part); the full token is shown once at creation and never again. Each key is scoped to a set of projects — every project-scoped RPC (`StartJob`, `GetSession`, `WatchSession`, `ListSessions`) checks that scope. With auth enabled and no keys configured, all requests are rejected until you create one.
+
+Manage keys with `kvarn key`, which edits `~/.config/kvarn/apikeys.toml` directly (no running orchestrator required). The orchestrator re-reads the file on every request, so creating, disabling, or revoking a key takes effect immediately — no restart.
 
 ```sh
-kvarn verify --addr http://localhost:8080
+# Create a key scoped to one project (prints the token once).
+kvarn key create --name ci --projects myproj
+
+# Create a key valid for every project, expiring in 30 days.
+kvarn key create --name admin --projects '*' --expires 720h
+
+kvarn key list
+kvarn key disable <key-id>   # keep it on record but reject it
+kvarn key revoke <key-id>    # delete it entirely
+```
+
+Pass the token to `startjob` with `--api-key` or the `KVARN_API_KEY` environment variable:
+
+```sh
+KVARN_API_KEY=kvarn_… kvarn startjob myproj "fix the failing test"
 ```
 
 ### Projects and forges

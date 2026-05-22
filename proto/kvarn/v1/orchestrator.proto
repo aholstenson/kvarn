@@ -4,20 +4,6 @@ package kvarn.v1;
 
 import "kvarn/v1/bridge.proto";
 
-message ExecuteJobRequest {
-  string command = 1;
-  repeated string args = 2;
-  string working_dir = 3;
-}
-
-message ExecuteJobResponse {
-  int32 exit_code = 1;
-  string stdout = 2;
-  string stderr = 3;
-  string vm_id = 4;
-  VmInfo vm_info = 5;
-}
-
 message StartJobRequest {
   string project = 1;
   string prompt = 2;
@@ -185,7 +171,6 @@ message PullRequestCreated {
 }
 
 service OrchestratorService {
-  rpc ExecuteJob(ExecuteJobRequest) returns (ExecuteJobResponse);
   rpc StartJob(StartJobRequest) returns (StartJobResponse);
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);

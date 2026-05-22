@@ -3,12 +3,11 @@ package startjob
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 
 	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
-	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
+	"github.com/aholstenson/kvarn/internal/cmd/client"
 )
 
 type Cmd struct {
@@ -18,12 +17,13 @@ type Cmd struct {
 	Branch  string `help:"Branch override." default:""`
 	Mode    string `help:"Agent mode: auto, implement, fix, review, research." default:"auto"`
 	Watch   bool   `help:"Watch session until completion." default:"true"`
+	APIKey  string `help:"API key for the orchestrator." env:"KVARN_API_KEY" default:""`
 }
 
 func (c *Cmd) Run() error {
-	client := kvarnv1connect.NewOrchestratorServiceClient(http.DefaultClient, c.Addr)
+	oc := client.NewOrchestrator(c.Addr, c.APIKey)
 
-	resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+	resp, err := oc.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
 		Project: c.Project,
 		Prompt:  c.Prompt,
 		Branch:  c.Branch,
@@ -40,7 +40,7 @@ func (c *Cmd) Run() error {
 		return nil
 	}
 
-	stream, err := client.WatchSession(context.Background(), connect.NewRequest(&v1.WatchSessionRequest{
+	stream, err := oc.WatchSession(context.Background(), connect.NewRequest(&v1.WatchSessionRequest{
 		SessionId: sessionID,
 	}))
 	if err != nil {

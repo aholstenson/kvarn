@@ -21,12 +21,12 @@ task --list         # see all available tasks
 - `proto/kvarn/v1/` — Protobuf definitions
 - `gen/` — Generated protobuf + ConnectRPC code (not checked in)
 - `internal/vm/` — VM provider interface + implementations (local, disk, transfer)
-- `internal/config/` — User-level config stores (credential, project)
+- `internal/config/` — User-level config stores (credential, project, secret, forge, apikey); `atomicfile` for temp-file+rename writes
 - `internal/jobconfig/` — Per-repo kvarn.yml parsing and step execution
-- `internal/orchestrator/` — Orchestrator service
+- `internal/orchestrator/` — Orchestrator service; `auth/` holds the API-key interceptor + identity
 - `internal/runner/` — Runner service (ConnectRPC handler)
 - `internal/runnerbin/` — Embeds the linux runner binary into the CLI (build with `-tags embedrunner`; the artifact is gitignored and produced by `task build:runner`)
-- `internal/cmd/` — CLI command handlers (startjob, verify)
+- `internal/cmd/` — CLI command handlers (startjob, secrets, key, client)
 
 ## Test
 
@@ -64,6 +64,14 @@ task image:clean         # remove dist/
 
 - Comments should explain **why** something is done, not investigation history or migration details
 - Don't reference previous implementations (e.g. "this used to be X") — only explain the current design
+
+## Authentication
+
+- External `OrchestratorService` calls authenticate with an API key sent as `Authorization: Bearer <token>`. Validated by a ConnectRPC interceptor (`internal/orchestrator/auth`); each key is scoped to a set of projects and every project-scoped RPC checks that scope. The host-local `BridgeService` (runner↔orchestrator) is intentionally **not** authenticated.
+- Token format: `kvarn_<keyid>_<secret>`. The `kvarn_` prefix lets secret scanners recognize leaks; `keyid` is the O(1) lookup handle, `secret` is 160 bits of CSPRNG. Both components are base32 (lowercased, unpadded) so they never contain the `_` delimiter. Only `sha256(secret)` is persisted (plain SHA-256 is correct for high-entropy random secrets).
+- Auth is **enforced by default**; `--no-auth` (or `KVARN_NO_AUTH`) disables it for local dev. With auth on and zero keys, all requests are denied. Keys are bootstrapped with `kvarn key create`, which writes `apikeys.toml` directly — no running orchestrator needed.
+- **TLS is out of scope**: the orchestrator stays on h2c and assumes an external TLS-terminating reverse proxy. A bearer token is only safe over TLS.
+- **Hot-reload**: every tomlstore re-reads its file per `Get`/`List`, so key changes apply on the next request with no restart. All stores write atomically (`internal/config/atomicfile`, temp file + rename) so a concurrent `kvarn key create` is never read mid-write.
 
 ## Conventions
 

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/aholstenson/kvarn/internal/config/atomicfile"
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -70,7 +71,7 @@ func (s *Store) save(fd *fileData) error {
 		return err
 	}
 
-	return os.WriteFile(s.path, data, 0644)
+	return atomicfile.Write(s.path, data, 0644)
 }
 
 func (s *Store) Get(_ context.Context, name string) (*forgeconfig.ForgeConfig, error) {

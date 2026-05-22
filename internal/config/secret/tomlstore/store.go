@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/aholstenson/kvarn/internal/config/atomicfile"
 	"github.com/aholstenson/kvarn/internal/config/secret"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -78,7 +79,7 @@ func (s *Store) save(fd fileData) error {
 		return err
 	}
 
-	return os.WriteFile(s.path, data, 0o600)
+	return atomicfile.Write(s.path, data, 0o600)
 }
 
 func validateType(t string) error {

@@ -2,8 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
@@ -19,6 +16,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/agent/coding"
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
+	"github.com/aholstenson/kvarn/internal/config/apikey"
 	"github.com/aholstenson/kvarn/internal/config/credential"
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 	"github.com/aholstenson/kvarn/internal/config/limits"
@@ -28,6 +26,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/dispatch"
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 	"github.com/aholstenson/kvarn/internal/forge"
+	"github.com/aholstenson/kvarn/internal/orchestrator/auth"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
@@ -220,6 +219,8 @@ type Service struct {
 	sandboxFactory   SandboxFactory         // optional; nil uses defaultSandboxFactory
 	defaultsStore    modelcfg.DefaultsStore // optional; nil means built-in fallbacks only
 	pricingManager   *llms.PricingManager   // optional; nil disables USD computation
+	apiKeyStore      apikey.Store           // API keys for request authentication
+	authEnabled      bool                   // when true, project-scoped RPCs require an authorized key
 }
 
 type ServiceOpts struct {
@@ -239,6 +240,8 @@ type ServiceOpts struct {
 	SandboxFactory   SandboxFactory         // optional; nil uses defaultSandboxFactory
 	DefaultsStore    modelcfg.DefaultsStore // optional; nil means no user defaults (built-ins only)
 	PricingManager   *llms.PricingManager   // optional; nil disables USD computation
+	APIKeyStore      apikey.Store           // API keys for request authentication
+	AuthEnabled      bool                   // when true, project-scoped RPCs require an authorized key
 }
 
 func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
@@ -276,104 +279,36 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		sandboxFactory:   opts.SandboxFactory,
 		defaultsStore:    opts.DefaultsStore,
 		pricingManager:   opts.PricingManager,
+		apiKeyStore:      opts.APIKeyStore,
+		authEnabled:      opts.AuthEnabled,
 	}
 }
 
-func generateToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
+// authorizeProject enforces that the authenticated caller is allowed to act on
+// the given project. It is a no-op when auth is disabled (local dev). When auth
+// is enabled the interceptor has already injected an Identity; a missing one is
+// treated as unauthenticated, and a project the key does not cover is denied.
+func (s *Service) authorizeProject(ctx context.Context, project string) error {
+	if !s.authEnabled {
+		return nil
 	}
-	return hex.EncodeToString(b), nil
-}
-
-func (s *Service) ExecuteJob(ctx context.Context, req *connect.Request[v1.ExecuteJobRequest]) (*connect.Response[v1.ExecuteJobResponse], error) {
-	msg := req.Msg
-
-	token, err := generateToken()
-	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("generate token: %w", err))
+	id, ok := auth.IdentityFrom(ctx)
+	if !ok {
+		return connect.NewError(connect.CodeUnauthenticated, errors.New("missing identity"))
 	}
-
-	pr, err := s.registry.Register(token)
-	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("register token: %w", err))
+	if !id.AllowsProject(project) {
+		return connect.NewError(connect.CodePermissionDenied,
+			fmt.Errorf("key %q not allowed for project %q", id.KeyName, project))
 	}
-	defer s.registry.Remove(token)
-
-	opts := s.createOpts
-	opts.Token = token
-
-	instance, runnerConn, err := s.provider.Create(ctx, opts)
-	if err != nil {
-		slog.Error("failed to create VM", "error", err)
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to create VM: %w", err))
-	}
-
-	defer func() {
-		if destroyErr := s.provider.Destroy(context.Background(), instance.ID); destroyErr != nil {
-			slog.Error("failed to destroy VM", "vm", instance.ID, "error", destroyErr)
-		}
-	}()
-
-	// If the provider gave us a listener (vsock), serve BridgeService on it.
-	if runnerConn != nil && runnerConn.Listener != nil {
-		go dispatch.Serve(runnerConn.Listener, s.bridgeHandler)
-		defer runnerConn.Listener.Close()
-	}
-
-	// Wait for runner to register.
-	registerCtx, registerCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer registerCancel()
-
-	select {
-	case <-pr.DoneCh:
-		// Runner connected via Register RPC.
-	case <-registerCtx.Done():
-		return nil, connect.NewError(connect.CodeDeadlineExceeded, errors.New("timed out waiting for runner to connect"))
-	}
-
-	// Send exec command.
-	commandID := "exec-1"
-	pr.CommandCh <- &v1.RunnerCommand{
-		CommandId: commandID,
-		Command: &v1.RunnerCommand_Exec{
-			Exec: &v1.ExecRequest{
-				Command:    msg.Command,
-				Args:       msg.Args,
-				WorkingDir: msg.WorkingDir,
-				Privileged: true,
-			},
-		},
-	}
-
-	// Wait for result.
-	resultCtx, resultCancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer resultCancel()
-
-	select {
-	case result := <-pr.ResultCh:
-		if result.Error != "" {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("runner error: %s", result.Error))
-		}
-		execResult := result.GetExec()
-		if execResult == nil {
-			return nil, connect.NewError(connect.CodeInternal, errors.New("unexpected result type"))
-		}
-		return connect.NewResponse(&v1.ExecuteJobResponse{
-			ExitCode: execResult.ExitCode,
-			Stdout:   execResult.Stdout,
-			Stderr:   execResult.Stderr,
-			VmId:     instance.ID,
-			VmInfo:   pr.VmInfo,
-		}), nil
-	case <-resultCtx.Done():
-		return nil, connect.NewError(connect.CodeDeadlineExceeded, errors.New("timed out waiting for command result"))
-	}
+	return nil
 }
 
 func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJobRequest]) (*connect.Response[v1.StartJobResponse], error) {
 	msg := req.Msg
+
+	if err := s.authorizeProject(ctx, msg.Project); err != nil {
+		return nil, err
+	}
 
 	if s.projectStore == nil || s.sessionMgr == nil {
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("project-aware jobs not configured"))
@@ -990,6 +925,10 @@ func (s *Service) GetSession(ctx context.Context, req *connect.Request[v1.GetSes
 		return nil, connect.NewError(connect.CodeNotFound, err)
 	}
 
+	if err := s.authorizeProject(ctx, sess.ProjectName); err != nil {
+		return nil, err
+	}
+
 	return connect.NewResponse(&v1.GetSessionResponse{
 		SessionId:      sess.ID,
 		Project:        sess.ProjectName,
@@ -1013,8 +952,16 @@ func (s *Service) ListSessions(ctx context.Context, _ *connect.Request[v1.ListSe
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 
+	// When auth is enabled, restrict the listing to the projects the key
+	// covers. A missing identity (unreachable behind the interceptor) yields
+	// an empty list rather than an error.
+	id, hasIdentity := auth.IdentityFrom(ctx)
+
 	var resp []*v1.GetSessionResponse
 	for _, sess := range sessions {
+		if s.authEnabled && (!hasIdentity || !id.AllowsProject(sess.ProjectName)) {
+			continue
+		}
 		resp = append(resp, &v1.GetSessionResponse{
 			SessionId:      sess.ID,
 			Project:        sess.ProjectName,
@@ -1036,6 +983,16 @@ func (s *Service) ListSessions(ctx context.Context, _ *connect.Request[v1.ListSe
 func (s *Service) WatchSession(ctx context.Context, req *connect.Request[v1.WatchSessionRequest], stream *connect.ServerStream[v1.SessionUpdate]) error {
 	if s.sessionMgr == nil {
 		return connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+	}
+
+	// Resolve the session first so we can authorize against its project before
+	// streaming any events.
+	sess, err := s.sessionMgr.Get(ctx, req.Msg.SessionId)
+	if err != nil {
+		return connect.NewError(connect.CodeNotFound, err)
+	}
+	if err := s.authorizeProject(ctx, sess.ProjectName); err != nil {
+		return err
 	}
 
 	ch, err := s.sessionMgr.Watch(ctx, req.Msg.SessionId)
