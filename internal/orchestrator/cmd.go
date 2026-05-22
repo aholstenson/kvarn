@@ -35,13 +35,20 @@ type Cmd struct {
 }
 
 func (c *Cmd) Run() error {
-	diskImagePath := c.DiskImagePath
-	if diskImagePath == "" {
-		resolved, err := vm.ResolveDiskImagePath()
-		if err != nil {
-			return errors.Wrap(err, "find disk image")
-		}
-		diskImagePath = resolved
+	ctx := context.Background()
+
+	downloadLogged := false
+	diskImagePath, err := vm.EnsureDiskImage(ctx, vm.DownloadOpts{
+		Path: c.DiskImagePath,
+		Progress: func(_, total int64) {
+			if !downloadLogged {
+				downloadLogged = true
+				slog.Info("downloading VM disk image", "total_bytes", total)
+			}
+		},
+	})
+	if err != nil {
+		return errors.Wrap(err, "find disk image")
 	}
 
 	p := local.NewProvider()
@@ -49,7 +56,7 @@ func (c *Cmd) Run() error {
 		DiskImagePath: diskImagePath,
 	}
 
-	image, err := p.PrepareImage(context.Background(), base)
+	image, err := p.PrepareImage(ctx, base)
 	if err != nil {
 		return errors.Wrap(err, "prepare image")
 	}
@@ -79,7 +86,7 @@ func (c *Cmd) Run() error {
 
 	agentsStore := modeltoml.OpenDefault(c.AgentsFile)
 	models, configs, err := modelcfg.Resolve(
-		context.Background(), mgr,
+		ctx, mgr,
 		agentsStore,
 		coding.DefaultModels(),
 		coding.ModelMain, c.Model,

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/aholstenson/kvarn/internal/cmd/imageutil"
 	projectstore "github.com/aholstenson/kvarn/internal/config/project"
 	projecttoml "github.com/aholstenson/kvarn/internal/config/project/tomlstore"
 	"github.com/aholstenson/kvarn/internal/config/secret"
@@ -43,21 +44,21 @@ func (c *Cmd) Run() error {
 		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}
 
-	renderer := taskui.New(os.Stdout, c.Verbose)
-	renderer.Start()
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	diskImagePath := c.DiskImagePath
-	if diskImagePath == "" {
-		resolved, err := vm.ResolveDiskImagePath()
-		if err != nil {
-			renderer.Stop()
-			return errors.Wrap(err, "find disk image")
-		}
-		diskImagePath = resolved
+	// Resolve (and if needed download) the disk image before the TUI starts so
+	// any download progress goes to stderr without corrupting the renderer.
+	diskImagePath, err := vm.EnsureDiskImage(ctx, vm.DownloadOpts{
+		Path:     c.DiskImagePath,
+		Progress: imageutil.NewProgress(os.Stderr, "Downloading VM image…"),
+	})
+	if err != nil {
+		return errors.Wrap(err, "find disk image")
 	}
+
+	renderer := taskui.New(os.Stdout, c.Verbose)
+	renderer.Start()
 
 	// Load project config.
 	cfg, err := project.Load(c.Dir)

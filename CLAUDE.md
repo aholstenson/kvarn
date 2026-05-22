@@ -41,15 +41,17 @@ task test:verbose     # verbose output
 ## VM Image
 
 ```sh
-task image:build    # build kernel, initrd, and disk image into dist/
-task image:clean    # remove dist/
+task image:build         # build disk image for the host arch into dist/<arch>/
+task image:build:arm64   # build for arm64
+task image:build:amd64   # build for amd64
+task image:clean         # remove dist/
 ```
 
-- Docker-based build (`image/Dockerfile.rootfs`) produces Debian bookworm-slim rootfs with kvarn runner
-- `image/build-image.sh` cross-compiles the runner, builds the Docker image, and extracts artifacts
-- Output: `dist/vmlinuz`, `dist/initrd`, `dist/disk.img`
-- `image/overlay/` contains systemd unit files and scripts copied into the image
-- Virtio modules needed for boot must be listed in `/etc/initramfs-tools/modules` and baked into the initrd via `update-initramfs` — the kernel command line cannot load them
+- `image/build-image.sh` cross-compiles the runner for `linux/<arch>`, then runs `image/customize.sh` in a privileged Docker container.
+- `customize.sh` downloads the Debian trixie genericcloud qcow2, mounts its rootfs, bakes in the kvarn runner (installed as `/usr/local/bin/kvarn`) plus the `image/overlay/` systemd units and scripts, loads the vsock/virtio modules at boot, and reconverts to a compressed qcow2.
+- Output: `dist/<arch>/disk.qcow2` — one self-contained image per arch.
+- The runner binary is baked into the image, so the image and the CLI/orchestrator are version-coupled by convention: the same release tag builds both.
+
 
 ## Comments and documentation
 

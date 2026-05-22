@@ -20,6 +20,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/agent/coding"
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
+	"github.com/aholstenson/kvarn/internal/cmd/imageutil"
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 	modeltoml "github.com/aholstenson/kvarn/internal/config/model/tomlstore"
 	projectstore "github.com/aholstenson/kvarn/internal/config/project"
@@ -119,18 +120,18 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		mode = coding.ModeAuto
 	}
 
+	// Resolve (and if needed download) the disk image before the TUI starts so
+	// any download progress goes to stderr without corrupting the renderer.
+	diskImagePath, err := vm.EnsureDiskImage(ctx, vm.DownloadOpts{
+		Path:     c.DiskImagePath,
+		Progress: imageutil.NewProgress(os.Stderr, "Downloading VM image…"),
+	})
+	if err != nil {
+		return errors.Wrap(err, "find disk image")
+	}
+
 	renderer := taskui.New(deps.Stdout, c.Verbose)
 	renderer.Start()
-
-	diskImagePath := c.DiskImagePath
-	if diskImagePath == "" {
-		resolved, err := vm.ResolveDiskImagePath()
-		if err != nil {
-			renderer.Stop()
-			return errors.Wrap(err, "find disk image")
-		}
-		diskImagePath = resolved
-	}
 
 	cfg, err := project.Load(c.Dir)
 	if err != nil {
