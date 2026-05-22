@@ -702,6 +702,40 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 	s.sessionMgr.UpdateState(ctx, sessionID, session.StateCompleted, "Completed")
 }
 
+// ccPrefix matches a leading Conventional Commit prefix: one of the recognized
+// type words, an optional (scope), an optional ! breaking-change marker, and
+// the colon. Restricting to known types avoids mangling ordinary titles that
+// merely start with a "word:" (e.g. "Note: ...").
+var ccPrefix = regexp.MustCompile(`(?i)^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]*\))?!?:\s*`)
+
+// nonSlugChars matches runs of characters that aren't lowercase alphanumerics,
+// so they can be collapsed into a single hyphen.
+var nonSlugChars = regexp.MustCompile(`[^a-z0-9]+`)
+
+const maxBranchSlugLen = 50
+
+// branchSlug derives a human-readable, git-ref-safe branch component from a
+// commit title. The Conventional Commit prefix is stripped because the branch
+// already carries a namespace prefix, so the type/scope would only add noise.
+// Returns "" when nothing usable remains, in which case the caller falls back
+// to the session id alone.
+func branchSlug(title string) string {
+	s := ccPrefix.ReplaceAllString(title, "")
+	s = strings.ToLower(s)
+	s = nonSlugChars.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if len(s) > maxBranchSlugLen {
+		s = s[:maxBranchSlugLen]
+		// Trim back to the last word boundary to avoid cutting mid-word,
+		// unless the truncated slug is a single long word with no boundary.
+		if i := strings.LastIndex(s, "-"); i > 0 {
+			s = s[:i]
+		}
+		s = strings.Trim(s, "-")
+	}
+	return s
+}
+
 // submitChanges extracts changes from the VM, commits, pushes, and creates a PR.
 func (s *Service) submitChanges(
 	ctx context.Context,
@@ -770,7 +804,18 @@ func (s *Service) submitChanges(
 
 	// Commit and push. The commit message and PR body are identical so the
 	// PR shows the same content that lands as the merge commit.
+	//
+	// The branch name is derived from the commit title for readability, with a
+	// short slice of the session id as a suffix to keep it unique and git-ref
+	// safe. If the title yields no usable slug, fall back to the session id.
 	prBranch := fmt.Sprintf("%s/%s", prefix, sessionID)
+	if slug := branchSlug(title); slug != "" {
+		suffix := sessionID
+		if len(suffix) > 8 {
+			suffix = suffix[:8]
+		}
+		prBranch = fmt.Sprintf("%s/%s-%s", prefix, slug, suffix)
+	}
 	commitMsg := title
 	if body != "" {
 		commitMsg = title + "\n\n" + body
