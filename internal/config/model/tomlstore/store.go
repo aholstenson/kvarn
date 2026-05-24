@@ -10,14 +10,16 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
+	llms "github.com/aholstenson/llms-go"
+
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 )
 
 // entryData mirrors a single [models.<alias>] block in agents.toml.
 type entryData struct {
-	Model           string `toml:"model"`
-	ThinkingTokens  *int   `toml:"thinking_tokens"`
-	MaxOutputTokens *int   `toml:"max_output_tokens"`
+	Model           string       `toml:"model"`
+	ReasoningEffort *llms.Effort `toml:"reasoning_effort"`
+	MaxOutputTokens *int         `toml:"max_output_tokens"`
 }
 
 // jobDefaults mirrors a single [defaults.jobs.<mode>] block.
@@ -46,7 +48,7 @@ type defaultsData struct {
 //
 //	[models.coding-agent]
 //	model            = "anthropic/claude-sonnet-4-6"
-//	thinking_tokens  = 8000
+//	reasoning_effort = "medium"
 //	max_output_tokens = 16384
 type fileData struct {
 	Defaults defaultsData         `toml:"defaults"`
@@ -110,7 +112,7 @@ func (s *Store) All(_ context.Context) (map[string]modelcfg.RawEntry, error) {
 	for alias, e := range fd.Models {
 		out[alias] = modelcfg.RawEntry{
 			ModelID:         e.Model,
-			ThinkingTokens:  e.ThinkingTokens,
+			ReasoningEffort: e.ReasoningEffort,
 			MaxOutputTokens: e.MaxOutputTokens,
 		}
 	}

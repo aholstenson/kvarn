@@ -11,9 +11,9 @@ import (
 // Entry holds the resolved configuration for a model alias.
 type Entry struct {
 	ModelID         string
-	ThinkingTokens  int // 0 = disabled
-	MaxOutputTokens int // 0 = use caller default
-	MaxSteps        int // 0 = use caller default
+	ReasoningEffort llms.Effort // "" = none
+	MaxOutputTokens int         // 0 = use caller default
+	MaxSteps        int         // 0 = use caller default
 }
 
 // RawEntry is the user-supplied override for a single model alias. Pointer
@@ -21,7 +21,7 @@ type Entry struct {
 // the compiled-in default.
 type RawEntry struct {
 	ModelID         string
-	ThinkingTokens  *int
+	ReasoningEffort *llms.Effort
 	MaxOutputTokens *int
 	MaxSteps        *int
 }
@@ -80,8 +80,8 @@ func Resolve(
 			if raw.ModelID != "" {
 				entry.ModelID = raw.ModelID
 			}
-			if raw.ThinkingTokens != nil {
-				entry.ThinkingTokens = *raw.ThinkingTokens
+			if raw.ReasoningEffort != nil {
+				entry.ReasoningEffort = *raw.ReasoningEffort
 			}
 			if raw.MaxOutputTokens != nil {
 				entry.MaxOutputTokens = *raw.MaxOutputTokens

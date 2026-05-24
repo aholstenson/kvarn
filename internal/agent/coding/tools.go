@@ -796,8 +796,8 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 		llms.WithMaxSteps(maxSteps),
 		llms.WithMaxOutputTokens(maxOut),
 	}
-	if sub.ThinkingTokens > 0 {
-		opts = append(opts, llms.WithMaxThinkingTokens(sub.ThinkingTokens))
+	if sub.ReasoningEffort != "" {
+		opts = append(opts, llms.WithReasoningEffort(sub.ReasoningEffort))
 	}
 	if parent := llms.GetExecutionContext(ctx); parent != nil {
 		opts = append(opts, llms.WithParentExecution(parent))

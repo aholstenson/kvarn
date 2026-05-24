@@ -25,9 +25,9 @@ type SubAgent struct {
 	// Model is the alias of the LLM the sub-agent runs against. Empty falls
 	// back to ModelMain.
 	Model string
-	// ThinkingTokens is the thinking budget for sub-agent calls. 0 disables
-	// thinking.
-	ThinkingTokens int
+	// ReasoningEffort is the reasoning-effort level for sub-agent calls. The
+	// empty value (or EffortNone) disables reasoning.
+	ReasoningEffort llms.Effort
 	// MaxOutputTokens caps the sub-agent's output. 0 falls back to 16384.
 	MaxOutputTokens int
 }

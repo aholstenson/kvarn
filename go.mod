@@ -6,7 +6,7 @@ require (
 	connectrpc.com/connect v1.19.1
 	github.com/Code-Hex/vz/v3 v3.7.1
 	github.com/Masterminds/semver/v3 v3.4.0
-	github.com/aholstenson/llms-go v0.1.0
+	github.com/aholstenson/llms-go v0.3.0
 	github.com/alecthomas/kong v1.15.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/diskfs/go-diskfs v1.7.0
@@ -63,6 +63,7 @@ require (
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mdlayher/socket v0.4.1 // indirect
 	github.com/openai/openai-go v1.12.0 // indirect
+	github.com/openai/openai-go/v2 v2.7.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.17 // indirect
 	github.com/pjbgf/sha1cd v0.3.2 // indirect
 	github.com/pkg/xattr v0.4.9 // indirect

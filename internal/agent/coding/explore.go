@@ -29,8 +29,8 @@ Return a single written answer. Lead with the conclusion, then the supporting ev
 	Tools: func(deps SubAgentDeps) []llms.ToolDef {
 		return readOnlyTools(deps)
 	},
-	MaxSteps:        50,
+	MaxSteps:        100,
 	Model:           ModelSmall,
-	ThinkingTokens:  0,
-	MaxOutputTokens: 4096,
+	ReasoningEffort: llms.EffortNone,
+	MaxOutputTokens: 16384,
 }

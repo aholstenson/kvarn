@@ -36,6 +36,6 @@ Be specific about file paths and the smallest reasonable scope. Do not produce d
 	},
 	MaxSteps:        50,
 	Model:           ModelMain,
-	ThinkingTokens:  5000,
+	ReasoningEffort: llms.EffortMedium,
 	MaxOutputTokens: 8192,
 }

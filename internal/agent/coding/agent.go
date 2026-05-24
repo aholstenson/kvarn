@@ -91,8 +91,8 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 	} else {
 		opts = append(opts, llms.WithToolkits(toolkit))
 	}
-	if mainCfg.ThinkingTokens > 0 {
-		opts = append(opts, llms.WithMaxThinkingTokens(mainCfg.ThinkingTokens))
+	if mainCfg.ReasoningEffort != "" {
+		opts = append(opts, llms.WithReasoningEffort(mainCfg.ReasoningEffort))
 	}
 
 	if agentCtx.OnProgress != nil {
@@ -156,6 +156,21 @@ func (a *CodingAgent) Run(ctx context.Context, agentCtx *agent.Context) (*agent.
 					ToolID:  e.ToolID,
 					Result:  result,
 					IsError: isError,
+				})
+
+			case llms.StreamingEventToolError:
+				// Terminal event emitted in place of StreamingEventToolResult
+				// when a tool call fails; surface it so the call leaves the
+				// running state instead of being pinned there.
+				result := ""
+				if e.Error != nil {
+					result = e.Error.Error()
+				}
+				agentCtx.OnProgress(agent.ProgressToolResult{
+					AgentID: agentID,
+					ToolID:  e.ToolID,
+					Result:  result,
+					IsError: true,
 				})
 			}
 			return nil

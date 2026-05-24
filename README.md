@@ -405,7 +405,7 @@ Model aliases live in `~/.config/kvarn/agents.toml`. These aliases override the 
 ```toml
 [models.coding-agent]
 model = "anthropic/claude-sonnet-4-6"
-thinking_tokens = 10000
+reasoning_effort = "medium"
 max_output_tokens = 16384
 
 [models.coding-agent-small]

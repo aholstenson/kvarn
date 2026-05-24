@@ -1,6 +1,10 @@
 package coding
 
-import modelcfg "github.com/aholstenson/kvarn/internal/config/model"
+import (
+	llms "github.com/aholstenson/llms-go"
+
+	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
+)
 
 const (
 	// ModelMain is the alias for the primary coding-agent model used by
@@ -18,7 +22,7 @@ func DefaultModels() map[string]modelcfg.Entry {
 	return map[string]modelcfg.Entry{
 		ModelMain: {
 			ModelID:         "anthropic/claude-sonnet-4-6",
-			ThinkingTokens:  10000,
+			ReasoningEffort: llms.EffortMedium,
 			MaxOutputTokens: 16384,
 			MaxSteps:        100,
 		},
