@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync/atomic"
+	"time"
 
 	"connectrpc.com/connect"
 	stderrors "errors"
@@ -22,6 +23,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/config/secret"
 	"github.com/aholstenson/kvarn/internal/forge"
 	"github.com/aholstenson/kvarn/internal/orchestrator"
+	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/runner"
 	"github.com/aholstenson/kvarn/internal/sandbox"
@@ -1094,5 +1096,191 @@ var _ = Describe("StartJob submission flow", func() {
 		Expect(commentOpts.Body).To(ContainSubstring("Tool: WriteFile"))
 		Expect(commentOpts.Body).To(ContainSubstring("Tool failed: Bash"))
 		Expect(commentOpts.Body).To(ContainSubstring("test failure: thing broke"))
+	})
+})
+
+var _ = Describe("StartJob admission scheduler", func() {
+	var (
+		client     kvarnv1connect.OrchestratorServiceClient
+		server     *http.Server
+		sessionMgr *session.MemoryManager
+		listener   net.Listener
+		tmpDir     string
+		gates      []chan struct{}
+		counter    atomic.Int32
+	)
+
+	BeforeEach(func() {
+		sessionMgr = session.NewMemoryManager()
+		gates = []chan struct{}{
+			make(chan struct{}),
+			make(chan struct{}),
+			make(chan struct{}),
+		}
+		counter.Store(0)
+
+		var err error
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		Expect(err).NotTo(HaveOccurred())
+
+		tmpDir, err = os.MkdirTemp("", "sched-test-*")
+		Expect(err).NotTo(HaveOccurred())
+
+		projStore := &memProjectStore{
+			projects: map[string]*project.Project{
+				"test-project": {
+					Name:          "test-project",
+					RepoURL:       filepath.Join(tmpDir, "repo.git"),
+					DefaultBranch: "master",
+					Forge:         "test-forge",
+				},
+			},
+		}
+		forgeConfigStore := &memForgeConfigStore{
+			configs: map[string]*forgeconfig.ForgeConfig{
+				"test-forge": {Name: "test-forge", Type: "mock"},
+			},
+		}
+		mockForgeInst := &mockForge{scmImpl: &mockSCM{}}
+
+		// Factory: emit ProvisioningEvent, then block on the per-job gate so
+		// the slot stays occupied while the test observes admission ordering.
+		factory := func(ctx context.Context, opts sandbox.Opts) (orchestrator.Sandbox, error) {
+			idx := int(counter.Add(1) - 1)
+			if opts.OnEvent != nil {
+				opts.OnEvent(sandbox.ProvisioningEvent{})
+			}
+			if idx < len(gates) {
+				select {
+				case <-gates[idx]:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+
+			wsDir, err := os.MkdirTemp("", "sched-ws-*")
+			if err != nil {
+				return nil, err
+			}
+			if opts.SourceDir != "" {
+				cp := exec.Command("cp", "-a", opts.SourceDir+"/.", wsDir)
+				if out, err := cp.CombinedOutput(); err != nil {
+					return nil, fmt.Errorf("copy source: %s: %w", out, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(wsDir, ".git")); os.IsNotExist(err) {
+				Expect(exec.Command("git", "init", wsDir).Run()).To(Succeed())
+				ac := exec.Command("git", "add", ".")
+				ac.Dir = wsDir
+				Expect(ac.Run()).To(Succeed())
+				cc := exec.Command("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "i")
+				cc.Dir = wsDir
+				Expect(cc.Run()).To(Succeed())
+			}
+			h := runner.NewUnprivilegedHandler()
+			proxy := &localRunnerProxy{handler: h}
+			sessResp, err := proxy.CreateSession(context.Background(), &v1.CreateSessionRequest{WorkingDir: wsDir})
+			if err != nil {
+				return nil, err
+			}
+			return &testSandbox{
+				runner:         proxy,
+				shellSessionID: sessResp.SessionId,
+				workingDir:     wsDir,
+			}, nil
+		}
+
+		// Pool sized so two jobs of 2 vCPU / 4 GiB / 16 GiB fit (filling the
+		// pool exactly) and the third must wait.
+		sched := scheduler.New(scheduler.Options{
+			Total: scheduler.Capacity{
+				CPUMillis: 4000,
+				MemBytes:  8 * 1024 * 1024 * 1024,
+				DiskBytes: 40 * 1024 * 1024 * 1024,
+			},
+			CPUOvercommit: 1.0,
+		})
+
+		svc := orchestrator.NewServiceWithOpts(orchestrator.ServiceOpts{
+			CreateOpts:       vm.CreateOpts{},
+			ProjectStore:     projStore,
+			ForgeConfigStore: forgeConfigStore,
+			ForgeTypes:       map[string]forge.Forge{"mock": mockForgeInst},
+			SessionMgr:       sessionMgr,
+			Agent:            &agent.NoopAgent{},
+			SandboxFactory:   factory,
+			Scheduler:        sched,
+		})
+
+		mux := http.NewServeMux()
+		path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc)
+		mux.Handle(path, handler)
+		bridgePath, bridgeHandler := kvarnv1connect.NewBridgeServiceHandler(svc.BridgeHandler())
+		mux.Handle(bridgePath, bridgeHandler)
+		server = &http.Server{Handler: mux}
+		go server.Serve(listener)
+
+		client = kvarnv1connect.NewOrchestratorServiceClient(
+			http.DefaultClient,
+			fmt.Sprintf("http://%s", listener.Addr().String()),
+		)
+	})
+
+	AfterEach(func() {
+		// Best-effort: drain any unreleased gates so blocked goroutines exit.
+		for _, g := range gates {
+			select {
+			case <-g:
+			default:
+				close(g)
+			}
+		}
+		server.Close()
+		os.RemoveAll(tmpDir)
+	})
+
+	stateOf := func(sid string) func() string {
+		return func() string {
+			s, err := sessionMgr.Get(context.Background(), sid)
+			if err != nil {
+				return ""
+			}
+			return string(s.State)
+		}
+	}
+
+	It("admits up to capacity, queues the rest, and admits queued jobs as slots free", func() {
+		ids := make([]string, 3)
+		for i := 0; i < 3; i++ {
+			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+				Project: "test-project",
+				Prompt:  fmt.Sprintf("job %d", i),
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			ids[i] = resp.Msg.SessionId
+		}
+
+		// Sessions 1 and 2 reach provisioning; session 3 stays queued.
+		Eventually(stateOf(ids[0])).Should(Equal("provisioning"))
+		Eventually(stateOf(ids[1])).Should(Equal("provisioning"))
+		Eventually(stateOf(ids[2])).Should(Equal("queued"))
+		Consistently(stateOf(ids[2]), 200*time.Millisecond).Should(Equal("queued"))
+
+		sess, err := sessionMgr.Get(context.Background(), ids[2])
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sess.Message).To(ContainSubstring("Position 1"))
+		Expect(sess.Message).To(ContainSubstring("2 vCPU"))
+
+		// Unblock session 1: it completes, releases its lease, and session 3
+		// is admitted.
+		close(gates[0])
+		Eventually(stateOf(ids[0])).Should(Equal("completed"))
+		Eventually(stateOf(ids[2])).ShouldNot(Equal("queued"))
+
+		// Let the rest run to completion so the test cleans up.
+		close(gates[1])
+		close(gates[2])
+		Eventually(stateOf(ids[1])).Should(Equal("completed"))
+		Eventually(stateOf(ids[2])).Should(Equal("completed"))
 	})
 })

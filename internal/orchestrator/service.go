@@ -28,6 +28,7 @@ import (
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 	"github.com/aholstenson/kvarn/internal/forge"
 	"github.com/aholstenson/kvarn/internal/orchestrator/auth"
+	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
@@ -223,6 +224,7 @@ type Service struct {
 	pricingManager   *llms.PricingManager   // optional; nil disables USD computation
 	apiKeyStore      apikey.Store           // API keys for request authentication
 	authEnabled      bool                   // when true, project-scoped RPCs require an authorized key
+	scheduler        *scheduler.Scheduler   // resource admission; never nil (defaults to unbounded)
 }
 
 type ServiceOpts struct {
@@ -245,6 +247,7 @@ type ServiceOpts struct {
 	PricingManager     *llms.PricingManager   // optional; nil disables USD computation
 	APIKeyStore        apikey.Store           // API keys for request authentication
 	AuthEnabled        bool                   // when true, project-scoped RPCs require an authorized key
+	Scheduler          *scheduler.Scheduler   // optional; nil means unbounded (no admission control)
 }
 
 func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
@@ -254,6 +257,7 @@ func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
 		registry:      reg,
 		bridgeHandler: dispatch.NewHandler(reg),
 		createOpts:    createOpts,
+		scheduler:     scheduler.NewUnbounded(),
 	}
 }
 
@@ -261,6 +265,10 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 	wsDir := opts.WorkspaceDir
 	if wsDir == "" {
 		wsDir = "/home/kvarn/workspace"
+	}
+	sched := opts.Scheduler
+	if sched == nil {
+		sched = scheduler.NewUnbounded()
 	}
 	reg := dispatch.NewRegistry()
 	return &Service{
@@ -285,6 +293,7 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		pricingManager:   opts.PricingManager,
 		apiKeyStore:      opts.APIKeyStore,
 		authEnabled:      opts.AuthEnabled,
+		scheduler:        sched,
 	}
 }
 
@@ -494,6 +503,50 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 		return
 	}
 
+	// Reserve capacity before booting the VM. The footprint matches what
+	// sandbox.Start will request, so the scheduler accounts for what actually
+	// runs. Release is deferred so any provisioning failure returns the slot.
+	cpuCount := uint(0)
+	memBytes := uint64(0)
+	diskBytes := int64(0)
+	if cfg != nil {
+		cpuCount = cfg.CPUs()
+		memBytes = cfg.MemoryBytes()
+		diskBytes = cfg.DiskSizeBytes()
+	}
+	if cpuCount == 0 {
+		cpuCount = projconfig.DefaultCPUs
+	}
+	if memBytes == 0 {
+		memBytes = projconfig.DefaultMemory
+	}
+	if diskBytes == 0 {
+		diskBytes = projconfig.DefaultDiskSize
+	}
+	admitReq := scheduler.Request{
+		CPUMillis: uint64(cpuCount) * 1000,
+		MemBytes:  memBytes,
+		DiskBytes: uint64(diskBytes),
+		OnWait: func(e scheduler.WaitEvent) {
+			s.sessionMgr.UpdateState(ctx, sessionID, session.StateQueued,
+				fmt.Sprintf("Position %d in queue; need %d vCPU / %s memory / %s disk",
+					e.Position, cpuCount, formatBytes(memBytes), formatBytes(uint64(diskBytes))))
+		},
+	}
+	lease, err := s.scheduler.Acquire(ctx, admitReq)
+	if err != nil {
+		if errors.Is(err, scheduler.ErrTooLarge) {
+			log.Error("job exceeds scheduler capacity", "error", err)
+			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("scheduler: job %d vCPU / %s memory / %s disk exceeds host capacity",
+				cpuCount, formatBytes(memBytes), formatBytes(uint64(diskBytes))))
+			return
+		}
+		log.Error("admission failed", "error", err)
+		s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("admission: %w", err))
+		return
+	}
+	defer lease.Release()
+
 	// Load repo context (instructions + skills). Non-fatal on error.
 	rc, err := repocontext.Load(cloneDir)
 	if err != nil {
@@ -700,6 +753,22 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 
 	log.Info("job completed successfully")
 	s.sessionMgr.UpdateState(ctx, sessionID, session.StateCompleted, "Completed")
+}
+
+// formatBytes renders a byte count using GiB/MiB units, matching the way kvarn.yml
+// declares vm.memory/vm.disk so queue messages read consistently with the config.
+func formatBytes(b uint64) string {
+	const (
+		mib = uint64(1024 * 1024)
+		gib = uint64(1024) * mib
+	)
+	if b >= gib && b%gib == 0 {
+		return fmt.Sprintf("%dG", b/gib)
+	}
+	if b >= gib {
+		return fmt.Sprintf("%.1fG", float64(b)/float64(gib))
+	}
+	return fmt.Sprintf("%dM", b/mib)
 }
 
 // ccPrefix matches a leading Conventional Commit prefix: one of the recognized

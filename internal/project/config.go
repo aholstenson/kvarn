@@ -182,7 +182,7 @@ func (c *Config) DiskSizeBytes() int64 {
 	if c.VM.Disk == "" {
 		return 0
 	}
-	size, _ := parseSize(c.VM.Disk)
+	size, _ := ParseSize(c.VM.Disk)
 	return size
 }
 
@@ -196,13 +196,13 @@ func (c *Config) MemoryBytes() uint64 {
 	if c.VM.Memory == "" {
 		return 0
 	}
-	size, _ := parseSize(c.VM.Memory)
+	size, _ := ParseSize(c.VM.Memory)
 	return uint64(size)
 }
 
-// parseSize parses a human-readable size string into bytes.
+// ParseSize parses a human-readable size string into bytes.
 // Supports suffixes: M, MiB (mebibytes), G, GiB (gibibytes).
-func parseSize(s string) (int64, error) {
+func ParseSize(s string) (int64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, errors.New("empty size")
@@ -379,7 +379,7 @@ func (c *Config) validate() error {
 	}
 
 	if c.VM.Disk != "" {
-		size, err := parseSize(c.VM.Disk)
+		size, err := ParseSize(c.VM.Disk)
 		if err != nil {
 			return fmt.Errorf("vm.disk: %w", err)
 		}
@@ -393,7 +393,7 @@ func (c *Config) validate() error {
 	}
 
 	if c.VM.Memory != "" {
-		size, err := parseSize(c.VM.Memory)
+		size, err := ParseSize(c.VM.Memory)
 		if err != nil {
 			return fmt.Errorf("vm.memory: %w", err)
 		}

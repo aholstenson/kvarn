@@ -10,12 +10,15 @@ import (
 	credtoml "github.com/aholstenson/kvarn/internal/config/credential/tomlstore"
 	forgetoml "github.com/aholstenson/kvarn/internal/config/forge/tomlstore"
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
+	orchcfg "github.com/aholstenson/kvarn/internal/config/orchestrator"
 	modeltoml "github.com/aholstenson/kvarn/internal/config/model/tomlstore"
 	projtoml "github.com/aholstenson/kvarn/internal/config/project/tomlstore"
 	secrettoml "github.com/aholstenson/kvarn/internal/config/secret/tomlstore"
 	"github.com/aholstenson/kvarn/internal/forge"
 	forgegit "github.com/aholstenson/kvarn/internal/forge/git"
 	forgegithub "github.com/aholstenson/kvarn/internal/forge/github"
+	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
+	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox/transfer"
 	"github.com/aholstenson/kvarn/internal/session"
 	"github.com/aholstenson/kvarn/internal/vm"
@@ -32,9 +35,19 @@ type Cmd struct {
 	ForgesFile      string `help:"Path to forges TOML file." default:""`
 	AgentsFile      string `help:"Path to agents config TOML file." default:""`
 	APIKeysFile     string `help:"Path to API keys TOML file." default:""`
-	NoAuth          bool   `help:"Disable API-key auth (local dev only)." env:"KVARN_NO_AUTH"`
-	Model           string `help:"LLM model alias for the coding agent." default:"coding-agent"`
+	NoAuth            bool   `help:"Disable API-key auth (local dev only)." env:"KVARN_NO_AUTH"`
+	Model             string `help:"LLM model alias for the coding agent." default:"coding-agent"`
+	OrchestratorFile  string `help:"Path to orchestrator TOML file (host-level settings, e.g. scheduler pool)." default:""`
+
+	SchedCPUs          uint    `help:"Total vCPUs in the admission pool. 0 = file / runtime.NumCPU()." env:"KVARN_SCHED_CPUS" default:"0"`
+	SchedMemory        string  `help:"Total admission-pool memory (e.g. 32G). Empty = file / 75% of host total." env:"KVARN_SCHED_MEMORY" default:""`
+	SchedDisk          string  `help:"Total admission-pool disk (e.g. 200G). Empty = file / 75% of free space on the image cache filesystem." env:"KVARN_SCHED_DISK" default:""`
+	SchedCPUOvercommit float64 `help:"CPU overcommit multiplier (>=1.0). 0 = file / built-in default." env:"KVARN_SCHED_CPU_OVERCOMMIT" default:"0"`
 }
+
+// defaultCPUOvercommit is the built-in CPU overcommit multiplier used when
+// neither the CLI flag nor the orchestrator.toml file set one.
+const defaultCPUOvercommit = 1.5
 
 func (c *Cmd) Run() error {
 	ctx := context.Background()
@@ -114,6 +127,20 @@ func (c *Cmd) Run() error {
 		return err
 	}
 
+	orchPath := c.OrchestratorFile
+	if orchPath == "" {
+		orchPath = orchcfg.DefaultPath()
+	}
+	orchFile, err := orchcfg.Load(orchPath)
+	if err != nil {
+		return fmt.Errorf("load orchestrator config: %w", err)
+	}
+
+	sched, err := c.buildScheduler(orchFile.Scheduler)
+	if err != nil {
+		return fmt.Errorf("scheduler: %w", err)
+	}
+
 	return run(c.Addr, ServiceOpts{
 		Provider:           p,
 		CreateOpts:         vm.CreateOpts{Image: image},
@@ -133,5 +160,95 @@ func (c *Cmd) Run() error {
 		PricingManager: llms.NewPricingManager(logger),
 		APIKeyStore:    apiKeyStore,
 		AuthEnabled:    !c.NoAuth,
+		Scheduler:      sched,
 	})
+}
+
+// buildScheduler resolves the scheduler pool with CLI > TOML > host precedence.
+// Host fallbacks: NumCPU / 75% memory / 75% free disk on the image cache
+// filesystem. Rejects degenerate configurations early so the orchestrator
+// never starts with a pool that can't admit anything.
+func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, error) {
+	overcommit := c.SchedCPUOvercommit
+	if overcommit == 0 && fileCfg.CPUOvercommit != nil {
+		overcommit = *fileCfg.CPUOvercommit
+	}
+	if overcommit == 0 {
+		overcommit = defaultCPUOvercommit
+	}
+	if overcommit < 1.0 {
+		return nil, fmt.Errorf("cpu_overcommit must be >= 1.0, got %g", overcommit)
+	}
+
+	cpus := uint64(c.SchedCPUs)
+	if cpus == 0 && fileCfg.CPUs != nil {
+		cpus = uint64(*fileCfg.CPUs)
+	}
+	if cpus == 0 {
+		cpus = uint64(scheduler.HostCPUMillis()) / 1000
+	}
+	cpuMillis := uint64(float64(cpus*1000) * overcommit)
+
+	memBytes, err := resolveSize(c.SchedMemory, fileCfg.Memory, "--sched-memory", "scheduler.memory",
+		func() (uint64, error) {
+			host, err := scheduler.HostMemoryBytes()
+			if err != nil {
+				return 0, fmt.Errorf("detect host memory: %w", err)
+			}
+			return scheduler.FractionOf(host), nil
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	diskBytes, err := resolveSize(c.SchedDisk, fileCfg.Disk, "--sched-disk", "scheduler.disk",
+		func() (uint64, error) {
+			cacheDir, err := scheduler.DefaultImageCacheDir()
+			if err != nil {
+				return 0, err
+			}
+			free, err := scheduler.HostFreeDiskBytes(cacheDir)
+			if err != nil {
+				return 0, fmt.Errorf("detect free disk: %w", err)
+			}
+			return scheduler.FractionOf(free), nil
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	total := scheduler.Capacity{CPUMillis: cpuMillis, MemBytes: memBytes, DiskBytes: diskBytes}
+	if total.CPUMillis == 0 || total.MemBytes == 0 || total.DiskBytes == 0 {
+		return nil, fmt.Errorf("admission pool has a zero dimension: %+v", total)
+	}
+
+	slog.Info("scheduler pool",
+		"cpu_millis", total.CPUMillis,
+		"mem_bytes", total.MemBytes,
+		"disk_bytes", total.DiskBytes,
+		"cpu_overcommit", overcommit,
+	)
+
+	return scheduler.New(scheduler.Options{Total: total, CPUOvercommit: overcommit}), nil
+}
+
+// resolveSize applies CLI > file > host precedence to a size field. flagName /
+// fileField are surfaced in error messages so the operator can tell which input
+// failed to parse.
+func resolveSize(flagVal, fileVal, flagName, fileField string, host func() (uint64, error)) (uint64, error) {
+	if flagVal != "" {
+		n, err := projconfig.ParseSize(flagVal)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", flagName, err)
+		}
+		return uint64(n), nil
+	}
+	if fileVal != "" {
+		n, err := projconfig.ParseSize(fileVal)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", fileField, err)
+		}
+		return uint64(n), nil
+	}
+	return host()
 }

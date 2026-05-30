@@ -12,6 +12,7 @@ type State string
 
 const (
 	StatePending                State = "pending"
+	StateQueued                 State = "queued"
 	StateCloning                State = "cloning"
 	StateProvisioning           State = "provisioning"
 	StateTransferring           State = "transferring"
