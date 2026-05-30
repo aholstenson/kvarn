@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
@@ -27,6 +28,8 @@ import (
 	"github.com/aholstenson/kvarn/internal/dispatch"
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 	"github.com/aholstenson/kvarn/internal/forge"
+	"github.com/aholstenson/kvarn/internal/observability/metrics"
+	"github.com/aholstenson/kvarn/internal/observability/reqid"
 	"github.com/aholstenson/kvarn/internal/orchestrator/auth"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
@@ -38,6 +41,8 @@ import (
 	"github.com/aholstenson/kvarn/internal/session"
 	"github.com/aholstenson/kvarn/internal/vm"
 	llms "github.com/aholstenson/llms-go"
+	"go.opentelemetry.io/otel/metric"
+	otelnoop "go.opentelemetry.io/otel/metric/noop"
 )
 
 // worklogEntry is one line in the per-job work log posted as a PR comment.
@@ -227,6 +232,8 @@ type Service struct {
 	apiKeyStore      apikey.Store           // API keys for request authentication
 	authEnabled      bool                   // when true, project-scoped RPCs require an authorized key
 	scheduler        *scheduler.Scheduler   // resource admission; never nil (defaults to unbounded)
+	meter            metric.Meter           // never nil; no-op when metrics disabled
+	instruments      *metrics.Instruments   // optional; nil-safe at all call sites
 
 	// Job lifecycle. shutdownCtx is the parent of every runJob root context;
 	// Shutdown cancels it to wind down in-flight jobs and waits on jobsWG so
@@ -260,6 +267,8 @@ type ServiceOpts struct {
 	APIKeyStore        apikey.Store           // API keys for request authentication
 	AuthEnabled        bool                   // when true, project-scoped RPCs require an authorized key
 	Scheduler          *scheduler.Scheduler   // optional; nil means unbounded (no admission control)
+	Meter              metric.Meter           // optional; nil uses an otel no-op meter
+	Instruments        *metrics.Instruments   // optional; nil disables job/auth/scheduler instrumentation
 }
 
 func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
@@ -271,6 +280,7 @@ func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
 		bridgeHandler:  dispatch.NewHandler(reg),
 		createOpts:     createOpts,
 		scheduler:      scheduler.NewUnbounded(),
+		meter:          otelnoop.NewMeterProvider().Meter("kvarn"),
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
 	}
@@ -284,6 +294,10 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 	sched := opts.Scheduler
 	if sched == nil {
 		sched = scheduler.NewUnbounded()
+	}
+	meter := opts.Meter
+	if meter == nil {
+		meter = otelnoop.NewMeterProvider().Meter("kvarn")
 	}
 	reg := dispatch.NewRegistry()
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
@@ -312,6 +326,8 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		apiKeyStore:      opts.APIKeyStore,
 		authEnabled:      opts.AuthEnabled,
 		scheduler:        sched,
+		meter:            meter,
+		instruments:      opts.Instruments,
 		shutdownCtx:      shutdownCtx,
 		shutdownCancel:   shutdownCancel,
 	}
@@ -342,7 +358,7 @@ func (s *Service) Shutdown(ctx context.Context) {
 // the given project. It is a no-op when auth is disabled (local dev). When auth
 // is enabled the interceptor has already injected an Identity; a missing one is
 // treated as unauthenticated, and a project the key does not cover is denied.
-func (s *Service) authorizeProject(ctx context.Context, project string) error {
+func (s *Service) authorizeProject(ctx context.Context, project, procedure string) error {
 	if !s.authEnabled {
 		return nil
 	}
@@ -351,6 +367,13 @@ func (s *Service) authorizeProject(ctx context.Context, project string) error {
 		return connect.NewError(connect.CodeUnauthenticated, errors.New("missing identity"))
 	}
 	if !id.AllowsProject(project) {
+		slog.LogAttrs(ctx, slog.LevelWarn, "api_key_authz_denied",
+			slog.Bool("audit", true),
+			slog.String("key_name", id.KeyName),
+			slog.String("key_id", id.KeyID),
+			slog.String("project", project),
+			slog.String("method", procedure),
+		)
 		return connect.NewError(connect.CodePermissionDenied,
 			fmt.Errorf("key %q not allowed for project %q", id.KeyName, project))
 	}
@@ -360,7 +383,7 @@ func (s *Service) authorizeProject(ctx context.Context, project string) error {
 func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJobRequest]) (*connect.Response[v1.StartJobResponse], error) {
 	msg := req.Msg
 
-	if err := s.authorizeProject(ctx, msg.Project); err != nil {
+	if err := s.authorizeProject(ctx, msg.Project, req.Spec().Procedure); err != nil {
 		return nil, err
 	}
 
@@ -368,7 +391,8 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("project-aware jobs not configured"))
 	}
 
-	slog.Info("starting job", "project", msg.Project, "branch", msg.Branch, "mode", msg.Mode)
+	log := reqid.LoggerFrom(ctx).With("project", msg.Project, "mode", msg.Mode)
+	log.Info("starting job", "branch", msg.Branch)
 
 	mode, err := coding.ModeByName(msg.Mode)
 	if err != nil {
@@ -377,11 +401,11 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 
 	proj, err := s.projectStore.Get(ctx, msg.Project)
 	if err != nil {
-		slog.Error("project not found", "project", msg.Project, "error", err)
+		log.Error("project not found", "error", err)
 		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("project %q: %w", msg.Project, err))
 	}
 
-	slog.Info("resolved project", "project", proj.Name, "repo", proj.RepoURL, "forge", proj.Forge)
+	log.Info("resolved project", "repo", proj.RepoURL, "forge", proj.Forge)
 
 	sess, err := s.sessionMgr.Create(ctx, msg.Project, msg.Prompt, mode.ModeName())
 	if err != nil {
@@ -393,22 +417,46 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 		branch = proj.DefaultBranch
 	}
 
-	slog.Info("session created", "session_id", sess.ID, "branch", branch, "mode", mode.ModeName())
+	log.Info("session created", "session_id", sess.ID, "branch", branch)
 
+	reqID, _ := reqid.FromContext(ctx)
+	s.instruments.RecordJobStart(ctx, msg.Project, mode.ModeName())
 	s.jobsWG.Add(1)
-	go s.runJob(sess.ID, proj, branch, msg.Prompt, mode)
+	go s.runJob(reqID, sess.ID, proj, branch, msg.Prompt, mode)
 
 	return connect.NewResponse(&v1.StartJobResponse{
 		SessionId: sess.ID,
 	}), nil
 }
 
-func (s *Service) runJob(sessionID string, proj *project.Project, branch string, prompt string, mode *coding.Mode) {
+func (s *Service) runJob(requestID, sessionID string, proj *project.Project, branch string, prompt string, mode *coding.Mode) {
 	defer s.jobsWG.Done()
 	rootCtx, cancelJob := context.WithCancelCause(s.shutdownCtx)
 	defer cancelJob(nil)
+	if requestID != "" {
+		rootCtx = reqid.WithRequestID(rootCtx, requestID)
+	}
 	ctx := rootCtx
-	log := slog.With("session_id", sessionID, "project", proj.Name, "mode", mode.ModeName())
+	log := reqid.LoggerFrom(ctx).With("session_id", sessionID, "project", proj.Name, "mode", mode.ModeName())
+
+	jobStart := time.Now()
+	defer func() {
+		outcome := "success"
+		// Inspect the persisted state rather than threading a flag through every
+		// failure return; session.Fail has already moved it to StateFailed by
+		// the time this defer runs.
+		if final, err := s.sessionMgr.Get(context.Background(), sessionID); err == nil {
+			switch final.State {
+			case session.StateCompleted:
+				outcome = "success"
+			case session.StateFailed:
+				outcome = "failed"
+			default:
+				outcome = "cancelled"
+			}
+		}
+		s.instruments.RecordJobEnd(ctx, proj.Name, mode.ModeName(), outcome, time.Since(jobStart).Seconds())
+	}()
 
 	log.Info("job started", "repo", proj.RepoURL, "branch", branch)
 
@@ -1092,7 +1140,7 @@ func (s *Service) GetSession(ctx context.Context, req *connect.Request[v1.GetSes
 		return nil, connect.NewError(connect.CodeNotFound, err)
 	}
 
-	if err := s.authorizeProject(ctx, sess.ProjectName); err != nil {
+	if err := s.authorizeProject(ctx, sess.ProjectName, req.Spec().Procedure); err != nil {
 		return nil, err
 	}
 
@@ -1158,7 +1206,7 @@ func (s *Service) WatchSession(ctx context.Context, req *connect.Request[v1.Watc
 	if err != nil {
 		return connect.NewError(connect.CodeNotFound, err)
 	}
-	if err := s.authorizeProject(ctx, sess.ProjectName); err != nil {
+	if err := s.authorizeProject(ctx, sess.ProjectName, req.Spec().Procedure); err != nil {
 		return err
 	}
 

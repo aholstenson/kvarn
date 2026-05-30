@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aholstenson/kvarn/internal/agent/coding"
+	"github.com/aholstenson/kvarn/internal/buildinfo"
 	apikeytoml "github.com/aholstenson/kvarn/internal/config/apikey/tomlstore"
 	credtoml "github.com/aholstenson/kvarn/internal/config/credential/tomlstore"
 	forgetoml "github.com/aholstenson/kvarn/internal/config/forge/tomlstore"
@@ -21,6 +22,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/forge"
 	forgegit "github.com/aholstenson/kvarn/internal/forge/git"
 	forgegithub "github.com/aholstenson/kvarn/internal/forge/github"
+	"github.com/aholstenson/kvarn/internal/observability/metrics"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
@@ -49,6 +51,10 @@ type Cmd struct {
 	SchedDisk          string  `help:"Total admission-pool disk (e.g. 200G). Empty = file / 75% of free space on the image cache filesystem." env:"KVARN_SCHED_DISK" default:""`
 	SchedCPUOvercommit float64 `help:"CPU overcommit multiplier (>=1.0). 0 = file / built-in default." env:"KVARN_SCHED_CPU_OVERCOMMIT" default:"0"`
 	SchedMaxVMLifetime string  `help:"Host-wide per-VM wall-time failsafe (e.g. 4h). Empty = file / built-in default." env:"KVARN_SCHED_MAX_VM_LIFETIME" default:""`
+
+	OtelMetricsEnabled   bool   `help:"Enable OpenTelemetry metrics export." env:"KVARN_OTEL_METRICS_ENABLED"`
+	OtelExporterEndpoint string `help:"OTLP metrics endpoint (host:port). Empty = honor OTEL_EXPORTER_OTLP_ENDPOINT." env:"KVARN_OTEL_EXPORTER_OTLP_ENDPOINT"`
+	OtelServiceName      string `help:"service.name resource attribute." env:"KVARN_OTEL_SERVICE_NAME" default:"kvarn-orchestrator"`
 }
 
 // defaultCPUOvercommit is the built-in CPU overcommit multiplier used when
@@ -172,6 +178,55 @@ func (c *Cmd) Run() error {
 		"dir", cacheProvider.BaseDir,
 	)
 
+	meter, shutdownMeter, err := metrics.Setup(ctx, metrics.Config{
+		Enabled:     c.OtelMetricsEnabled,
+		Endpoint:    c.OtelExporterEndpoint,
+		ServiceName: c.OtelServiceName,
+		Version:     buildinfo.Version,
+	})
+	if err != nil {
+		metrics.LogStartupError(err)
+		meter, shutdownMeter, _ = metrics.Setup(ctx, metrics.Config{}) // no-op fallback
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownMeter(shutdownCtx); err != nil {
+			slog.Warn("metrics shutdown error", "error", err)
+		}
+	}()
+
+	sessionMgr := session.NewMemoryManager()
+	instruments, err := metrics.NewInstruments(meter,
+		func(ctx context.Context) (int64, error) {
+			ss, err := sessionMgr.List(ctx)
+			if err != nil {
+				return 0, err
+			}
+			var n int64
+			for _, s := range ss {
+				if !s.State.IsTerminal() {
+					n++
+				}
+			}
+			return n, nil
+		},
+		func() metrics.SchedulerSample {
+			used, free, _ := sched.Snapshot()
+			return metrics.SchedulerSample{
+				CPUMillisUsed:  int64(used.CPUMillis),
+				CPUMillisTotal: int64(used.CPUMillis + free.CPUMillis),
+				MemBytesUsed:   int64(used.MemBytes),
+				MemBytesTotal:  int64(used.MemBytes + free.MemBytes),
+			}
+		},
+	)
+	if err != nil {
+		metrics.LogStartupError(err)
+		instruments = nil
+	}
+	defer instruments.Close()
+
 	return run(ctx, c.Addr, ServiceOpts{
 		Provider:           p,
 		CreateOpts:         vm.CreateOpts{Image: image, MaxLifetime: maxLifetime},
@@ -184,7 +239,7 @@ func (c *Cmd) Run() error {
 			"github": forgegithub.New(),
 			"git":    forgegit.New(),
 		},
-		SessionMgr:     session.NewMemoryManager(),
+		SessionMgr:     sessionMgr,
 		Agent:          coding.NewCodingAgent(models, configs),
 		Transferer:     &transfer.StreamingTransferer{},
 		DefaultsStore:  agentsStore,
@@ -194,6 +249,8 @@ func (c *Cmd) Run() error {
 		Scheduler:      sched,
 		CacheProvider:  cacheProvider,
 		CacheQuota:     cacheQuota,
+		Meter:          meter,
+		Instruments:    instruments,
 	})
 }
 

@@ -9,6 +9,8 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
+	"github.com/aholstenson/kvarn/internal/observability/metrics"
+	"github.com/aholstenson/kvarn/internal/observability/reqid"
 	"github.com/aholstenson/kvarn/internal/orchestrator/auth"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -54,12 +56,21 @@ func run(ctx context.Context, addr string, svcOpts ServiceOpts) error {
 func PublicMux(svc *Service) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	var handlerOpts []connect.HandlerOption
+	// Chain order matters: request-id first so auth audit logs and the RPC
+	// duration histogram both carry it; auth before the RPC timer keeps
+	// unauthenticated rejects out of the per-procedure latency distribution
+	// for authenticated traffic.
+	interceptors := []connect.Interceptor{reqid.NewInterceptor()}
 	if svc.authEnabled {
-		handlerOpts = append(handlerOpts, connect.WithInterceptors(auth.NewInterceptor(svc.apiKeyStore)))
+		interceptors = append(interceptors, auth.NewInterceptor(svc.apiKeyStore, auth.WithMetrics(svc.instruments)))
+	}
+	if rpc, err := metrics.NewRPCInterceptor(svc.meter); err == nil {
+		interceptors = append(interceptors, rpc)
+	} else {
+		slog.Warn("rpc duration metric disabled", "error", err)
 	}
 
-	path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc, handlerOpts...)
+	path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc, connect.WithInterceptors(interceptors...))
 	mux.Handle(path, handler)
 
 	return mux

@@ -6,6 +6,7 @@ import "context"
 // attached to the request context by the interceptor and read by the handler
 // authorization checks.
 type Identity struct {
+	KeyID    string
 	KeyName  string
 	Projects []string
 }
