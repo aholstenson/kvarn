@@ -13,11 +13,20 @@ import (
 
 func run(addr string, svcOpts ServiceOpts) error {
 	svc := NewServiceWithOpts(svcOpts)
+	mux := PublicMux(svc)
 
+	slog.Info("orchestrator listening", "addr", addr)
+	return http.ListenAndServe(addr, h2c.NewHandler(mux, &http2.Server{}))
+}
+
+// PublicMux builds the HTTP mux for the orchestrator's network listener. Only
+// the authenticated OrchestratorService is exposed; BridgeService is served
+// per-sandbox on the runner-only vsock transport in internal/sandbox and must
+// not leak onto this mux — exposing it would publish an unauthenticated
+// runner-impersonation entry point.
+func PublicMux(svc *Service) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Authenticate the public OrchestratorService surface. The host-local
-	// BridgeService below is intentionally left unauthenticated.
 	var handlerOpts []connect.HandlerOption
 	if svc.authEnabled {
 		handlerOpts = append(handlerOpts, connect.WithInterceptors(auth.NewInterceptor(svc.apiKeyStore)))
@@ -26,9 +35,5 @@ func run(addr string, svcOpts ServiceOpts) error {
 	path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc, handlerOpts...)
 	mux.Handle(path, handler)
 
-	bridgePath, bridgeHandler := kvarnv1connect.NewBridgeServiceHandler(svc.BridgeHandler())
-	mux.Handle(bridgePath, bridgeHandler)
-
-	slog.Info("orchestrator listening", "addr", addr)
-	return http.ListenAndServe(addr, h2c.NewHandler(mux, &http2.Server{}))
+	return mux
 }

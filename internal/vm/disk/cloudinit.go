@@ -115,9 +115,16 @@ func buildUserData(opts CloudInitOpts) string {
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
 	b.WriteString("write_files:\n")
+	// Token sits in an EnvironmentFile-loaded env file rather than on the
+	// runner's argv so it never appears in /proc/<pid>/cmdline (world-readable
+	// on stock Linux). 0600 root:root keeps it unreadable by the kvarn user
+	// that job steps run as, and the runner unlinks the file after loading.
 	b.WriteString("  - path: /run/kvarn-runner.env\n")
+	b.WriteString("    owner: 'root:root'\n")
+	b.WriteString("    permissions: '0600'\n")
 	b.WriteString("    content: |\n")
-	fmt.Fprintf(&b, "      KVARN_RUNNER_ARGS=--token %s --vsock-port %d\n", opts.Token, opts.VsockPort)
+	fmt.Fprintf(&b, "      KVARN_BRIDGE_TOKEN=%s\n", opts.Token)
+	fmt.Fprintf(&b, "      KVARN_BRIDGE_VSOCK_PORT=%d\n", opts.VsockPort)
 	if len(opts.ProxyCA) > 0 {
 		b.WriteString("  - path: /usr/local/share/ca-certificates/kvarn-proxy.crt\n")
 		b.WriteString("    permissions: '0644'\n")

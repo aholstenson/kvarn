@@ -418,7 +418,8 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 			ID:    id,
 			Token: opts.Token,
 		}, &vm.RunnerConn{
-			Listener: listener,
+			Listener:        listener,
+			ExpectedPeerCID: cid,
 		}, nil
 }
 

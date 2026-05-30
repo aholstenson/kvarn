@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/url"
 	"strings"
 	"sync"
@@ -367,19 +366,16 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		}
 	})
 
-	// Serve bridge on the connection from the provider (vsock), or fall back
-	// to a TCP listener for providers that don't provide one.
-	if runnerConn != nil && runnerConn.Listener != nil {
-		go dispatch.Serve(runnerConn.Listener, handler)
-		sess.addCloser(func() { runnerConn.Listener.Close() })
-	} else if handler != nil {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			return nil, fmt.Errorf("listen for bridge: %w", err)
-		}
-		go dispatch.Serve(listener, handler)
-		sess.addCloser(func() { listener.Close() })
+	// Bridge is reachable only over the provider-supplied transport so that
+	// nothing outside the guest can talk to it. Each provider must hand us a
+	// listener (vsock today; future remote providers must design an
+	// authenticated transport rather than fall back to an open TCP socket).
+	if runnerConn == nil || runnerConn.Listener == nil {
+		return nil, errors.New("provider did not supply a runner listener; bridge cannot be served safely")
 	}
+	bridgeListener := dispatch.WrapListener(runnerConn.Listener, runnerConn.ExpectedPeerCID)
+	go dispatch.Serve(bridgeListener, handler)
+	sess.addCloser(func() { bridgeListener.Close() })
 
 	// Wait for runner to register.
 	registerCtx, registerCancel := context.WithTimeout(ctx, 30*time.Second)

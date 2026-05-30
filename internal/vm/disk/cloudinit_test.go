@@ -57,8 +57,17 @@ var _ = Describe("CreateCloudInitDisk", func() {
 		}
 		userData := readISOFile(fs, userDataPath)
 		Expect(userData).To(ContainSubstring("#cloud-config"))
-		Expect(userData).To(ContainSubstring("--token " + token))
-		Expect(userData).To(ContainSubstring("--vsock-port 1024"))
+		// The token must live in an env var, not on argv — anything on argv ends
+		// up in /proc/<pid>/cmdline, which is world-readable on stock Linux and
+		// would let any in-VM process impersonate the runner.
+		Expect(userData).NotTo(ContainSubstring("--token"))
+		Expect(userData).NotTo(ContainSubstring("--vsock-port"))
+		Expect(userData).To(ContainSubstring("KVARN_BRIDGE_TOKEN=" + token))
+		Expect(userData).To(ContainSubstring("KVARN_BRIDGE_VSOCK_PORT=1024"))
+		// The env file must be locked down so the kvarn user (which runs job
+		// steps) can't read the bearer token out of /run.
+		Expect(userData).To(ContainSubstring("permissions: '0600'"))
+		Expect(userData).To(ContainSubstring("owner: 'root:root'"))
 		Expect(userData).NotTo(ContainSubstring("kvarn-proxy.crt"))
 	})
 

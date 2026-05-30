@@ -26,12 +26,61 @@ func NewHandler(registry *Registry) *Handler {
 	return &Handler{registry: registry}
 }
 
+// peerCIDFromContext returns the vsock CID of the request's underlying
+// connection, if Serve was used to stand up the server and the transport is a
+// vsock listener we recognise. A second return of false means the binding
+// check is unenforceable and the caller should fall back to token-only auth.
+func peerCIDFromContext(ctx context.Context) (uint32, bool) {
+	conn, ok := ConnFromContext(ctx)
+	if !ok {
+		return 0, false
+	}
+	return PeerCIDFromConn(conn)
+}
+
+// checkPeerBinding verifies that the request comes from the same peer that
+// owns the token, as recorded at Register time. Returns nil if either side's
+// CID is unknown (token-only auth) or if the CIDs match; otherwise returns a
+// PermissionDenied error.
+func checkPeerBinding(ctx context.Context, pr *PendingRunner) error {
+	expected := pr.ExpectedCID.Load()
+	if expected == 0 {
+		// No CID was captured at Register time (Register not yet completed,
+		// or peer CID unavailable on this transport). Token-only auth.
+		return nil
+	}
+	cid, ok := peerCIDFromContext(ctx)
+	if !ok {
+		// Transport doesn't expose a peer CID; nothing we can compare against.
+		return nil
+	}
+	if cid != expected {
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("peer CID %d does not own this token", cid))
+	}
+	return nil
+}
+
 // Register implements BridgeServiceHandler. The runner calls this to receive commands.
 func (h *Handler) Register(ctx context.Context, req *connect.Request[v1.RegisterRequest], stream *connect.ServerStream[v1.RunnerCommand]) error {
 	token := req.Msg.Token
 	pr, ok := h.registry.Lookup(token)
 	if !ok {
 		return connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+	}
+
+	// Only one Register stream may own the token at a time. The flag is
+	// released when this handler returns so a runner restart can re-register.
+	if !pr.RegisteredOnce.CompareAndSwap(false, true) {
+		return connect.NewError(connect.CodeAlreadyExists, errors.New("token already has an active runner"))
+	}
+	defer pr.RegisteredOnce.Store(false)
+
+	// Bind the token to the peer's vsock CID for the lifetime of this
+	// Register stream so subsequent unary RPCs on the same token are
+	// rejected if they come from a different peer.
+	if cid, ok := peerCIDFromContext(ctx); ok {
+		pr.ExpectedCID.Store(cid)
+		defer pr.ExpectedCID.Store(0)
 	}
 
 	// Store VM info from the runner.
@@ -54,11 +103,14 @@ func (h *Handler) Register(ctx context.Context, req *connect.Request[v1.Register
 }
 
 // ReportResult implements BridgeServiceHandler. The runner calls this to return results.
-func (h *Handler) ReportResult(_ context.Context, req *connect.Request[v1.CommandResult]) (*connect.Response[v1.ReportResultResponse], error) {
+func (h *Handler) ReportResult(ctx context.Context, req *connect.Request[v1.CommandResult]) (*connect.Response[v1.ReportResultResponse], error) {
 	token := req.Msg.Token
 	pr, ok := h.registry.Lookup(token)
 	if !ok {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+	}
+	if err := checkPeerBinding(ctx, pr); err != nil {
+		return nil, err
 	}
 
 	pr.ResultCh <- req.Msg
@@ -67,11 +119,14 @@ func (h *Handler) ReportResult(_ context.Context, req *connect.Request[v1.Comman
 }
 
 // ReportOutput implements BridgeServiceHandler. The runner calls this to stream output chunks.
-func (h *Handler) ReportOutput(_ context.Context, req *connect.Request[v1.OutputChunk]) (*connect.Response[v1.ReportOutputResponse], error) {
+func (h *Handler) ReportOutput(ctx context.Context, req *connect.Request[v1.OutputChunk]) (*connect.Response[v1.ReportOutputResponse], error) {
 	token := req.Msg.Token
 	pr, ok := h.registry.Lookup(token)
 	if !ok {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+	}
+	if err := checkPeerBinding(ctx, pr); err != nil {
+		return nil, err
 	}
 
 	// Non-blocking send to avoid blocking the runner on slow consumers.
@@ -85,10 +140,13 @@ func (h *Handler) ReportOutput(_ context.Context, req *connect.Request[v1.Output
 
 // DownloadFile implements BridgeServiceHandler. The runner calls this to
 // download a file from the orchestrator as a server-streamed sequence of chunks.
-func (h *Handler) DownloadFile(_ context.Context, req *connect.Request[v1.DownloadFileRequest], stream *connect.ServerStream[v1.FileStreamChunk]) error {
+func (h *Handler) DownloadFile(ctx context.Context, req *connect.Request[v1.DownloadFileRequest], stream *connect.ServerStream[v1.FileStreamChunk]) error {
 	pr, ok := h.registry.Lookup(req.Msg.Token)
 	if !ok {
 		return connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+	}
+	if err := checkPeerBinding(ctx, pr); err != nil {
+		return err
 	}
 
 	t, ok := pr.LookupTransfer(req.Msg.TransferId)
@@ -136,7 +194,7 @@ func (h *Handler) DownloadFile(_ context.Context, req *connect.Request[v1.Downlo
 
 // UploadFile implements BridgeServiceHandler. The runner calls this to
 // upload a file to the orchestrator as a client-streamed sequence of chunks.
-func (h *Handler) UploadFile(_ context.Context, clientStream *connect.ClientStream[v1.FileStreamChunk]) (*connect.Response[v1.FileStreamResult], error) {
+func (h *Handler) UploadFile(ctx context.Context, clientStream *connect.ClientStream[v1.FileStreamChunk]) (*connect.Response[v1.FileStreamResult], error) {
 	// First message must be the start metadata.
 	if !clientStream.Receive() {
 		if err := clientStream.Err(); err != nil {
@@ -154,6 +212,9 @@ func (h *Handler) UploadFile(_ context.Context, clientStream *connect.ClientStre
 	pr, ok := h.registry.Lookup(start.Token)
 	if !ok {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+	}
+	if err := checkPeerBinding(ctx, pr); err != nil {
+		return nil, err
 	}
 
 	t, ok := pr.LookupTransfer(start.TransferId)

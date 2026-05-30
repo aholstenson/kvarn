@@ -352,6 +352,10 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 			Token: token,
 		}, &vm.RunnerConn{
 			Listener: listener,
+			// vz does not surface the guest CID on accepted connections, so
+			// leave ExpectedPeerCID at 0 and let the dispatch wrapper use
+			// trust-on-first-use to bind the runner to its first peer.
+			ExpectedPeerCID: 0,
 		}, nil
 }
 

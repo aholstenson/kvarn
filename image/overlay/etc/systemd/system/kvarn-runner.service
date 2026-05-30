@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 ExecStartPre=/usr/local/bin/kvarn-runner-setup.sh
 EnvironmentFile=-/run/kvarn-runner.env
-ExecStart=/bin/sh -c '/usr/local/bin/kvarn ${KVARN_RUNNER_ARGS}'
+ExecStart=/usr/local/bin/kvarn connect
 Restart=on-failure
 
 [Install]

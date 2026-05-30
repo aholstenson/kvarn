@@ -3,6 +3,7 @@ package dispatch
 import (
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"errors"
 
@@ -26,6 +27,21 @@ type PendingRunner struct {
 	DoneCh    chan struct{}
 	doneOnce  sync.Once
 	VmInfo    *v1.VmInfo
+
+	// RegisteredOnce gates the long-lived Register stream so that exactly one
+	// caller can own it at a time. It is cleared when the stream returns so a
+	// runner that crashes and is restarted by systemd can re-register cleanly.
+	// Atomic rather than sync.Once because we need to *reset* it on
+	// reconnect.
+	RegisteredOnce atomic.Bool
+
+	// ExpectedCID is the peer vsock CID that owns this token, recorded the
+	// first time Register succeeds. Subsequent bridge RPCs that carry the
+	// same token must come from the same CID — a second process inside the
+	// VM that learned the token cannot impersonate the runner from a
+	// different vsock socket. Zero means "not yet bound" or "peer CID was
+	// not extractable from the connection" (e.g. macOS vz transport).
+	ExpectedCID atomic.Uint32
 
 	mu        sync.Mutex
 	transfers map[string]*PendingTransfer

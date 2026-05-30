@@ -15,6 +15,13 @@ type VM struct {
 
 type RunnerConn struct {
 	Listener net.Listener // non-nil for local (vsock); nil for cloud (runner connects over network)
+
+	// ExpectedPeerCID is the vsock context-ID the guest is expected to
+	// connect from. The dispatch listener wrapper rejects connections from
+	// any other CID, so a second VM that learned this port cannot impersonate
+	// the runner. Zero means "unknown" — the wrapper falls back to
+	// trust-on-first-use, locking onto the first peer it sees.
+	ExpectedPeerCID uint32
 }
 
 // BaseImage holds the canonical build artifacts produced by the image build

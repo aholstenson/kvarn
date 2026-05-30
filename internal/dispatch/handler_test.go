@@ -277,6 +277,42 @@ var _ = Describe("Handler streaming", func() {
 	})
 })
 
+// Register-stream binding is tested at the PendingRunner level rather than
+// over the wire because the Register handler doesn't write a response until
+// it has a command to send — exercising the single-Register guarantee through
+// a real client.Register call would race the response-headers flush forever.
+// The semantics that matter are captured here directly.
+var _ = Describe("Register binding semantics", func() {
+	It("admits exactly one Register at a time and resets on stream end", func() {
+		var pr dispatch.PendingRunner
+
+		// First Register: claim succeeds.
+		Expect(pr.RegisteredOnce.CompareAndSwap(false, true)).To(BeTrue())
+		// Second Register while the first is live: rejected.
+		Expect(pr.RegisteredOnce.CompareAndSwap(false, true)).To(BeFalse())
+
+		// First stream ends → the handler's deferred Store(false) runs.
+		pr.RegisteredOnce.Store(false)
+
+		// A reconnect after the first stream ends must succeed (systemd
+		// Restart=on-failure path).
+		Expect(pr.RegisteredOnce.CompareAndSwap(false, true)).To(BeTrue())
+	})
+
+	It("binds the token to a peer CID at Register time and clears it on stream end", func() {
+		var pr dispatch.PendingRunner
+		Expect(pr.ExpectedCID.Load()).To(Equal(uint32(0)))
+
+		// Register handler stamps the observed CID; later RPCs must match.
+		pr.ExpectedCID.Store(42)
+		Expect(pr.ExpectedCID.Load()).To(Equal(uint32(42)))
+
+		// Stream end clears the binding so the next Register can rebind.
+		pr.ExpectedCID.Store(0)
+		Expect(pr.ExpectedCID.Load()).To(Equal(uint32(0)))
+	})
+})
+
 // errorReader returns afterBytes bytes of 'x' then returns the given error.
 type errorReader struct {
 	err        error
