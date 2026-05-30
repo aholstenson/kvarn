@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/aholstenson/kvarn/compare/image-v0.1.0...image-v0.2.0) (2026-05-30)
+
+
+### Features
+
+* Harden runner bridge against in-VM impersonation ([f3cb040](https://github.com/aholstenson/kvarn/commit/f3cb040216a832001c3b3123781c8797c096dc75))
+
 ## 0.1.0 (2026-05-22)
 
 
