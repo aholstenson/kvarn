@@ -166,29 +166,33 @@ func (s *Store) Put(_ context.Context, p *project.Project) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fd, err := s.load()
-	if err != nil {
-		return err
-	}
+	return atomicfile.WithLock(s.path, func() error {
+		fd, err := s.load()
+		if err != nil {
+			return err
+		}
 
-	fd.Projects[p.Name] = projectToEntry(p)
+		fd.Projects[p.Name] = projectToEntry(p)
 
-	return s.save(fd)
+		return s.save(fd)
+	})
 }
 
 func (s *Store) Delete(_ context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fd, err := s.load()
-	if err != nil {
-		return err
-	}
+	return atomicfile.WithLock(s.path, func() error {
+		fd, err := s.load()
+		if err != nil {
+			return err
+		}
 
-	if _, ok := fd.Projects[name]; !ok {
-		return fmt.Errorf("project %q not found", name)
-	}
+		if _, ok := fd.Projects[name]; !ok {
+			return fmt.Errorf("project %q not found", name)
+		}
 
-	delete(fd.Projects, name)
-	return s.save(fd)
+		delete(fd.Projects, name)
+		return s.save(fd)
+	})
 }

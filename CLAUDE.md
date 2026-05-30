@@ -71,7 +71,7 @@ task image:clean         # remove dist/
 - Token format: `kvarn_<keyid>_<secret>`. The `kvarn_` prefix lets secret scanners recognize leaks; `keyid` is the O(1) lookup handle, `secret` is 160 bits of CSPRNG. Both components are base32 (lowercased, unpadded) so they never contain the `_` delimiter. Only `sha256(secret)` is persisted (plain SHA-256 is correct for high-entropy random secrets).
 - Auth is **enforced by default**; `--no-auth` (or `KVARN_NO_AUTH`) disables it for local dev. With auth on and zero keys, all requests are denied. Keys are bootstrapped with `kvarn key create`, which writes `apikeys.toml` directly — no running orchestrator needed.
 - **TLS is out of scope**: the orchestrator stays on h2c and assumes an external TLS-terminating reverse proxy. A bearer token is only safe over TLS.
-- **Hot-reload**: every tomlstore re-reads its file per `Get`/`List`, so key changes apply on the next request with no restart. All stores write atomically (`internal/config/atomicfile`, temp file + rename) so a concurrent `kvarn key create` is never read mid-write.
+- **Hot-reload**: every tomlstore re-reads its file per `Get`/`List`, so key changes apply on the next request with no restart. All stores write atomically (`internal/config/atomicfile`, temp file + rename) so a concurrent `kvarn key create` is never read mid-write. Writers also hold a `flock(2)` on `<file>.lock` around the load → mutate → save sequence (`atomicfile.WithLock`) so two CLI invocations (or a CLI racing the orchestrator) can't lose each other's edits; readers don't need the lock.
 
 ## Conventions
 

@@ -158,40 +158,44 @@ func (s *Store) Put(_ context.Context, sec *secret.Secret) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fd, err := s.load()
-	if err != nil {
-		return err
-	}
+	return atomicfile.WithLock(s.path, func() error {
+		fd, err := s.load()
+		if err != nil {
+			return err
+		}
 
-	proj, ok := fd[sec.Project]
-	if !ok {
-		proj = make(map[string]secretEntry)
-		fd[sec.Project] = proj
-	}
-	proj[sec.Name] = secretEntry{Type: sec.Type, Value: sec.Value}
+		proj, ok := fd[sec.Project]
+		if !ok {
+			proj = make(map[string]secretEntry)
+			fd[sec.Project] = proj
+		}
+		proj[sec.Name] = secretEntry{Type: sec.Type, Value: sec.Value}
 
-	return s.save(fd)
+		return s.save(fd)
+	})
 }
 
 func (s *Store) Delete(_ context.Context, project, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fd, err := s.load()
-	if err != nil {
-		return err
-	}
+	return atomicfile.WithLock(s.path, func() error {
+		fd, err := s.load()
+		if err != nil {
+			return err
+		}
 
-	proj, ok := fd[project]
-	if !ok {
-		return fmt.Errorf("secret %q not found for project %q", name, project)
-	}
-	if _, ok := proj[name]; !ok {
-		return fmt.Errorf("secret %q not found for project %q", name, project)
-	}
-	delete(proj, name)
-	if len(proj) == 0 {
-		delete(fd, project)
-	}
-	return s.save(fd)
+		proj, ok := fd[project]
+		if !ok {
+			return fmt.Errorf("secret %q not found for project %q", name, project)
+		}
+		if _, ok := proj[name]; !ok {
+			return fmt.Errorf("secret %q not found for project %q", name, project)
+		}
+		delete(proj, name)
+		if len(proj) == 0 {
+			delete(fd, project)
+		}
+		return s.save(fd)
+	})
 }

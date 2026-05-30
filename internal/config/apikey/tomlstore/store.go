@@ -160,41 +160,45 @@ func (s *Store) Put(_ context.Context, k *apikey.APIKey) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fd, err := s.load()
-	if err != nil {
-		return err
-	}
+	return atomicfile.WithLock(s.path, func() error {
+		fd, err := s.load()
+		if err != nil {
+			return err
+		}
 
-	projects := make([]string, len(k.Projects))
-	copy(projects, k.Projects)
-	var expires string
-	if k.Expires != nil {
-		expires = k.Expires.UTC().Format(time.RFC3339)
-	}
-	fd[k.KeyID] = apiKeyEntry{
-		Name:     k.Name,
-		Hash:     k.Hash,
-		Projects: projects,
-		Created:  k.Created,
-		Expires:  expires,
-		Disabled: k.Disabled,
-	}
+		projects := make([]string, len(k.Projects))
+		copy(projects, k.Projects)
+		var expires string
+		if k.Expires != nil {
+			expires = k.Expires.UTC().Format(time.RFC3339)
+		}
+		fd[k.KeyID] = apiKeyEntry{
+			Name:     k.Name,
+			Hash:     k.Hash,
+			Projects: projects,
+			Created:  k.Created,
+			Expires:  expires,
+			Disabled: k.Disabled,
+		}
 
-	return s.save(fd)
+		return s.save(fd)
+	})
 }
 
 func (s *Store) Delete(_ context.Context, keyID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fd, err := s.load()
-	if err != nil {
-		return err
-	}
+	return atomicfile.WithLock(s.path, func() error {
+		fd, err := s.load()
+		if err != nil {
+			return err
+		}
 
-	if _, ok := fd[keyID]; !ok {
-		return apikey.ErrNotFound
-	}
-	delete(fd, keyID)
-	return s.save(fd)
+		if _, ok := fd[keyID]; !ok {
+			return apikey.ErrNotFound
+		}
+		delete(fd, keyID)
+		return s.save(fd)
+	})
 }

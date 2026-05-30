@@ -117,33 +117,37 @@ func (s *Store) Put(_ context.Context, c *credential.Credential) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fd, err := s.load()
-	if err != nil {
-		return err
-	}
+	return atomicfile.WithLock(s.path, func() error {
+		fd, err := s.load()
+		if err != nil {
+			return err
+		}
 
-	config := make(map[string]string, len(c.Config))
-	for k, v := range c.Config {
-		config[k] = v
-	}
-	fd.Credentials[c.Name] = config
+		config := make(map[string]string, len(c.Config))
+		for k, v := range c.Config {
+			config[k] = v
+		}
+		fd.Credentials[c.Name] = config
 
-	return s.save(fd)
+		return s.save(fd)
+	})
 }
 
 func (s *Store) Delete(_ context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fd, err := s.load()
-	if err != nil {
-		return err
-	}
+	return atomicfile.WithLock(s.path, func() error {
+		fd, err := s.load()
+		if err != nil {
+			return err
+		}
 
-	if _, ok := fd.Credentials[name]; !ok {
-		return fmt.Errorf("credential %q not found", name)
-	}
+		if _, ok := fd.Credentials[name]; !ok {
+			return fmt.Errorf("credential %q not found", name)
+		}
 
-	delete(fd.Credentials, name)
-	return s.save(fd)
+		delete(fd.Credentials, name)
+		return s.save(fd)
+	})
 }

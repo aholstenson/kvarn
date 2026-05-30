@@ -147,38 +147,42 @@ func (s *Store) Put(_ context.Context, fc *forgeconfig.ForgeConfig) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fd, err := s.load()
-	if err != nil {
-		return err
-	}
+	return atomicfile.WithLock(s.path, func() error {
+		fd, err := s.load()
+		if err != nil {
+			return err
+		}
 
-	fd.Forges[fc.Name] = &forgeEntry{
-		Type:              fc.Type,
-		Credential:        fc.Credential,
-		BranchPrefix:      fc.BranchPrefix,
-		Labels:            fc.Labels,
-		CommitAuthorName:  fc.CommitAuthorName,
-		CommitAuthorEmail: fc.CommitAuthorEmail,
-	}
+		fd.Forges[fc.Name] = &forgeEntry{
+			Type:              fc.Type,
+			Credential:        fc.Credential,
+			BranchPrefix:      fc.BranchPrefix,
+			Labels:            fc.Labels,
+			CommitAuthorName:  fc.CommitAuthorName,
+			CommitAuthorEmail: fc.CommitAuthorEmail,
+		}
 
-	return s.save(fd)
+		return s.save(fd)
+	})
 }
 
 func (s *Store) Delete(_ context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fd, err := s.load()
-	if err != nil {
-		return err
-	}
+	return atomicfile.WithLock(s.path, func() error {
+		fd, err := s.load()
+		if err != nil {
+			return err
+		}
 
-	if _, ok := fd.Forges[name]; !ok {
-		return fmt.Errorf("forge config %q not found", name)
-	}
+		if _, ok := fd.Forges[name]; !ok {
+			return fmt.Errorf("forge config %q not found", name)
+		}
 
-	delete(fd.Forges, name)
-	return s.save(fd)
+		delete(fd.Forges, name)
+		return s.save(fd)
+	})
 }
 
 func entryToConfig(name string, e *forgeEntry) *forgeconfig.ForgeConfig {
