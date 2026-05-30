@@ -149,9 +149,9 @@ var _ = Describe("buildProfileScript", func() {
 	})
 })
 
-var _ = Describe("default and curated cache paths", func() {
+var _ = Describe("curated cache paths", func() {
 	It("does not place any path under /home/kvarn/workspace or /nix/", func() {
-		all := append([]string{}, defaultCachePaths...)
+		var all []string
 		for _, e := range toolRegistry {
 			all = append(all, e.CachePaths...)
 		}

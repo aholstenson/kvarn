@@ -49,6 +49,7 @@ type Cmd struct {
 	DiskImagePath string `help:"Path to VM disk image. Auto-detected if not set."`
 	Dir           string `help:"Project directory." default:"." type:"existingdir"`
 	NoCache       bool   `help:"Disable cache persistence across runs." name:"no-cache"`
+	CacheQuota    string `help:"Per-project tool-cache size limit for the LRU sweep (e.g. 5G)." name:"cache-quota" default:"5G"`
 	Verbose       bool   `help:"Show all output, including from passing steps." short:"v"`
 	Logs          bool   `help:"Show log output." name:"logs"`
 	Project       string `help:"Project name for secret lookup. Falls back to git remote → project store if omitted." short:"p"`
@@ -509,6 +510,14 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 			renderer.SetStatus(item, taskui.StatusFailed, fmt.Sprintf("failed to save cache: %v", err))
 		} else {
 			renderer.SetStatus(item, taskui.StatusPassed, "")
+		}
+		// Opportunistic bounded LRU sweep (non-fatal).
+		if cacheProvider != nil {
+			if quota, qErr := project.ParseSize(c.CacheQuota); qErr == nil {
+				if _, evErr := cacheProvider.Evict(cache.Quota{PerProjectBytes: quota}); evErr != nil {
+					slog.Warn("cache eviction failed", "error", evErr)
+				}
+			}
 		}
 	}
 

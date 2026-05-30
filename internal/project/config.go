@@ -51,8 +51,23 @@ type Config struct {
 }
 
 // Cache defines additional guest-side paths to persist across VM runs.
+// Registered tools are cached automatically and need no cache: block; these
+// fields are power-user overrides for unregistered tools or custom keying.
 type Cache struct {
-	Paths []string `yaml:"paths,omitempty"`
+	Paths   []string     `yaml:"paths,omitempty"`   // unkeyed guest paths
+	Entries []CacheEntry `yaml:"entries,omitempty"` // keyed cache entries
+}
+
+// CacheEntry is a power-user cache override for a single guest path.
+//
+//   - Key set: a fully manual, fixed cache key (the caller owns invalidation).
+//   - Lockfiles set: content-addressed like a registered tool.
+//   - Neither set: an unkeyed (write-once) cache for the path.
+type CacheEntry struct {
+	Path      string   `yaml:"path"`
+	Lockfiles []string `yaml:"lockfiles,omitempty"`
+	Key       string   `yaml:"key,omitempty"`
+	Bucket    string   `yaml:"bucket,omitempty"`
 }
 
 // Network defines network egress controls for the VM.
@@ -358,6 +373,23 @@ func Load(dir string) (*Config, error) {
 	return nil, nil
 }
 
+// validateCachePath enforces the shared rules for any guest-side cache path:
+// it must be absolute, outside the workspace (which is transferred separately),
+// and not under /nix (the store cannot round-trip as a plain tarball; a Nix
+// cache is a first-class, separate mechanism).
+func validateCachePath(field, p string) error {
+	if !filepath.IsAbs(p) {
+		return fmt.Errorf("%s entry %q must be absolute", field, p)
+	}
+	if strings.HasPrefix(p, "/home/kvarn/workspace") {
+		return fmt.Errorf("%s entry %q must not be under /home/kvarn/workspace", field, p)
+	}
+	if p == "/nix" || p == "/nix/store" || strings.HasPrefix(p, "/nix/") {
+		return fmt.Errorf("%s entry %q is not allowed; caching /nix is a first-class feature", field, p)
+	}
+	return nil
+}
+
 func (c *Config) validate() error {
 	// image and dependencies are mutually exclusive: shell sessions inside an
 	// image: job run via `podman exec`, so host-installed Nix binaries are
@@ -422,20 +454,15 @@ func (c *Config) validate() error {
 		}
 	}
 
-	// Validate cache paths.
+	// Validate cache paths (unkeyed) and entries (keyed overrides).
 	for _, p := range c.Cache.Paths {
-		if !filepath.IsAbs(p) {
-			return fmt.Errorf("cache.paths entry %q must be absolute", p)
+		if err := validateCachePath("cache.paths", p); err != nil {
+			return err
 		}
-		if strings.HasPrefix(p, "/home/kvarn/workspace") {
-			return fmt.Errorf("cache.paths entry %q must not be under /home/kvarn/workspace", p)
-		}
-		// Caching the Nix store as a plain tarball would corrupt the install
-		// (db, gcroots, and profile generations need to round-trip atomically
-		// with store contents). A first-class /nix cache is planned.
-		if p == "/nix" || p == "/nix/store" || strings.HasPrefix(p, "/nix/") {
-			return fmt.Errorf("cache.paths entry %q is not allowed; "+
-				"caching /nix will be a first-class feature", p)
+	}
+	for _, e := range c.Cache.Entries {
+		if err := validateCachePath("cache.entries", e.Path); err != nil {
+			return err
 		}
 	}
 

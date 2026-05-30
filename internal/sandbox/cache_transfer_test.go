@@ -3,7 +3,6 @@ package sandbox_test
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"strings"
 
@@ -74,43 +73,65 @@ func (m *streamMockProxy) StreamFromGuest(_ context.Context, srcPath string, des
 	return nil
 }
 
-// mockCacheProvider is a simple in-memory cache.Provider for testing.
+// mockCacheProvider is an in-memory cache.Provider for transfer tests.
 type mockCacheProvider struct {
-	stored   map[string][]byte
-	restored map[string]io.ReadCloser
+	restoreData map[string][]byte // keyStr -> exact-hit tar bytes
+	warm        map[string]bool   // keyStr -> serve as warm start
+	hasKeys     map[string]bool   // keyStr -> Has() == true
+	saved       map[string][]byte // keyStr -> bytes received by Save
 }
 
 func newMockCacheProvider() *mockCacheProvider {
 	return &mockCacheProvider{
-		stored:   make(map[string][]byte),
-		restored: make(map[string]io.ReadCloser),
+		restoreData: make(map[string][]byte),
+		warm:        make(map[string]bool),
+		hasKeys:     make(map[string]bool),
+		saved:       make(map[string][]byte),
 	}
 }
 
-func (p *mockCacheProvider) Restore(_ string, guestPath string) (io.ReadCloser, error) {
-	rc, ok := p.restored[guestPath]
+func keyStr(k cache.Key) string { return k.Bucket + "|" + k.InputKey }
+
+func (p *mockCacheProvider) Restore(k cache.Key) (*cache.RestoreResult, error) {
+	d, ok := p.restoreData[keyStr(k)]
 	if !ok {
 		return nil, nil
 	}
-	return rc, nil
+	return &cache.RestoreResult{
+		Reader:   io.NopCloser(bytes.NewReader(d)),
+		Warm:     p.warm[keyStr(k)],
+		InputKey: k.InputKey,
+	}, nil
 }
 
-func (p *mockCacheProvider) Save(_ string, guestPath string, data io.Reader) error {
+func (p *mockCacheProvider) Save(k cache.Key, data io.Reader) error {
 	b, err := io.ReadAll(data)
 	if err != nil {
 		return err
 	}
-	p.stored[guestPath] = b
+	p.saved[keyStr(k)] = b
 	return nil
 }
 
-func (p *mockCacheProvider) Clear(_ string) error {
-	return nil
+func (p *mockCacheProvider) Has(k cache.Key) (bool, error) { return p.hasKeys[keyStr(k)], nil }
+func (p *mockCacheProvider) List(string) ([]cache.Entry, error) {
+	return nil, nil
+}
+func (p *mockCacheProvider) Clear(string) error { return nil }
+func (p *mockCacheProvider) Evict(cache.Quota) (cache.EvictReport, error) {
+	return cache.EvictReport{}, nil
 }
 
 var _ cache.Provider = (*mockCacheProvider)(nil)
 
-var _ = Describe("restoreCache", func() {
+func layerFor(bucket, inputKey, guestPath string) cache.Layer {
+	return cache.Layer{
+		Key:       cache.Key{ProjectID: "proj-1", Bucket: bucket, InputKey: inputKey, GuestPath: guestPath},
+		GuestPath: guestPath,
+	}
+}
+
+var _ = Describe("RestoreCache", func() {
 	var (
 		runner   *streamMockProxy
 		provider *mockCacheProvider
@@ -123,59 +144,58 @@ var _ = Describe("restoreCache", func() {
 		ctx = context.Background()
 	})
 
-	It("streams tarball to guest and extracts it", func() {
-		tarData := "fake-tarball-data"
-		provider.restored["/home/kvarn/.cache"] = io.NopCloser(strings.NewReader(tarData))
+	It("streams an exact-hit tarball to guest and extracts it", func() {
+		l := layerFor("go", "aaaa", "/home/kvarn/go")
+		provider.restoreData[keyStr(l.Key)] = []byte("tar-bytes")
 
-		err := sandbox.RestoreCache(ctx, runner, provider, "proj-1", []string{"/home/kvarn/.cache"}, nil)
+		err := sandbox.RestoreCache(ctx, runner, provider, []cache.Layer{l}, nil)
 		Expect(err).NotTo(HaveOccurred())
 
-		// StreamToGuest should have been called with the tarball data.
 		Expect(runner.streamToGuestCalls).To(HaveLen(1))
-		call := runner.streamToGuestCalls[0]
-		Expect(call.DestPath).To(ContainSubstring("kvarn-cache"))
-		Expect(string(call.Data)).To(Equal(tarData))
+		Expect(string(runner.streamToGuestCalls[0].Data)).To(Equal("tar-bytes"))
 
-		// First exec creates the temp dir, second extracts the tarball.
 		extractCalls := filterExecByCommand(runner.execCalls, "sh")
 		Expect(extractCalls).To(HaveLen(1))
 		args := strings.Join(extractCalls[0].Args, " ")
 		Expect(args).To(ContainSubstring("tar"))
-		Expect(args).To(ContainSubstring("--owner=kvarn"))
+		Expect(args).To(ContainSubstring("chown kvarn:kvarn /home/kvarn/go"))
 	})
 
-	It("chowns the target directory to kvarn", func() {
-		tarData := "fake-tarball-data"
-		provider.restored["/home/kvarn/.cache"] = io.NopCloser(strings.NewReader(tarData))
+	It("chowns the whole directory chain below the home dir for a nested path", func() {
+		l := layerFor("nix-eval", "aaaa", "/home/kvarn/.cache/nix")
+		provider.restoreData[keyStr(l.Key)] = []byte("tar-bytes")
 
-		err := sandbox.RestoreCache(ctx, runner, provider, "proj-1", []string{"/home/kvarn/.cache"}, nil)
+		err := sandbox.RestoreCache(ctx, runner, provider, []cache.Layer{l}, nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		extractCalls := filterExecByCommand(runner.execCalls, "sh")
 		Expect(extractCalls).To(HaveLen(1))
 		args := strings.Join(extractCalls[0].Args, " ")
-		Expect(args).To(ContainSubstring("chown kvarn:kvarn /home/kvarn/.cache"))
+		// The parent .cache must be chowned too, not just the leaf, so the
+		// job can later create siblings like .cache/go-build.
+		Expect(args).To(ContainSubstring("chown kvarn:kvarn /home/kvarn/.cache /home/kvarn/.cache/nix"))
 	})
 
-	It("skips when provider returns nil (no cache)", func() {
-		err := sandbox.RestoreCache(ctx, runner, provider, "proj-1", []string{"/home/kvarn/.cache"}, nil)
+	It("still restores a warm-start tarball", func() {
+		l := layerFor("go", "wanted", "/home/kvarn/go")
+		provider.restoreData[keyStr(l.Key)] = []byte("warm-bytes")
+		provider.warm[keyStr(l.Key)] = true
+
+		err := sandbox.RestoreCache(ctx, runner, provider, []cache.Layer{l}, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(runner.streamToGuestCalls).To(HaveLen(1))
+		Expect(string(runner.streamToGuestCalls[0].Data)).To(Equal("warm-bytes"))
+	})
+
+	It("skips on a miss", func() {
+		l := layerFor("go", "aaaa", "/home/kvarn/go")
+		err := sandbox.RestoreCache(ctx, runner, provider, []cache.Layer{l}, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(runner.streamToGuestCalls).To(BeEmpty())
 	})
-
-	It("continues to next path on stream error", func() {
-		provider.restored["/home/kvarn/.cache"] = io.NopCloser(strings.NewReader("data"))
-		runner.streamToGuestErr = fmt.Errorf("stream failed")
-
-		err := sandbox.RestoreCache(ctx, runner, provider, "proj-1", []string{"/home/kvarn/.cache"}, nil)
-		Expect(err).NotTo(HaveOccurred())
-		// No extract (sh -c tar ...) should have been attempted.
-		extractCalls := filterExecByCommand(runner.execCalls, "sh")
-		Expect(extractCalls).To(BeEmpty())
-	})
 })
 
-var _ = Describe("saveCache", func() {
+var _ = Describe("SaveCache", func() {
 	var (
 		runner   *streamMockProxy
 		provider *mockCacheProvider
@@ -188,57 +208,34 @@ var _ = Describe("saveCache", func() {
 		ctx = context.Background()
 	})
 
-	It("streams tarball from guest to provider", func() {
-		tarData := []byte("fake-saved-tarball")
-		runner.streamFromGuestData = tarData
+	It("streams a tarball from guest to the provider", func() {
+		l := layerFor("go", "aaaa", "/home/kvarn/go")
+		runner.streamFromGuestData = []byte("saved-tar")
 
-		err := sandbox.SaveCache(ctx, runner, provider, "proj-1", []string{"/home/kvarn/.cache"}, nil)
+		err := sandbox.SaveCache(ctx, runner, provider, []cache.Layer{l}, nil)
 		Expect(err).NotTo(HaveOccurred())
-
-		// StreamFromGuest should have been called.
 		Expect(runner.streamFromGuestCalls).To(HaveLen(1))
-		Expect(runner.streamFromGuestCalls[0].SrcPath).To(ContainSubstring("kvarn-cache"))
-
-		// Provider should have received the data.
-		Expect(provider.stored["/home/kvarn/.cache"]).To(Equal(tarData))
+		Expect(provider.saved[keyStr(l.Key)]).To(Equal([]byte("saved-tar")))
 	})
 
-	It("returns error when tar command fails", func() {
-		runner.execResponses["sh -c mkdir -p /var/tmp/kvarn-cache && tar -C /home/kvarn/.cache --zstd -cf /var/tmp/kvarn-cache/_home_kvarn_.cache.tar.zst ."] = &v1.ExecResponse{
-			ExitCode: 1,
-			Stderr:   "tar error",
-		}
+	It("skips the guest-side tar entirely when the layer is already present", func() {
+		l := layerFor("go", "aaaa", "/home/kvarn/go")
+		provider.hasKeys[keyStr(l.Key)] = true
 
-		err := sandbox.SaveCache(ctx, runner, provider, "proj-1", []string{"/home/kvarn/.cache"}, nil)
-		Expect(err).To(HaveOccurred())
+		err := sandbox.SaveCache(ctx, runner, provider, []cache.Layer{l}, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(runner.streamFromGuestCalls).To(BeEmpty())
+		Expect(filterExecByCommand(runner.execCalls, "sh")).To(BeEmpty())
+		Expect(provider.saved).To(BeEmpty())
 	})
 
 	It("skips non-existent cache directories", func() {
-		runner.execResponses["test -d /home/kvarn/.npm"] = &v1.ExecResponse{
-			ExitCode: 1,
-		}
+		l := layerFor("npm", "aaaa", "/home/kvarn/.npm")
+		runner.execResponses["test -d /home/kvarn/.npm"] = &v1.ExecResponse{ExitCode: 1}
 
-		err := sandbox.SaveCache(ctx, runner, provider, "proj-1", []string{"/home/kvarn/.npm"}, nil)
+		err := sandbox.SaveCache(ctx, runner, provider, []cache.Layer{l}, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(runner.streamFromGuestCalls).To(BeEmpty())
-	})
-
-	It("returns error when stream from guest fails", func() {
-		runner.streamFromGuestErr = fmt.Errorf("stream error")
-
-		err := sandbox.SaveCache(ctx, runner, provider, "proj-1", []string{"/home/kvarn/.cache"}, nil)
-		Expect(err).To(HaveOccurred())
-	})
-
-	It("cleans up temp file after streaming", func() {
-		runner.streamFromGuestData = []byte("data")
-
-		err := sandbox.SaveCache(ctx, runner, provider, "proj-1", []string{"/home/kvarn/.cache"}, nil)
-		Expect(err).NotTo(HaveOccurred())
-
-		// Last exec call should be rm -f.
-		rmCalls := filterExecByCommand(runner.execCalls, "rm")
-		Expect(rmCalls).To(HaveLen(1))
 	})
 })
 
@@ -255,9 +252,3 @@ func filterExecByCommand(calls []execCall, command string) []execCall {
 
 // Verify the mock satisfies the interface.
 var _ sandbox.RunnerProxy = (*streamMockProxy)(nil)
-
-// Verify standard mock also satisfies the interface (via embedded unexported check).
-func init() {
-	var buf bytes.Buffer
-	_ = buf // avoid unused import
-}

@@ -17,6 +17,15 @@ import (
 // this explicitly" from "operator left it unset, fall through to defaults".
 type Config struct {
 	Scheduler Scheduler `toml:"scheduler"`
+	Cache     Cache     `toml:"cache"`
+}
+
+// Cache mirrors the [cache] table: the disk quotas for the tool-cache LRU
+// sweep. Sizes are human-readable (e.g. "10G"); empty falls through to the
+// built-in defaults applied by the CLI layer.
+type Cache struct {
+	PerProjectBytes string `toml:"per_project_bytes,omitempty"`
+	GlobalBytes     string `toml:"global_bytes,omitempty"`
 }
 
 // Scheduler mirrors the [scheduler] table. Unset fields stay nil/empty so the

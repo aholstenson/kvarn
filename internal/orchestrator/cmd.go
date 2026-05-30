@@ -20,6 +20,7 @@ import (
 	forgegithub "github.com/aholstenson/kvarn/internal/forge/github"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
+	"github.com/aholstenson/kvarn/internal/sandbox/cache"
 	"github.com/aholstenson/kvarn/internal/sandbox/transfer"
 	"github.com/aholstenson/kvarn/internal/session"
 	"github.com/aholstenson/kvarn/internal/vm"
@@ -153,6 +154,20 @@ func (c *Cmd) Run() error {
 		return fmt.Errorf("scheduler: %w", err)
 	}
 
+	cacheProvider, err := cache.DefaultFileCache()
+	if err != nil {
+		return fmt.Errorf("set up cache: %w", err)
+	}
+	cacheQuota, err := resolveCacheQuota(orchFile.Cache)
+	if err != nil {
+		return fmt.Errorf("cache: %w", err)
+	}
+	slog.Info("cache quota",
+		"per_project_bytes", cacheQuota.PerProjectBytes,
+		"global_bytes", cacheQuota.GlobalBytes,
+		"dir", cacheProvider.BaseDir,
+	)
+
 	return run(c.Addr, ServiceOpts{
 		Provider:           p,
 		CreateOpts:         vm.CreateOpts{Image: image, MaxLifetime: maxLifetime},
@@ -173,7 +188,40 @@ func (c *Cmd) Run() error {
 		APIKeyStore:    apiKeyStore,
 		AuthEnabled:    !c.NoAuth,
 		Scheduler:      sched,
+		CacheProvider:  cacheProvider,
+		CacheQuota:     cacheQuota,
 	})
+}
+
+// defaultCachePerProjectBytes / defaultCacheGlobalBytes are the built-in tool
+// cache quotas applied when orchestrator.toml leaves them unset.
+const (
+	defaultCachePerProjectBytes = int64(10) * 1024 * 1024 * 1024  // 10 GiB
+	defaultCacheGlobalBytes     = int64(100) * 1024 * 1024 * 1024 // 100 GiB
+)
+
+// resolveCacheQuota parses the [cache] quotas, falling back to the built-in
+// defaults when a field is empty.
+func resolveCacheQuota(c orchcfg.Cache) (cache.Quota, error) {
+	q := cache.Quota{
+		PerProjectBytes: defaultCachePerProjectBytes,
+		GlobalBytes:     defaultCacheGlobalBytes,
+	}
+	if c.PerProjectBytes != "" {
+		n, err := projconfig.ParseSize(c.PerProjectBytes)
+		if err != nil {
+			return cache.Quota{}, fmt.Errorf("per_project_bytes: %w", err)
+		}
+		q.PerProjectBytes = n
+	}
+	if c.GlobalBytes != "" {
+		n, err := projconfig.ParseSize(c.GlobalBytes)
+		if err != nil {
+			return cache.Quota{}, fmt.Errorf("global_bytes: %w", err)
+		}
+		q.GlobalBytes = n
+	}
+	return q, nil
 }
 
 // buildScheduler resolves the scheduler pool with CLI > TOML > host precedence.

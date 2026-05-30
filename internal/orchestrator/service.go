@@ -219,6 +219,8 @@ type Service struct {
 	workspaceDir     string                 // VM workspace path; defaults to "/home/kvarn/workspace"
 	registryMirrors  []string               // Docker registry mirrors
 	cacheProvider    cache.Provider         // optional cache provider
+	cacheQuota       cache.Quota            // LRU sweep limits; zero fields = unbounded
+	cacheNamespace   string                 // cache namespace; "" is the shared pool
 	sandboxFactory   SandboxFactory         // optional; nil uses defaultSandboxFactory
 	defaultsStore    modelcfg.DefaultsStore // optional; nil means built-in fallbacks only
 	pricingManager   *llms.PricingManager   // optional; nil disables USD computation
@@ -242,6 +244,8 @@ type ServiceOpts struct {
 	WorkspaceDir       string                 // VM workspace path; defaults to "/home/kvarn/workspace"
 	RegistryMirrors    []string               // Docker registry mirrors (infrastructure config)
 	CacheProvider      cache.Provider         // optional cache provider
+	CacheQuota         cache.Quota            // LRU sweep limits; zero fields = unbounded
+	Namespace          string                 // cache namespace; "" is the shared pool
 	SandboxFactory     SandboxFactory         // optional; nil uses defaultSandboxFactory
 	DefaultsStore      modelcfg.DefaultsStore // optional; nil means no user defaults (built-ins only)
 	PricingManager     *llms.PricingManager   // optional; nil disables USD computation
@@ -288,6 +292,8 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		workspaceDir:     wsDir,
 		registryMirrors:  opts.RegistryMirrors,
 		cacheProvider:    opts.CacheProvider,
+		cacheQuota:       opts.CacheQuota,
+		cacheNamespace:   opts.Namespace,
 		sandboxFactory:   opts.SandboxFactory,
 		defaultsStore:    opts.DefaultsStore,
 		pricingManager:   opts.PricingManager,
@@ -590,6 +596,7 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 		RegistryMirrors: s.registryMirrors,
 		CacheProvider:   s.cacheProvider,
 		ProjectID:       cache.ProjectID(proj.RepoURL),
+		Namespace:       s.cacheNamespace,
 		Secrets:         secretEnv,
 		OnEvent:         s.makeEventAdapter(ctx, sessionID),
 	})
@@ -723,6 +730,14 @@ func (s *Service) runJob(sessionID string, proj *project.Project, branch string,
 	s.sessionMgr.UpdateState(ctx, sessionID, session.StateSetup, "Saving cache")
 	if err := sess.SaveCache(ctx); err != nil {
 		log.Warn("failed to save cache", "error", err)
+	}
+	// Opportunistic bounded LRU sweep after each save (non-fatal).
+	if s.cacheProvider != nil && (s.cacheQuota.PerProjectBytes > 0 || s.cacheQuota.GlobalBytes > 0) {
+		if report, err := s.cacheProvider.Evict(s.cacheQuota); err != nil {
+			log.Warn("cache eviction failed", "error", err)
+		} else if report.RemovedEntries > 0 {
+			log.Info("cache evicted", "entries", report.RemovedEntries, "bytes_freed", report.BytesFreed)
+		}
 	}
 
 	// Submit changes as PR if forge is available, agent produced a result,

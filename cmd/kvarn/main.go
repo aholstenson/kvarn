@@ -1,6 +1,7 @@
 package main
 
 import (
+	cachecmd "github.com/aholstenson/kvarn/internal/cmd/cache"
 	imagecmd "github.com/aholstenson/kvarn/internal/cmd/image"
 	"github.com/aholstenson/kvarn/internal/cmd/key"
 	runcmd "github.com/aholstenson/kvarn/internal/cmd/run"
@@ -20,6 +21,7 @@ type CLI struct {
 	Run          runcmd.Cmd       `cmd:"" help:"Run the coding agent against the local working directory."`
 	Test         testcmd.Cmd      `cmd:"" help:"Test project configuration in a local VM."`
 	Image        imagecmd.Cmd     `cmd:"" help:"Manage the VM disk image."`
+	Cache        cachecmd.Cmd     `cmd:"" help:"Inspect and clear tool caches."`
 }
 
 func main() {

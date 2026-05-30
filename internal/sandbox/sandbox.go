@@ -133,6 +133,9 @@ type Opts struct {
 
 	CacheProvider cache.Provider
 	ProjectID     string
+	// Namespace partitions the cache pool; "" is the shared pool. A future
+	// "pr-<n>" isolates untrusted fork PRs.
+	Namespace string
 
 	// Secrets are env-var-name → final-string pairs to expose inside the
 	// VM. For env-typed secrets the value is the real secret; for bearer
@@ -157,7 +160,7 @@ type Session struct {
 
 	cacheProvider cache.Provider
 	projectID     string
-	cachePaths    []string
+	cacheLayers   []cache.Layer
 	onEvent       func(Event)
 
 	closers   []func()
@@ -215,10 +218,10 @@ func (s *Session) ChangedFiles(ctx context.Context) ([]string, error) {
 // cache provider. Should be called explicitly by the caller after job
 // completion (even on job failure), but not on infrastructure failures.
 func (s *Session) SaveCache(ctx context.Context) error {
-	if s.cacheProvider == nil || len(s.cachePaths) == 0 {
+	if s.cacheProvider == nil || len(s.cacheLayers) == 0 {
 		return nil
 	}
-	return SaveCache(ctx, s.bareProxy, s.cacheProvider, s.projectID, s.cachePaths, s.onEvent)
+	return SaveCache(ctx, s.bareProxy, s.cacheProvider, s.cacheLayers, s.onEvent)
 }
 
 // Close tears down all resources in reverse order. Idempotent.
@@ -297,14 +300,18 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		aug = computeAugmentations(deps)
 	}
 
-	// Collect cache paths from config before VM creation so we can set up
-	// the virtio-fs device.
-	var cachePaths []string
+	// Derive the content-addressed cache layers from the resolved deps and
+	// user config. Tool layers come from registered nixpkgs deps (empty in
+	// image mode, where deps are disallowed), so image jobs get only the
+	// user-configured layers.
+	var cacheLayers []cache.Layer
 	if opts.CacheProvider != nil && opts.ProjectID != "" && opts.Config != nil {
-		cachePaths = appendUnique(cachePaths, opts.Config.Cache.Paths)
-		if opts.Config.Image == "" {
-			cachePaths = appendUnique(cachePaths, defaultCachePaths)
-			cachePaths = appendUnique(cachePaths, aug.CachePaths)
+		cacheLayers, err = cache.DeriveLayers(
+			opts.SourceDir, deps, cacheToolLookup,
+			opts.Config.Cache, opts.ProjectID, opts.Namespace,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("derive cache layers: %w", err)
 		}
 	}
 
@@ -416,15 +423,15 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	// fetcher state in ~/.cache/nix is in place before `nix profile add`
 	// runs. Restoring after would overlay a stale tarball onto open sqlite
 	// state and corrupt the install.
-	if len(cachePaths) > 0 && opts.CacheProvider != nil {
+	if len(cacheLayers) > 0 && opts.CacheProvider != nil {
 		emit(opts, CacheRestoringEvent{})
 		emitFn := func(e Event) { emit(opts, e) }
-		if err := RestoreCache(ctx, proxy, opts.CacheProvider, opts.ProjectID, cachePaths, emitFn); err != nil {
+		if err := RestoreCache(ctx, proxy, opts.CacheProvider, cacheLayers, emitFn); err != nil {
 			return nil, fmt.Errorf("restore cache: %w", err)
 		}
 		sess.cacheProvider = opts.CacheProvider
 		sess.projectID = opts.ProjectID
-		sess.cachePaths = cachePaths
+		sess.cacheLayers = cacheLayers
 		sess.onEvent = opts.OnEvent
 	}
 

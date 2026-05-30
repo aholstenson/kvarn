@@ -10,18 +10,17 @@ import (
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/project"
+	"github.com/aholstenson/kvarn/internal/sandbox/cache"
 )
-
-// defaultCachePaths are always added to cachePaths in VM mode, regardless
-// of whether dependencies are configured. /home/kvarn/.cache is the XDG
-// default and catches most well-behaved tools (pip, sccache, modern Go
-// build cache, etc.) without per-tool curation.
-var defaultCachePaths = []string{"/home/kvarn/.cache"}
 
 // toolEntry describes the host-side settings applied to the sandbox when a
 // nixpkgs attribute is installed.
 type toolEntry struct {
-	CachePaths         []string
+	CachePaths []string
+	// Lockfiles are glob patterns (relative to the source dir) whose contents
+	// content-address this tool's cache. A leading "**/" matches at any depth,
+	// making the keying monorepo-aware.
+	Lockfiles          []string
 	Hosts              []string
 	Env                map[string]string
 	PathPrepend        []string
@@ -33,6 +32,7 @@ type toolEntry struct {
 var toolRegistry = map[string]toolEntry{
 	"go": {
 		CachePaths:         []string{"/home/kvarn/go"},
+		Lockfiles:          []string{"**/go.sum", "**/go.mod"},
 		Hosts:              []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com"},
 		Env:                map[string]string{"GOPATH": "/home/kvarn/go"},
 		PathPrepend:        []string{"/home/kvarn/go/bin"},
@@ -40,46 +40,55 @@ var toolRegistry = map[string]toolEntry{
 	},
 	"nodejs": {
 		CachePaths:         []string{"/home/kvarn/.npm"},
+		Lockfiles:          []string{"**/package-lock.json", "**/yarn.lock", "**/pnpm-lock.yaml", "**/bun.lockb"},
 		Hosts:              []string{"registry.npmjs.org", "nodejs.org"},
 		StripVersionSuffix: true,
 	},
 	"cargo": {
 		CachePaths:  []string{"/home/kvarn/.cargo"},
+		Lockfiles:   []string{"**/Cargo.lock"},
 		Hosts:       []string{"crates.io", "static.crates.io", "index.crates.io"},
 		Env:         map[string]string{"CARGO_HOME": "/home/kvarn/.cargo"},
 		PathPrepend: []string{"/home/kvarn/.cargo/bin"},
 	},
 	"rustc": {
 		CachePaths:  []string{"/home/kvarn/.cargo"},
+		Lockfiles:   []string{"**/Cargo.lock"},
 		Hosts:       []string{"crates.io", "static.crates.io", "index.crates.io"},
 		Env:         map[string]string{"CARGO_HOME": "/home/kvarn/.cargo"},
 		PathPrepend: []string{"/home/kvarn/.cargo/bin"},
 	},
 	"python3": {
+		Lockfiles:          []string{"**/requirements*.txt", "**/poetry.lock", "**/uv.lock"},
 		Hosts:              []string{"pypi.org", "files.pythonhosted.org"},
 		StripVersionSuffix: true,
 	},
 	"python": {
+		Lockfiles:          []string{"**/requirements*.txt", "**/poetry.lock", "**/uv.lock"},
 		Hosts:              []string{"pypi.org", "files.pythonhosted.org"},
 		StripVersionSuffix: true,
 	},
 	"bun": {
 		CachePaths: []string{"/home/kvarn/.bun/install/cache"},
+		Lockfiles:  []string{"**/package-lock.json", "**/yarn.lock", "**/pnpm-lock.yaml", "**/bun.lockb"},
 		Hosts:      []string{"bun.sh", "registry.npmjs.org"},
 	},
 	"openjdk": {
 		CachePaths:         []string{"/home/kvarn/.gradle", "/home/kvarn/.m2"},
+		Lockfiles:          []string{"**/gradle.lockfile", "**/pom.xml"},
 		Hosts:              []string{"repo.maven.apache.org", "repo1.maven.org", "services.gradle.org"},
 		StripVersionSuffix: true,
 	},
 	"ruby": {
 		CachePaths:         []string{"/home/kvarn/.gem"},
+		Lockfiles:          []string{"**/Gemfile.lock"},
 		Hosts:              []string{"rubygems.org"},
 		StripVersionSuffix: true,
 	},
 	"deno": {
-		Hosts: []string{"deno.land", "jsr.io"},
-		Env:   map[string]string{"DENO_DIR": "/home/kvarn/.cache/deno"},
+		CachePaths: []string{"/home/kvarn/.cache/deno"},
+		Hosts:      []string{"deno.land", "jsr.io"},
+		Env:        map[string]string{"DENO_DIR": "/home/kvarn/.cache/deno"},
 	},
 	"buf": {
 		Hosts: []string{"buf.build"},
@@ -92,30 +101,51 @@ var versionSuffixRe = regexp.MustCompile(`_[0-9]+(_[0-9]+)*$`)
 // trailingDigitsRe matches a trailing run of digits (e.g. `python312`).
 var trailingDigitsRe = regexp.MustCompile(`[0-9]+$`)
 
-// lookupTool returns the tool entry for a nixpkgs attr, or zero entry
-// + false. Tries exact match first; if absent and the would-be entry opts
-// in via StripVersionSuffix, retries with `_NN(_NN)?` and trailing-digit
-// forms stripped.
+// lookupTool returns the tool entry for a nixpkgs attr, or zero entry + false.
 func lookupTool(attr string) (toolEntry, bool) {
+	_, e, ok := lookupToolNamed(attr)
+	return e, ok
+}
+
+// lookupToolNamed resolves a nixpkgs attr to its canonical registry name and
+// entry. Tries an exact match first; if absent and the would-be entry opts in
+// via StripVersionSuffix, retries with `_NN(_NN)?` and trailing-digit forms
+// stripped. The returned name is the registry key, so versioned attrs (e.g.
+// `go_1_22`) map to a stable bucket (`go`).
+func lookupToolNamed(attr string) (string, toolEntry, bool) {
 	if e, ok := toolRegistry[attr]; ok {
-		return e, true
+		return attr, e, true
 	}
 
 	stripped := versionSuffixRe.ReplaceAllString(attr, "")
 	if stripped != attr {
 		if e, ok := toolRegistry[stripped]; ok && e.StripVersionSuffix {
-			return e, true
+			return stripped, e, true
 		}
 	}
 
 	stripped2 := trailingDigitsRe.ReplaceAllString(attr, "")
 	if stripped2 != attr {
 		if e, ok := toolRegistry[stripped2]; ok && e.StripVersionSuffix {
-			return e, true
+			return stripped2, e, true
 		}
 	}
 
-	return toolEntry{}, false
+	return "", toolEntry{}, false
+}
+
+// cacheToolLookup adapts the tool registry to cache.LookupFunc so the cache
+// package can content-address tool caches without importing sandbox.
+func cacheToolLookup(attr string) (cache.ToolEntry, bool) {
+	name, e, ok := lookupToolNamed(attr)
+	if !ok {
+		return cache.ToolEntry{}, false
+	}
+	return cache.ToolEntry{
+		Bucket:     name,
+		Lockfiles:  e.Lockfiles,
+		CachePaths: e.CachePaths,
+	}, true
 }
 
 // augmentations is the merged result of consulting toolRegistry for each
