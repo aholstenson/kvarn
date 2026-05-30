@@ -29,40 +29,45 @@ func NewInterceptor(store apikey.Store) *Interceptor {
 }
 
 // authenticate validates the Authorization header and returns the caller's
-// Identity. Any failure to recognize the key (missing/malformed header,
-// unknown key ID, wrong secret, disabled, expired) maps to Unauthenticated; a
-// store/parse failure maps to Unavailable so the service fails closed.
+// Identity. Every recognizable rejection (missing/malformed header, unknown
+// key ID, wrong secret, disabled, expired) returns the same opaque
+// Unauthenticated error so callers can't distinguish them and enumerate valid
+// key IDs; a store failure maps to Unavailable so the service fails closed.
 func (i *Interceptor) authenticate(header http.Header) (*Identity, error) {
 	authz := header.Get("Authorization")
 	if !strings.HasPrefix(authz, bearerPrefix) {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("missing or malformed Authorization header"))
+		return nil, errAuthFailed
 	}
 
 	keyID, secret, ok := apikey.ParseToken(strings.TrimPrefix(authz, bearerPrefix))
 	if !ok {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("malformed token"))
+		return nil, errAuthFailed
 	}
 
 	key, err := i.store.Get(context.Background(), keyID)
 	if err != nil {
 		if errors.Is(err, apikey.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("unknown key"))
+			return nil, errAuthFailed
 		}
 		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("read api key store: %w", err))
 	}
 
 	if subtle.ConstantTimeCompare([]byte(apikey.HashSecret(secret)), []byte(key.Hash)) != 1 {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("invalid token"))
+		return nil, errAuthFailed
 	}
 	if key.Disabled {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("key disabled"))
+		return nil, errAuthFailed
 	}
 	if key.Expired(time.Now()) {
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("key expired"))
+		return nil, errAuthFailed
 	}
 
 	return &Identity{KeyName: key.Name, Projects: key.Projects}, nil
 }
+
+// errAuthFailed is the single opaque error returned for every authentication
+// failure to avoid leaking which check rejected the request.
+var errAuthFailed = connect.NewError(connect.CodeUnauthenticated, errors.New("authentication failed"))
 
 // WrapUnary authenticates unary handler calls.
 func (i *Interceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {

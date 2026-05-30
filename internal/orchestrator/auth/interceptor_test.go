@@ -113,6 +113,38 @@ var _ = Describe("Interceptor.authenticate", func() {
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 	})
 
+	It("returns an identical opaque error for every rejection path", func() {
+		disabledToken, _, disabledHash, err := apikey.GenerateToken()
+		Expect(err).NotTo(HaveOccurred())
+		expiredToken, _, expiredHash, err := apikey.GenerateToken()
+		Expect(err).NotTo(HaveOccurred())
+		past := time.Now().Add(-time.Hour)
+		store.keys["disabledid"] = &apikey.APIKey{KeyID: "disabledid", Hash: disabledHash, Disabled: true}
+		store.keys["expiredid"] = &apikey.APIKey{KeyID: "expiredid", Hash: expiredHash, Expires: &past}
+		_, disabledSecret, _ := apikey.ParseToken(disabledToken)
+		_, expiredSecret, _ := apikey.ParseToken(expiredToken)
+
+		headers := []http.Header{
+			header(""),
+			header("Basic " + token),
+			header("Bearer not-a-real-token"),
+			header("Bearer kvarn_unknownid_" + secret),
+			header("Bearer kvarn_" + keyID + "_wrongsecret"),
+			header("Bearer kvarn_disabledid_" + disabledSecret),
+			header("Bearer kvarn_expiredid_" + expiredSecret),
+		}
+		interceptor := NewInterceptor(store)
+		var messages []string
+		for _, h := range headers {
+			_, err := interceptor.authenticate(h)
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
+			messages = append(messages, err.Error())
+		}
+		for _, m := range messages[1:] {
+			Expect(m).To(Equal(messages[0]), "all rejection messages must be identical to avoid leaking which check failed")
+		}
+	})
+
 	It("fails closed with Unavailable on a store error", func() {
 		store.getErr = errors.New("disk on fire")
 		_, err := NewInterceptor(store).authenticate(header("Bearer " + token))
