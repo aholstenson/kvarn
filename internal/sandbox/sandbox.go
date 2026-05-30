@@ -368,7 +368,9 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	}
 	sess.addCloser(func() {
 		slog.Info("destroying VM", "vm_id", instance.ID)
-		if destroyErr := opts.Provider.Destroy(context.Background(), instance.ID); destroyErr != nil {
+		destroyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if destroyErr := opts.Provider.Destroy(destroyCtx, instance.ID); destroyErr != nil {
 			slog.Error("failed to destroy VM", "vm_id", instance.ID, "error", destroyErr)
 		}
 	})
