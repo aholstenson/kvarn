@@ -227,6 +227,14 @@ type Service struct {
 	apiKeyStore      apikey.Store           // API keys for request authentication
 	authEnabled      bool                   // when true, project-scoped RPCs require an authorized key
 	scheduler        *scheduler.Scheduler   // resource admission; never nil (defaults to unbounded)
+
+	// Job lifecycle. shutdownCtx is the parent of every runJob root context;
+	// Shutdown cancels it to wind down in-flight jobs and waits on jobsWG so
+	// each Sandbox.Close gets a chance to tear its VM down via the bounded
+	// stop path.
+	jobsWG         sync.WaitGroup
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 type ServiceOpts struct {
@@ -256,12 +264,15 @@ type ServiceOpts struct {
 
 func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
 	reg := dispatch.NewRegistry()
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	return &Service{
-		provider:      p,
-		registry:      reg,
-		bridgeHandler: dispatch.NewHandler(reg),
-		createOpts:    createOpts,
-		scheduler:     scheduler.NewUnbounded(),
+		provider:       p,
+		registry:       reg,
+		bridgeHandler:  dispatch.NewHandler(reg),
+		createOpts:     createOpts,
+		scheduler:      scheduler.NewUnbounded(),
+		shutdownCtx:    shutdownCtx,
+		shutdownCancel: shutdownCancel,
 	}
 }
 
@@ -275,6 +286,7 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		sched = scheduler.NewUnbounded()
 	}
 	reg := dispatch.NewRegistry()
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	return &Service{
 		provider:         opts.Provider,
 		registry:         reg,
@@ -300,6 +312,29 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		apiKeyStore:      opts.APIKeyStore,
 		authEnabled:      opts.AuthEnabled,
 		scheduler:        sched,
+		shutdownCtx:      shutdownCtx,
+		shutdownCancel:   shutdownCancel,
+	}
+}
+
+// Shutdown signals every in-flight runJob to wind down and waits for them to
+// return, bounded by ctx. The per-job `defer sandbox.Close()` chains run the
+// bounded VM-stop path so VMs are torn down rather than orphaned. Callers
+// typically pass a context with a deadline (see shutdownTimeout in run).
+func (s *Service) Shutdown(ctx context.Context) {
+	s.shutdownCancel()
+
+	done := make(chan struct{})
+	go func() {
+		s.jobsWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		slog.Info("all jobs drained")
+	case <-ctx.Done():
+		slog.Warn("shutdown deadline reached; some jobs may still be running")
 	}
 }
 
@@ -360,6 +395,7 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 
 	slog.Info("session created", "session_id", sess.ID, "branch", branch, "mode", mode.ModeName())
 
+	s.jobsWG.Add(1)
 	go s.runJob(sess.ID, proj, branch, msg.Prompt, mode)
 
 	return connect.NewResponse(&v1.StartJobResponse{
@@ -368,7 +404,8 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 }
 
 func (s *Service) runJob(sessionID string, proj *project.Project, branch string, prompt string, mode *coding.Mode) {
-	rootCtx, cancelJob := context.WithCancelCause(context.Background())
+	defer s.jobsWG.Done()
+	rootCtx, cancelJob := context.WithCancelCause(s.shutdownCtx)
 	defer cancelJob(nil)
 	ctx := rootCtx
 	log := slog.With("session_id", sessionID, "project", proj.Name, "mode", mode.ModeName())

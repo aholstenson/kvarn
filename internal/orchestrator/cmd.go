@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/aholstenson/kvarn/internal/agent/coding"
@@ -58,7 +61,8 @@ const defaultCPUOvercommit = 1.5
 const defaultMaxVMLifetime = 24 * time.Hour
 
 func (c *Cmd) Run() error {
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	downloadLogged := false
 	diskImagePath, err := vm.EnsureDiskImage(ctx, vm.DownloadOpts{
@@ -168,7 +172,7 @@ func (c *Cmd) Run() error {
 		"dir", cacheProvider.BaseDir,
 	)
 
-	return run(c.Addr, ServiceOpts{
+	return run(ctx, c.Addr, ServiceOpts{
 		Provider:           p,
 		CreateOpts:         vm.CreateOpts{Image: image, MaxLifetime: maxLifetime},
 		ProjectStore:       projtoml.New(projectsPath),

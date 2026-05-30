@@ -1,8 +1,11 @@
 package orchestrator
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
@@ -11,12 +14,36 @@ import (
 	"golang.org/x/net/http2/h2c"
 )
 
-func run(addr string, svcOpts ServiceOpts) error {
-	svc := NewServiceWithOpts(svcOpts)
-	mux := PublicMux(svc)
+// shutdownTimeout caps the wall-time spent draining the HTTP server and any
+// in-flight jobs. The bounded VM-stop path keeps Sandbox.Close from running
+// indefinitely, so this is the outer envelope around all of that.
+const shutdownTimeout = 30 * time.Second
 
+func run(ctx context.Context, addr string, svcOpts ServiceOpts) error {
+	svc := NewServiceWithOpts(svcOpts)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: h2c.NewHandler(PublicMux(svc), &http2.Server{}),
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
 	slog.Info("orchestrator listening", "addr", addr)
-	return http.ListenAndServe(addr, h2c.NewHandler(mux, &http2.Server{}))
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		slog.Info("shutdown signal received, draining")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		slog.Warn("http shutdown returned error", "error", err)
+	}
+	svc.Shutdown(shutdownCtx)
+	return nil
 }
 
 // PublicMux builds the HTTP mux for the orchestrator's network listener. Only
