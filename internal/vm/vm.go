@@ -3,6 +3,7 @@ package vm
 import (
 	"context"
 	"net"
+	"time"
 
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 )
@@ -44,6 +45,12 @@ type CreateOpts struct {
 	CPUs             uint                // desired vCPU count; 0 means use default
 	MemoryBytes      uint64              // desired memory in bytes; 0 means use default
 	OnConsoleOutput  func(output string) // called with serial console chunks; nil = discard
+
+	// MaxLifetime is a failsafe: after this much wall time the provider
+	// destroys the VM regardless of caller state. Zero disables the cap. Not
+	// a normal control path — set it from the operator-level host config so
+	// a misbehaving job can never burn an unbounded amount of host resources.
+	MaxLifetime time.Duration
 
 	// Network configures the per-VM userspace network and egress proxy.
 	// Local providers create the netstack and proxy at VM-create time so

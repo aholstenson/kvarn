@@ -27,6 +27,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/runnerbin"
 	"github.com/aholstenson/kvarn/internal/vm"
 	"github.com/aholstenson/kvarn/internal/vm/disk"
+	"github.com/aholstenson/kvarn/internal/vm/local/vmtable"
 	"github.com/mdlayher/vsock"
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -53,14 +54,24 @@ type Provider struct {
 	vms      map[string]*vmInstance
 	nextCID  atomic.Uint32
 	nextPort atomic.Uint32
+	table    *vmtable.Store
 }
 
-// NewProvider creates a Provider and seeds the vsock CID counter above any
-// CIDs already in use by running QEMU processes, preventing collisions when
-// the orchestrator restarts while VMs are still alive.
+// NewProvider creates a Provider, reaps any orphaned QEMU children left behind
+// by an earlier crash, and seeds the vsock CID counter above any CIDs still in
+// use so a fresh start can't collide with surviving guests.
 func NewProvider() *Provider {
 	p := &Provider{}
-	if highest := scanHighestQEMUCID(); highest > 0 {
+
+	table, err := vmtable.Open(vmtable.DefaultPath())
+	if err != nil {
+		slog.Warn("vm table open failed; continuing without orphan reaping", "error", err)
+	} else {
+		p.table = table
+		reapOrphans(table, walkQEMUProcs("/proc"))
+	}
+
+	if highest := highestCID(walkQEMUProcs("/proc")); highest > 0 {
 		// allocateCID does nextCID.Add(1)+2, so storing (highest-2) makes the
 		// next call yield (highest+1), safely above all running guests.
 		p.nextCID.Store(highest - 2)
@@ -69,14 +80,16 @@ func NewProvider() *Provider {
 }
 
 type vmInstance struct {
-	cmd       *exec.Cmd
-	qmpSock   string
-	tmpDisk   string
-	tmpSeed   string
-	tmpVars   string
-	netCancel context.CancelFunc
-	netFiles  []*os.File
-	network   *link.Network
+	cmd           *exec.Cmd
+	cid           uint32
+	qmpSock       string
+	tmpDisk       string
+	tmpSeed       string
+	tmpVars       string
+	netCancel     context.CancelFunc
+	netFiles      []*os.File
+	network       *link.Network
+	lifetimeTimer *time.Timer
 	// waitDone is closed by the watcher goroutine after cmd.Wait() returns,
 	// ensuring QEMU is always reaped exactly once.
 	waitDone chan struct{}
@@ -340,6 +353,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 
 	inst := &vmInstance{
 		cmd:       cmd,
+		cid:       cid,
 		qmpSock:   qmpSock,
 		tmpDisk:   tmpDisk,
 		tmpSeed:   tmpSeed,
@@ -350,11 +364,46 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 		waitDone:  make(chan struct{}),
 	}
 
+	now := time.Now()
+	var deadline time.Time
+	if opts.MaxLifetime > 0 {
+		deadline = now.Add(opts.MaxLifetime)
+	}
+
+	// Persist before publishing so a crash between cmd.Start() and the table
+	// flush still leaves enough on disk for the next NewProvider to reap us.
+	if p.table != nil {
+		// /proc/<pid>/comm is truncated to 15 bytes; record exactly what /proc
+		// will report so the reaper's pid-recycle check is exact.
+		comm, _ := os.ReadFile(fmt.Sprintf("/proc/%d/comm", cmd.Process.Pid))
+		entry := vmtable.Entry{
+			ID:        id,
+			PID:       cmd.Process.Pid,
+			CID:       cid,
+			VsockPort: vsockPort,
+			QMPSock:   qmpSock,
+			TmpDisk:   tmpDisk,
+			TmpSeed:   tmpSeed,
+			TmpVars:   tmpVars,
+			CreatedAt: now.UTC().Format(time.RFC3339Nano),
+			Comm:      strings.TrimRight(string(comm), "\n"),
+		}
+		if !deadline.IsZero() {
+			entry.Deadline = deadline.UTC().Format(time.RFC3339Nano)
+		}
+		if err := p.table.Add(entry); err != nil {
+			slog.Warn("failed to persist VM table entry; orphan reaping may miss this VM on crash", "vm", id, "error", err)
+		}
+	}
+
 	p.mu.Lock()
 	if p.vms == nil {
 		p.vms = make(map[string]*vmInstance)
 	}
 	p.vms[id] = inst
+	if opts.MaxLifetime > 0 {
+		inst.lifetimeTimer = time.AfterFunc(opts.MaxLifetime, func() { p.expireDeadline(id) })
+	}
 	p.mu.Unlock()
 
 	// Reap QEMU exactly once. If it exits before Destroy is called we
@@ -378,6 +427,9 @@ func (p *Provider) Destroy(_ context.Context, id string) error {
 	inst, ok := p.vms[id]
 	if ok {
 		delete(p.vms, id)
+		if inst.lifetimeTimer != nil {
+			inst.lifetimeTimer.Stop()
+		}
 	}
 	p.mu.Unlock()
 
@@ -402,8 +454,29 @@ func (p *Provider) Destroy(_ context.Context, id string) error {
 	}
 
 	inst.cleanup()
+	if p.table != nil {
+		if err := p.table.Remove(id); err != nil {
+			slog.Warn("failed to remove VM table entry", "vm", id, "error", err)
+		}
+	}
 	slog.Info("local VM destroyed", "vm", id)
 	return nil
+}
+
+// expireDeadline destroys a VM that has exceeded its configured max lifetime.
+// Runs from time.AfterFunc, so it must not assume the VM still exists: the
+// watcher may have already cleaned up after an unexpected QEMU exit.
+func (p *Provider) expireDeadline(id string) {
+	p.mu.Lock()
+	_, ok := p.vms[id]
+	p.mu.Unlock()
+	if !ok {
+		return
+	}
+	slog.Warn("VM exceeded max lifetime, destroying", "vm", id)
+	if err := p.Destroy(context.Background(), id); err != nil {
+		slog.Warn("max-lifetime destroy failed", "vm", id, "error", err)
+	}
 }
 
 // watchQEMU reaps a running QEMU process and cleans up after an unexpected
@@ -419,12 +492,20 @@ func (p *Provider) watchQEMU(id string, inst *vmInstance) {
 	_, stillRegistered := p.vms[id]
 	if stillRegistered {
 		delete(p.vms, id)
+		if inst.lifetimeTimer != nil {
+			inst.lifetimeTimer.Stop()
+		}
 	}
 	p.mu.Unlock()
 
 	if stillRegistered {
 		slog.Warn("QEMU exited unexpectedly", "vm", id, "error", inst.waitErr)
 		inst.cleanup()
+		if p.table != nil {
+			if err := p.table.Remove(id); err != nil {
+				slog.Warn("failed to remove VM table entry", "vm", id, "error", err)
+			}
+		}
 	}
 }
 
@@ -464,36 +545,174 @@ func (p *Provider) allocatePort() uint32 {
 	return p.nextPort.Add(1) + 1023
 }
 
-// scanHighestQEMUCID returns the highest guest vsock CID held by any
-// currently running QEMU process, or 0 if none are found.
-func scanHighestQEMUCID() uint32 {
-	return scanHighestQEMUCIDFromProc("/proc")
+// reapOrphans terminates QEMU children left behind by an earlier orchestrator
+// run. It is called from NewProvider before any new VMs are admitted so the
+// host is free of stale CIDs, temp files, and resource holders.
+//
+// The table is authoritative for what to clean up: every recorded entry whose
+// PID is gone has its temp files removed; every entry whose PID is alive and
+// whose /proc/<pid>/comm still matches is SIGTERMed (then SIGKILLed) and
+// likewise cleaned. A live PID with a mismatching comm has been recycled by
+// the kernel; we skip the kill but still drop temp files we own.
+//
+// A second pass over running QEMU processes catches the rare case where the
+// orchestrator crashed before persisting an entry: any qemu-system-* process
+// with a managed guest-cid (> 2) that we don't know about gets terminated, at
+// the cost of leaking its temp files (their paths aren't recoverable here).
+func reapOrphans(table *vmtable.Store, procs []procEntry) {
+	known := make(map[int]bool, len(table.List()))
+	for _, entry := range table.List() {
+		known[entry.PID] = true
+		alive, comm := procStatus(entry.PID)
+		if !alive {
+			cleanupOrphanFiles(entry)
+			_ = table.Remove(entry.ID)
+			slog.Info("reaped orphan VM (already dead)", "vm", entry.ID, "pid", entry.PID, "cid", entry.CID)
+			continue
+		}
+		if entry.Comm != "" && comm != "" && comm != entry.Comm {
+			// PID belongs to someone else now; do not signal it.
+			cleanupOrphanFiles(entry)
+			_ = table.Remove(entry.ID)
+			slog.Info("reaped orphan VM (pid recycled)", "vm", entry.ID, "pid", entry.PID, "recorded_comm", entry.Comm, "current_comm", comm)
+			continue
+		}
+		terminatePID(entry.PID)
+		cleanupOrphanFiles(entry)
+		_ = table.Remove(entry.ID)
+		slog.Warn("reaped orphan VM", "vm", entry.ID, "pid", entry.PID, "cid", entry.CID, "reason", "left over from previous orchestrator run")
+	}
+
+	// Second pass: any qemu-system process holding a managed CID that's not
+	// in the table is still ours by descent (no other tool on this host uses
+	// vhost-vsock-pci CIDs in our range), so reap it. Temp files are not
+	// known here and will be left behind.
+	for _, p := range procs {
+		if known[p.pid] {
+			continue
+		}
+		if !isQEMUComm(p.comm) {
+			continue
+		}
+		if p.cid <= 2 {
+			continue
+		}
+		terminatePID(p.pid)
+		slog.Warn("reaped orphan VM not in table", "pid", p.pid, "cid", p.cid, "comm", p.comm)
+	}
 }
 
-// scanHighestQEMUCIDFromProc walks procRoot looking for numeric PID
-// directories and returns the highest vhost-vsock-pci guest-cid value seen.
-// It accepts the proc root as a parameter to make it testable without real
-// QEMU processes.
-func scanHighestQEMUCIDFromProc(procRoot string) uint32 {
+// procStatus reports whether pid currently exists and returns its comm.
+// A pid that cannot be read is treated as gone.
+func procStatus(pid int) (alive bool, comm string) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return false, ""
+	}
+	return true, strings.TrimRight(string(data), "\n")
+}
+
+// terminatePID sends SIGTERM, waits up to 5s for the process to exit, then
+// escalates to SIGKILL. Bounded so reaping cannot stall the orchestrator
+// boot indefinitely on a stuck guest.
+func terminatePID(pid int) {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	_ = proc.Signal(unix.SIGTERM)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := proc.Signal(unix.Signal(0)); err != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = proc.Kill()
+}
+
+// cleanupOrphanFiles removes the on-disk artifacts recorded for a reaped VM.
+// Best-effort: a missing file is fine, errors are swallowed because the entry
+// is about to be dropped from the table either way.
+func cleanupOrphanFiles(e vmtable.Entry) {
+	for _, p := range []string{e.TmpDisk, e.TmpSeed, e.TmpVars, e.QMPSock} {
+		if p != "" {
+			_ = os.Remove(p)
+		}
+	}
+}
+
+// procEntry is one /proc/<pid> snapshot used by orphan reaping and CID seeding.
+// cid is 0 when the process is not a vhost-vsock-pci guest.
+type procEntry struct {
+	pid  int
+	cid  uint32
+	comm string
+}
+
+// walkQEMUProcs scans procRoot for numeric PID directories and returns a
+// snapshot of each one with its guest-cid (if any) and comm. It is the shared
+// foundation for both CID seeding and orphan reaping; both consumers filter
+// the slice further. procRoot is a parameter so tests can supply a fake tree.
+func walkQEMUProcs(procRoot string) []procEntry {
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
-		return 0
+		return nil
 	}
-	var highest uint32
+	var out []procEntry
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		// Only numeric entries are PID directories.
-		if _, err := strconv.Atoi(e.Name()); err != nil {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
 			continue
 		}
 		cid := readCIDFromCmdline(filepath.Join(procRoot, e.Name(), "cmdline"))
-		if cid > highest {
-			highest = cid
+		comm := readComm(filepath.Join(procRoot, e.Name(), "comm"))
+		if cid == 0 && !isQEMUComm(comm) {
+			continue
+		}
+		out = append(out, procEntry{pid: pid, cid: cid, comm: comm})
+	}
+	return out
+}
+
+// highestCID returns the largest cid in entries, or 0 if none have one.
+func highestCID(entries []procEntry) uint32 {
+	var highest uint32
+	for _, e := range entries {
+		if e.cid > highest {
+			highest = e.cid
 		}
 	}
 	return highest
+}
+
+// scanHighestQEMUCIDFromProc is the original highest-CID helper, kept as a thin
+// wrapper so existing tests in local_linux_test.go continue to assert against
+// the same surface.
+func scanHighestQEMUCIDFromProc(procRoot string) uint32 {
+	return highestCID(walkQEMUProcs(procRoot))
+}
+
+// readComm reads /proc/<pid>/comm and returns the trimmed value. Linux
+// truncates comm to 15 bytes, so callers must match by prefix rather than by
+// equality with a full executable name.
+func readComm(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(string(data), "\n")
+}
+
+// isQEMUComm reports whether comm looks like a QEMU process. Linux truncates
+// /proc/<pid>/comm to 15 bytes so "qemu-system-x86_64" appears as
+// "qemu-system-x86"; matching by the stable "qemu-system" prefix is robust
+// across both x86_64 and aarch64 builds.
+func isQEMUComm(comm string) bool {
+	return strings.HasPrefix(comm, "qemu-system")
 }
 
 // readCIDFromCmdline reads a /proc/<pid>/cmdline file and returns the

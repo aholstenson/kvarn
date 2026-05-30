@@ -1,0 +1,15 @@
+package vmtable_test
+
+import (
+	"testing"
+
+	"github.com/aholstenson/kvarn/internal/logging"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+func TestVMTable(t *testing.T) {
+	RegisterFailHandler(Fail)
+	logging.SetupForWriter(GinkgoWriter)
+	RunSpecs(t, "VMTable Suite")
+}

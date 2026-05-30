@@ -26,6 +26,9 @@ type Scheduler struct {
 	Memory        string   `toml:"memory,omitempty"`
 	Disk          string   `toml:"disk,omitempty"`
 	CPUOvercommit *float64 `toml:"cpu_overcommit,omitempty"`
+	// MaxVMLifetime is a host-wide failsafe upper bound on per-VM wall time
+	// (e.g. "4h", "1d"). Empty falls through to the built-in default.
+	MaxVMLifetime string `toml:"max_vm_lifetime,omitempty"`
 }
 
 // DefaultPath returns the standard orchestrator.toml location, mirroring the

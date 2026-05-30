@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/aholstenson/kvarn/internal/agent/coding"
 	apikeytoml "github.com/aholstenson/kvarn/internal/config/apikey/tomlstore"
@@ -43,11 +44,17 @@ type Cmd struct {
 	SchedMemory        string  `help:"Total admission-pool memory (e.g. 32G). Empty = file / 75% of host total." env:"KVARN_SCHED_MEMORY" default:""`
 	SchedDisk          string  `help:"Total admission-pool disk (e.g. 200G). Empty = file / 75% of free space on the image cache filesystem." env:"KVARN_SCHED_DISK" default:""`
 	SchedCPUOvercommit float64 `help:"CPU overcommit multiplier (>=1.0). 0 = file / built-in default." env:"KVARN_SCHED_CPU_OVERCOMMIT" default:"0"`
+	SchedMaxVMLifetime string  `help:"Host-wide per-VM wall-time failsafe (e.g. 4h). Empty = file / built-in default." env:"KVARN_SCHED_MAX_VM_LIFETIME" default:""`
 }
 
 // defaultCPUOvercommit is the built-in CPU overcommit multiplier used when
 // neither the CLI flag nor the orchestrator.toml file set one.
 const defaultCPUOvercommit = 1.5
+
+// defaultMaxVMLifetime is the built-in failsafe applied when no operator
+// override is configured. 24h is well above any expected job runtime but
+// guarantees a hung VM is reaped within a day.
+const defaultMaxVMLifetime = 24 * time.Hour
 
 func (c *Cmd) Run() error {
 	ctx := context.Background()
@@ -141,9 +148,14 @@ func (c *Cmd) Run() error {
 		return fmt.Errorf("scheduler: %w", err)
 	}
 
+	maxLifetime, err := c.resolveMaxVMLifetime(orchFile.Scheduler)
+	if err != nil {
+		return fmt.Errorf("scheduler: %w", err)
+	}
+
 	return run(c.Addr, ServiceOpts{
 		Provider:           p,
-		CreateOpts:         vm.CreateOpts{Image: image},
+		CreateOpts:         vm.CreateOpts{Image: image, MaxLifetime: maxLifetime},
 		ProjectStore:       projtoml.New(projectsPath),
 		CredentialStore:    credtoml.New(credentialsPath),
 		SecretStore:        secrettoml.New(secretsPath),
@@ -230,6 +242,29 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 	)
 
 	return scheduler.New(scheduler.Options{Total: total, CPUOvercommit: overcommit}), nil
+}
+
+// resolveMaxVMLifetime applies CLI > file > built-in precedence to the
+// per-VM wall-time failsafe. Returns 0 only if the operator explicitly sets
+// the lifetime to "0" — the empty string falls through to the default.
+func (c *Cmd) resolveMaxVMLifetime(fileCfg orchcfg.Scheduler) (time.Duration, error) {
+	raw := c.SchedMaxVMLifetime
+	source := "--sched-max-vm-lifetime"
+	if raw == "" {
+		raw = fileCfg.MaxVMLifetime
+		source = "scheduler.max_vm_lifetime"
+	}
+	if raw == "" {
+		return defaultMaxVMLifetime, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", source, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%s: must be non-negative", source)
+	}
+	return d, nil
 }
 
 // resolveSize applies CLI > file > host precedence to a size field. flagName /

@@ -29,6 +29,7 @@ cpus = 8
 memory = "32G"
 disk = "200G"
 cpu_overcommit = 1.5
+max_vm_lifetime = "4h"
 `), 0644)).To(Succeed())
 
 		cfg, err := orchcfg.Load(path)
@@ -39,6 +40,7 @@ cpu_overcommit = 1.5
 		Expect(cfg.Scheduler.Disk).To(Equal("200G"))
 		Expect(cfg.Scheduler.CPUOvercommit).NotTo(BeNil())
 		Expect(*cfg.Scheduler.CPUOvercommit).To(Equal(1.5))
+		Expect(cfg.Scheduler.MaxVMLifetime).To(Equal("4h"))
 	})
 
 	It("returns parse errors with the path attached", func() {

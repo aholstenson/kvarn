@@ -3,14 +3,18 @@
 package local_test
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/aholstenson/kvarn/internal/vm/local"
+	"github.com/aholstenson/kvarn/internal/vm/local/vmtable"
 )
 
 // makeProc writes a fake /proc/<pid>/cmdline entry under procRoot using NUL
@@ -20,6 +24,14 @@ func makeProc(procRoot, pid string, args ...string) {
 	ExpectWithOffset(1, os.MkdirAll(dir, 0o755)).To(Succeed())
 	cmdline := strings.Join(args, "\x00") + "\x00"
 	ExpectWithOffset(1, os.WriteFile(filepath.Join(dir, "cmdline"), []byte(cmdline), 0o644)).To(Succeed())
+}
+
+// makeProcWithComm writes a fake /proc/<pid> directory with both a cmdline
+// and a comm file, since walkQEMUProcs now consults comm alongside cmdline.
+func makeProcWithComm(procRoot, pid, comm string, args ...string) {
+	makeProc(procRoot, pid, args...)
+	dir := filepath.Join(procRoot, pid)
+	ExpectWithOffset(1, os.WriteFile(filepath.Join(dir, "comm"), []byte(comm+"\n"), 0o644)).To(Succeed())
 }
 
 var _ = Describe("scanHighestQEMUCIDFromProc", func() {
@@ -150,5 +162,140 @@ var _ = Describe("NewProvider CID seeding", func() {
 
 		p := local.NewProviderWithHighestCID(highest)
 		Expect(p.AllocateCIDForTest()).To(Equal(uint32(11)))
+	})
+})
+
+var _ = Describe("WalkQEMUProcs", func() {
+	var procRoot string
+
+	BeforeEach(func() {
+		procRoot = GinkgoT().TempDir()
+	})
+
+	It("returns the pid, cid, and comm for matching processes", func() {
+		makeProcWithComm(procRoot, "100", "qemu-system-x86",
+			"qemu-system-x86_64", "-device", "vhost-vsock-pci,guest-cid=7")
+
+		entries := local.WalkQEMUProcs(procRoot)
+		Expect(entries).To(HaveLen(1))
+		Expect(entries[0].PID).To(Equal(100))
+		Expect(entries[0].CID).To(Equal(uint32(7)))
+		Expect(entries[0].Comm).To(Equal("qemu-system-x86"))
+	})
+
+	It("skips non-QEMU processes that don't expose a vsock device", func() {
+		makeProcWithComm(procRoot, "200", "bash", "bash", "-c", "sleep 1")
+		Expect(local.WalkQEMUProcs(procRoot)).To(BeEmpty())
+	})
+
+	It("keeps a QEMU process even when it has no guest-cid (comm match)", func() {
+		makeProcWithComm(procRoot, "300", "qemu-system-x86",
+			"qemu-system-x86_64", "-nographic")
+		entries := local.WalkQEMUProcs(procRoot)
+		Expect(entries).To(HaveLen(1))
+		Expect(entries[0].CID).To(BeZero())
+	})
+})
+
+var _ = Describe("reapOrphans", func() {
+	var tablePath string
+	var tmpFiles []string
+
+	BeforeEach(func() {
+		dir := GinkgoT().TempDir()
+		tablePath = filepath.Join(dir, "vms.json")
+		tmpFiles = nil
+	})
+
+	makeTmpFile := func() string {
+		f, err := os.CreateTemp("", "kvarn-test-tmpfile-*")
+		Expect(err).NotTo(HaveOccurred())
+		f.Close()
+		tmpFiles = append(tmpFiles, f.Name())
+		return f.Name()
+	}
+
+	AfterEach(func() {
+		for _, p := range tmpFiles {
+			os.Remove(p)
+		}
+	})
+
+	It("cleans up files and drops the entry when the recorded PID has been recycled", func() {
+		// PID 1 is always alive but its comm will not match the recorded
+		// value, so the reaper must treat the entry as recycled: clean up
+		// our files without signalling pid 1.
+		disk := makeTmpFile()
+		seed := makeTmpFile()
+		vars := makeTmpFile()
+		qmp := makeTmpFile()
+
+		table, err := vmtable.Open(tablePath)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(table.Add(vmtable.Entry{
+			ID:      "recycled-vm",
+			PID:     1,
+			CID:     5,
+			TmpDisk: disk,
+			TmpSeed: seed,
+			TmpVars: vars,
+			QMPSock: qmp,
+			Comm:    "qemu-system-x86",
+		})).To(Succeed())
+
+		local.ReapOrphans(table, nil)
+
+		Expect(table.List()).To(BeEmpty())
+		for _, p := range []string{disk, seed, vars, qmp} {
+			_, err := os.Stat(p)
+			Expect(os.IsNotExist(err)).To(BeTrue(), "expected %s to be removed", p)
+		}
+	})
+
+	It("ignores untracked /proc entries that are not QEMU", func() {
+		table, err := vmtable.Open(tablePath)
+		Expect(err).NotTo(HaveOccurred())
+
+		// A bash process with cid > 2 would never be produced by walkQEMUProcs
+		// because we filter to qemu-system comms; pass it directly to confirm
+		// reapOrphans applies the same comm filter for safety.
+		Expect(func() {
+			local.ReapOrphans(table, []local.ProcEntry{
+				{PID: os.Getpid(), CID: 99, Comm: "go"},
+			})
+		}).NotTo(Panic())
+	})
+
+	It("cleans up after a real subprocess once it has exited", func() {
+		// Spawn a child, kill it, then point reapOrphans at the leftover
+		// table entry. The reaper must remove the file, drop the entry,
+		// and not block on the dead pid.
+		cmd := exec.Command("sh", "-c", "exec sleep 30")
+		Expect(cmd.Start()).To(Succeed())
+		pid := cmd.Process.Pid
+		Expect(cmd.Process.Kill()).To(Succeed())
+		_ = cmd.Wait()
+
+		// Wait briefly for /proc to drop the entry.
+		Eventually(func() bool {
+			_, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
+			return os.IsNotExist(err)
+		}, 2*time.Second, 50*time.Millisecond).Should(BeTrue())
+
+		disk := makeTmpFile()
+		table, err := vmtable.Open(tablePath)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(table.Add(vmtable.Entry{
+			ID:      "vm-after-crash",
+			PID:     pid,
+			CID:     7,
+			TmpDisk: disk,
+			Comm:    "sleep",
+		})).To(Succeed())
+
+		local.ReapOrphans(table, nil)
+		Expect(table.List()).To(BeEmpty())
+		_, err = os.Stat(disk)
+		Expect(os.IsNotExist(err)).To(BeTrue())
 	})
 })
