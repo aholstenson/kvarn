@@ -75,25 +75,40 @@ type scriptedAgent struct {
 	fileBody    string
 }
 
-func (a *scriptedAgent) Run(_ context.Context, agentCtx *agent.Context) (*agent.Result, error) {
-	if a.fileName != "" {
-		path := filepath.Join(agentCtx.WorkingDir, a.fileName)
-		if err := os.WriteFile(path, []byte(a.fileBody), 0644); err != nil {
-			return nil, err
+func (a *scriptedAgent) Start(_ context.Context, agentCtx *agent.Context) (agent.Conversation, error) {
+	return &scriptedConversation{a: a, agentCtx: agentCtx}, nil
+}
+
+type scriptedConversation struct {
+	a        *scriptedAgent
+	agentCtx *agent.Context
+}
+
+func (c *scriptedConversation) Run(_ context.Context, _ string) (string, error) {
+	if c.a.fileName != "" {
+		path := filepath.Join(c.agentCtx.WorkingDir, c.a.fileName)
+		if err := os.WriteFile(path, []byte(c.a.fileBody), 0644); err != nil {
+			return "", err
 		}
 	}
-	if agentCtx.OnProgress != nil {
-		agentCtx.OnProgress(agent.ProgressTextMessage{Text: "Planning the change."})
-		agentCtx.OnProgress(agent.ProgressToolUse{ToolID: "WriteFile", ArgumentsJSON: `{"path":"` + a.fileName + `"}`})
-		agentCtx.OnProgress(agent.ProgressToolResult{ToolID: "WriteFile", Result: "ok"})
-		agentCtx.OnProgress(agent.ProgressToolUse{ToolID: "Bash", ArgumentsJSON: `{"cmd":"go test"}`})
-		agentCtx.OnProgress(agent.ProgressToolResult{ToolID: "Bash", Result: "test failure: thing broke", IsError: true})
+	if c.agentCtx.OnProgress != nil {
+		c.agentCtx.OnProgress(agent.ProgressTextMessage{Text: "Planning the change."})
+		c.agentCtx.OnProgress(agent.ProgressToolUse{ToolID: "WriteFile", ArgumentsJSON: `{"path":"` + c.a.fileName + `"}`})
+		c.agentCtx.OnProgress(agent.ProgressToolResult{ToolID: "WriteFile", Result: "ok"})
+		c.agentCtx.OnProgress(agent.ProgressToolUse{ToolID: "Bash", ArgumentsJSON: `{"cmd":"go test"}`})
+		c.agentCtx.OnProgress(agent.ProgressToolResult{ToolID: "Bash", Result: "test failure: thing broke", IsError: true})
 	}
+	return "", nil
+}
+
+func (c *scriptedConversation) Summarize(_ context.Context) (*agent.Result, error) {
 	return &agent.Result{
-		Title:       a.title,
-		Description: a.description,
+		Title:       c.a.title,
+		Description: c.a.description,
 	}, nil
 }
+
+func (c *scriptedConversation) Close() error { return nil }
 
 // localRunnerProxy implements sandbox.RunnerProxy by delegating to a local
 // runner.Handler, avoiding the need for a real VM or bridge connection.

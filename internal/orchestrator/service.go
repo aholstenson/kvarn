@@ -760,16 +760,15 @@ func (s *Service) runJob(requestID, sessionID string, proj *project.Project, bra
 		},
 	}
 
-	var agentResult *agent.Result
+	// Run the agent; if it modifies files and the project has validation
+	// steps, fold their pass/fail back into a single conversation so the
+	// agent can fix what its own change broke. Each retry is gated by both
+	// MaxValidationRetries and the shared cost budget.
+	var conv agent.Conversation
 	if s.agent != nil {
-		agentResult, err = s.agent.Run(ctx, agentCtx)
-		// Persist partial cost regardless of success: spend up to a failure
-		// is still interesting to users.
-		s.sessionMgr.UpdateCost(context.Background(), sessionID, tracker.Snapshot())
+		conv, err = s.agent.Start(ctx, agentCtx)
 		if err != nil {
-			log.Error("agent failed", "error", err)
-			// Surface a clearer error message when the agent ctx was cancelled
-			// because the cost cap was hit.
+			log.Error("agent start failed", "error", err)
 			cause := context.Cause(rootCtx)
 			if errors.Is(cause, cost.ErrBudgetExceeded) {
 				s.sessionMgr.Fail(context.Background(), sessionID, fmt.Errorf("agent: %w", cause))
@@ -778,13 +777,44 @@ func (s *Service) runJob(requestID, sessionID string, proj *project.Project, bra
 			}
 			return
 		}
+		defer conv.Close()
 	}
 
-	// Run validation steps.
-	if !mode.WritesChanges() {
-		log.Info("skipping validation: read-only mode")
-	} else if cfg != nil && (len(cfg.Validation.Required) > 0 || len(cfg.Validation.Advisory) > 0) {
-		log.Info("running validation steps")
+	validates := mode.WritesChanges() && cfg != nil &&
+		(len(cfg.Validation.Required) > 0 || len(cfg.Validation.Advisory) > 0)
+
+	var valResult *sandbox.ValidationResult
+	for attempt := 0; ; attempt++ {
+		followup := ""
+		if attempt > 0 {
+			followup = agent.BuildRetryPrompt(valResult, attempt, costLimits.MaxValidationRetries)
+			s.sessionMgr.UpdateState(ctx, sessionID, session.StateRunning,
+				fmt.Sprintf("Retrying after validation failure (attempt %d/%d)",
+					attempt, costLimits.MaxValidationRetries))
+		}
+
+		if conv != nil {
+			_, err = conv.Run(ctx, followup)
+			// Persist partial cost regardless of success: spend up to a
+			// failure is still interesting to users.
+			s.sessionMgr.UpdateCost(context.Background(), sessionID, tracker.Snapshot())
+			if err != nil {
+				log.Error("agent failed", "error", err)
+				cause := context.Cause(rootCtx)
+				if errors.Is(cause, cost.ErrBudgetExceeded) {
+					s.sessionMgr.Fail(context.Background(), sessionID, fmt.Errorf("agent: %w", cause))
+				} else {
+					s.sessionMgr.Fail(context.Background(), sessionID, fmt.Errorf("agent: %w", err))
+				}
+				return
+			}
+		}
+
+		if !validates {
+			break
+		}
+
+		log.Info("running validation steps", "attempt", attempt+1)
 		s.sessionMgr.UpdateState(ctx, sessionID, session.StateValidating, "Running validation")
 
 		changedFiles, err := sess.ChangedFiles(ctx)
@@ -796,19 +826,43 @@ func (s *Service) runJob(requestID, sessionID string, proj *project.Project, bra
 
 		onStepDone := s.makeStepCallback(ctx, sessionID)
 		onOutput := s.makeOutputCallback(ctx, sessionID)
-		valResult, err := sess.RunValidation(ctx, cfg, changedFiles, onStepDone, onOutput)
+		valResult, err = sess.RunValidation(ctx, cfg, changedFiles, onStepDone, onOutput)
 		if err != nil {
 			log.Error("validation failed", "error", err)
 			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("validation: %w", err))
 			return
 		}
 
-		if !valResult.RequiredPassed {
-			log.Error("required validation steps failed")
-			s.sessionMgr.Fail(ctx, sessionID, errors.New("required validation steps failed"))
+		if valResult.RequiredPassed {
+			log.Info("validation complete", "attempt", attempt+1)
+			break
+		}
+
+		if conv == nil || attempt >= costLimits.MaxValidationRetries {
+			log.Error("required validation steps failed", "attempts", attempt+1)
+			s.sessionMgr.Fail(ctx, sessionID,
+				fmt.Errorf("required validation steps failed after %d attempts", attempt+1))
 			return
 		}
-		log.Info("validation complete")
+		if tracker.OverBudget() {
+			log.Error("required validation failed; cost budget exhausted")
+			s.sessionMgr.Fail(ctx, sessionID,
+				fmt.Errorf("required validation steps failed; cost budget exhausted: %w",
+					cost.ErrBudgetExceeded))
+			return
+		}
+	}
+
+	var agentResult *agent.Result
+	if conv != nil && mode.WritesChanges() {
+		agentResult, err = conv.Summarize(ctx)
+		if err != nil {
+			log.Warn("failed to summarize agent run; using defaults", "error", err)
+			agentResult = &agent.Result{
+				Title:       "Apply agent changes",
+				Description: "Automated changes by kvarn agent.",
+			}
+		}
 	}
 
 	// Save cache (non-fatal on error).

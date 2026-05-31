@@ -36,17 +36,19 @@ type Store interface {
 // JobDefaults is the per-job-mode default block (forward-compatible: today
 // only cost cap, later per-mode model selection).
 type JobDefaults struct {
-	MaxCostUSD *float64
+	MaxCostUSD           *float64
+	MaxValidationRetries *int
 }
 
 // Defaults holds the top-level user defaults that apply to all jobs unless a
 // project or per-mode override is set. All fields are optional; nil means
 // "use the built-in fallback".
 type Defaults struct {
-	MaxCostUSD     *float64
-	WarnThreshold  *float64
-	ReportCostOnPR *bool
-	Jobs           map[string]JobDefaults
+	MaxCostUSD           *float64
+	WarnThreshold        *float64
+	ReportCostOnPR       *bool
+	MaxValidationRetries *int
+	Jobs                 map[string]JobDefaults
 }
 
 // DefaultsStore reads user-level defaults (the [defaults] block in

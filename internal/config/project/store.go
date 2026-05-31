@@ -6,7 +6,8 @@ import "context"
 // carries a max-cost cap, but the shape is designed to take per-mode model
 // selection without breaking existing config files when that lands.
 type JobLimits struct {
-	MaxCostUSD *float64
+	MaxCostUSD           *float64
+	MaxValidationRetries *int
 }
 
 // Project represents a configured project with its repository details.
@@ -22,6 +23,10 @@ type Project struct {
 	// ReportCostOnPR overrides whether the work-log PR comment includes a
 	// cost section. Nil means "inherit from defaults".
 	ReportCostOnPR *bool
+	// MaxValidationRetries overrides the user-level default for how many
+	// additional agent attempts to allow after a required validation step
+	// fails. Nil means "inherit from defaults". 0 means "no retries".
+	MaxValidationRetries *int
 	// Jobs holds per-job-mode overrides keyed by mode name (auto, implement,
 	// fix, review, research). nil/empty means no per-mode overrides.
 	Jobs map[string]JobLimits

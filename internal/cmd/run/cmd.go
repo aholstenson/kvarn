@@ -57,6 +57,8 @@ type Cmd struct {
 	AgentsFile    string `help:"Override path to agents config (default: ~/.config/kvarn/agents.toml)." name:"agents-file"`
 	Model         string `help:"LLM model alias for the coding agent." default:"coding-agent"`
 	Mode          string `help:"Agent mode: auto, implement, fix, review, research." default:"auto"`
+
+	MaxValidationRetries int `help:"Number of additional agent passes after a required validation failure. 0 disables retries." name:"max-validation-retries" default:"0"`
 }
 
 // Run is the kong-invoked entry point. It resolves defaults and delegates to
@@ -454,52 +456,113 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		Cost:        tracker,
 	}
 
-	agentResult, agentErr := deps.Agent.Run(ctx, agentCtx)
-	// Resolve any tool items left running because the LLM stream omitted a
-	// result event for a failed tool handler.
-	finalizeProgress()
-	summary.agentTools = toolCount
-	summary.agentDuration = time.Since(agentStart)
+	// Drive the agent through one Conversation so a validation-failure retry
+	// can append a remediation message instead of starting from scratch.
+	conv, agentErr := deps.Agent.Start(ctx, agentCtx)
 	if agentErr != nil {
+		finalizeProgress()
+		summary.agentTools = toolCount
+		summary.agentDuration = time.Since(agentStart)
 		summary.agentFailed = true
+		renderer.Stop()
+		return summary.finish(deps.Stdout, agentErr, "", 0, 0)
 	}
+	defer conv.Close()
 
-	// Validation. Always runs, even when the agent errored — the user may
-	// still want to inspect partial changes. Skipped for read-only modes.
-	if mode.WritesChanges() {
+	maxRetries := c.MaxValidationRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	hasRequired := mode.WritesChanges() && len(cfg.Validation.Required) > 0
+
+	var lastValResult *sandbox.ValidationResult
+	var lastAgentText string
+	for attempt := 0; ; attempt++ {
+		followup := ""
+		if attempt > 0 {
+			followup = agent.BuildRetryPrompt(lastValResult, attempt, maxRetries)
+		}
+
+		text, err := conv.Run(ctx, followup)
+		if err != nil {
+			agentErr = err
+			summary.agentFailed = true
+			break
+		}
+		lastAgentText = text
+
+		if !hasRequired {
+			break
+		}
+
 		changedFiles, cfErr := sess.ChangedFiles(ctx)
 		if cfErr != nil {
 			slog.Warn("failed to get changed files for validation gating", "error", cfErr)
 		}
 
-		if len(cfg.Validation.Required) > 0 {
-			reqItem := renderer.AddItem("Validation (required)")
-			renderer.SetStatus(reqItem, taskui.StatusRunning, "")
-			stepDone, outputCb := makeCallbacks(reqItem, cfg.Validation.Required)
-			valResult, err := sess.RunValidation(ctx, &project.Config{
-				Validation: project.Validation{Required: cfg.Validation.Required},
-			}, changedFiles, stepDone, outputCb)
-			if err != nil {
-				renderer.Stop()
-				return summary.finish(deps.Stdout, err, "", 0, 0)
-			}
-			if !valResult.RequiredPassed {
-				summary.requiredFailed = true
-			}
-			renderer.SetStatus(reqItem, parentStatus(reqItem), "")
+		label := "Validation (required)"
+		if attempt > 0 {
+			label = fmt.Sprintf("Validation (required) — attempt %d", attempt+1)
 		}
+		reqItem := renderer.AddItem(label)
+		renderer.SetStatus(reqItem, taskui.StatusRunning, "")
+		stepDone, outputCb := makeCallbacks(reqItem, cfg.Validation.Required)
+		valResult, err := sess.RunValidation(ctx, &project.Config{
+			Validation: project.Validation{Required: cfg.Validation.Required},
+		}, changedFiles, stepDone, outputCb)
+		if err != nil {
+			renderer.Stop()
+			return summary.finish(deps.Stdout, err, "", 0, 0)
+		}
+		renderer.SetStatus(reqItem, parentStatus(reqItem), "")
+		lastValResult = valResult
 
-		if len(cfg.Validation.Advisory) > 0 {
-			advItem := renderer.AddItem("Validation (advisory)")
-			renderer.SetStatus(advItem, taskui.StatusRunning, "")
-			stepDone, outputCb := makeCallbacks(advItem, cfg.Validation.Advisory)
-			if _, err := sess.RunValidation(ctx, &project.Config{
-				Validation: project.Validation{Advisory: cfg.Validation.Advisory},
-			}, changedFiles, stepDone, outputCb); err != nil {
-				renderer.Stop()
-				return summary.finish(deps.Stdout, err, "", 0, 0)
+		if valResult.RequiredPassed {
+			summary.requiredFailed = false
+			break
+		}
+		summary.requiredFailed = true
+		if attempt >= maxRetries {
+			break
+		}
+	}
+	finalizeProgress()
+	summary.agentTools = toolCount
+	summary.agentDuration = time.Since(agentStart)
+
+	// Advisory validation runs once after the loop so a long required-retry
+	// stretch doesn't repeat the advisory block per attempt.
+	if mode.WritesChanges() && len(cfg.Validation.Advisory) > 0 {
+		changedFiles, cfErr := sess.ChangedFiles(ctx)
+		if cfErr != nil {
+			slog.Warn("failed to get changed files for advisory validation", "error", cfErr)
+		}
+		advItem := renderer.AddItem("Validation (advisory)")
+		renderer.SetStatus(advItem, taskui.StatusRunning, "")
+		stepDone, outputCb := makeCallbacks(advItem, cfg.Validation.Advisory)
+		if _, err := sess.RunValidation(ctx, &project.Config{
+			Validation: project.Validation{Advisory: cfg.Validation.Advisory},
+		}, changedFiles, stepDone, outputCb); err != nil {
+			renderer.Stop()
+			return summary.finish(deps.Stdout, err, "", 0, 0)
+		}
+		renderer.SetStatus(advItem, parentStatus(advItem), "")
+	}
+
+	// Summarize once the agent + validation cycle is done so the cheap
+	// summary call doesn't run between retry attempts. Read-only modes use
+	// the agent's final reply directly as the description.
+	var agentResult *agent.Result
+	if agentErr == nil {
+		if mode.WritesChanges() {
+			if res, err := conv.Summarize(ctx); err != nil {
+				slog.Warn("failed to summarize agent run; using defaults", "error", err)
+				agentResult = &agent.Result{Title: "Apply agent changes"}
+			} else {
+				agentResult = res
 			}
-			renderer.SetStatus(advItem, parentStatus(advItem), "")
+		} else if lastAgentText != "" {
+			agentResult = &agent.Result{Description: lastAgentText}
 		}
 	}
 

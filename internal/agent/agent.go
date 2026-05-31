@@ -100,7 +100,55 @@ type Result struct {
 	Cost cost.Report
 }
 
-// Agent defines the interface for agentic execution inside a VM.
+// Agent defines the interface for agentic execution inside a VM. Start opens a
+// stateful conversation against the LLM so the orchestrator can drive multiple
+// turns (first run plus optional retries after validation failure) without the
+// agent implementation losing its message history.
 type Agent interface {
-	Run(ctx context.Context, agentCtx *Context) (*Result, error)
+	// Start opens a stateful conversation. The first Run consumes the prompt
+	// from agentCtx.Prompt; subsequent Runs append the followup string as the
+	// next user message.
+	Start(ctx context.Context, agentCtx *Context) (Conversation, error)
+}
+
+// Conversation is a multi-call handle returned by Agent.Start. The same handle
+// can be driven through several Run turns so the LLM keeps the full message
+// history (including tool calls and their results) across iterations.
+type Conversation interface {
+	// Run executes one agentic turn against the persistent message history.
+	// An empty followup is only valid on the first call (the constructor's
+	// prompt is used). Returns the assistant's final text for this turn.
+	Run(ctx context.Context, followup string) (string, error)
+
+	// Summarize produces the commit title + PR body after a successful final
+	// turn. Splitting this out from Run means the cheap summary call is
+	// skipped on intermediate iterations.
+	Summarize(ctx context.Context) (*Result, error)
+
+	// Close releases any resources held by the conversation. Safe to call
+	// after Summarize. Callers should use `defer conv.Close()`.
+	Close() error
+}
+
+// RunOnce is the convenience wrapper that preserves the old "single
+// conversation, summary baked in" semantics for callers that don't need
+// retries. It performs Start → Run("") → (Summarize for writing modes) → Close.
+func RunOnce(ctx context.Context, a Agent, agentCtx *Context) (*Result, error) {
+	conv, err := a.Start(ctx, agentCtx)
+	if err != nil {
+		return nil, err
+	}
+	defer conv.Close()
+
+	finalText, err := conv.Run(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+
+	writes := agentCtx.Mode == nil || agentCtx.Mode.WritesChanges()
+	if !writes {
+		return &Result{Description: finalText}, nil
+	}
+
+	return conv.Summarize(ctx)
 }

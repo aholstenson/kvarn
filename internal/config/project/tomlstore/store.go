@@ -17,20 +17,22 @@ type fileData struct {
 }
 
 type jobEntry struct {
-	MaxCostUSD *float64 `toml:"max_cost_usd,omitempty"`
+	MaxCostUSD           *float64 `toml:"max_cost_usd,omitempty"`
+	MaxValidationRetries *int     `toml:"max_validation_retries,omitempty"`
 }
 
 type projectEntry struct {
-	Repo              string              `toml:"repo"`
-	DefaultBranch     string              `toml:"default_branch,omitempty"`
-	Forge             string              `toml:"forge,omitempty"`
-	MaxCostUSD        *float64            `toml:"max_cost_usd,omitempty"`
-	ReportCostOnPR    *bool               `toml:"report_cost_on_pr,omitempty"`
-	Jobs              map[string]jobEntry `toml:"jobs,omitempty"`
-	BranchPrefix      string              `toml:"branch_prefix,omitempty"`
-	Labels            []string            `toml:"labels,omitempty"`
-	CommitAuthorName  string              `toml:"commit_author_name,omitempty"`
-	CommitAuthorEmail string              `toml:"commit_author_email,omitempty"`
+	Repo                 string              `toml:"repo"`
+	DefaultBranch        string              `toml:"default_branch,omitempty"`
+	Forge                string              `toml:"forge,omitempty"`
+	MaxCostUSD           *float64            `toml:"max_cost_usd,omitempty"`
+	ReportCostOnPR       *bool               `toml:"report_cost_on_pr,omitempty"`
+	MaxValidationRetries *int                `toml:"max_validation_retries,omitempty"`
+	Jobs                 map[string]jobEntry `toml:"jobs,omitempty"`
+	BranchPrefix         string              `toml:"branch_prefix,omitempty"`
+	Labels               []string            `toml:"labels,omitempty"`
+	CommitAuthorName     string              `toml:"commit_author_name,omitempty"`
+	CommitAuthorEmail    string              `toml:"commit_author_email,omitempty"`
 }
 
 // Store is a TOML file-backed project store.
@@ -87,23 +89,27 @@ func entryToProject(name string, entry *projectEntry) *project.Project {
 	if len(entry.Jobs) > 0 {
 		jobs = make(map[string]project.JobLimits, len(entry.Jobs))
 		for mode, j := range entry.Jobs {
-			jobs[mode] = project.JobLimits{MaxCostUSD: j.MaxCostUSD}
+			jobs[mode] = project.JobLimits{
+				MaxCostUSD:           j.MaxCostUSD,
+				MaxValidationRetries: j.MaxValidationRetries,
+			}
 		}
 	}
 	labels := make([]string, len(entry.Labels))
 	copy(labels, entry.Labels)
 	return &project.Project{
-		Name:              name,
-		RepoURL:           entry.Repo,
-		DefaultBranch:     entry.DefaultBranch,
-		Forge:             entry.Forge,
-		MaxCostUSD:        entry.MaxCostUSD,
-		ReportCostOnPR:    entry.ReportCostOnPR,
-		Jobs:              jobs,
-		BranchPrefix:      entry.BranchPrefix,
-		Labels:            labels,
-		CommitAuthorName:  entry.CommitAuthorName,
-		CommitAuthorEmail: entry.CommitAuthorEmail,
+		Name:                 name,
+		RepoURL:              entry.Repo,
+		DefaultBranch:        entry.DefaultBranch,
+		Forge:                entry.Forge,
+		MaxCostUSD:           entry.MaxCostUSD,
+		ReportCostOnPR:       entry.ReportCostOnPR,
+		MaxValidationRetries: entry.MaxValidationRetries,
+		Jobs:                 jobs,
+		BranchPrefix:         entry.BranchPrefix,
+		Labels:               labels,
+		CommitAuthorName:     entry.CommitAuthorName,
+		CommitAuthorEmail:    entry.CommitAuthorEmail,
 	}
 }
 
@@ -112,20 +118,24 @@ func projectToEntry(p *project.Project) *projectEntry {
 	if len(p.Jobs) > 0 {
 		jobs = make(map[string]jobEntry, len(p.Jobs))
 		for mode, j := range p.Jobs {
-			jobs[mode] = jobEntry{MaxCostUSD: j.MaxCostUSD}
+			jobs[mode] = jobEntry{
+				MaxCostUSD:           j.MaxCostUSD,
+				MaxValidationRetries: j.MaxValidationRetries,
+			}
 		}
 	}
 	return &projectEntry{
-		Repo:              p.RepoURL,
-		DefaultBranch:     p.DefaultBranch,
-		Forge:             p.Forge,
-		MaxCostUSD:        p.MaxCostUSD,
-		ReportCostOnPR:    p.ReportCostOnPR,
-		Jobs:              jobs,
-		BranchPrefix:      p.BranchPrefix,
-		Labels:            p.Labels,
-		CommitAuthorName:  p.CommitAuthorName,
-		CommitAuthorEmail: p.CommitAuthorEmail,
+		Repo:                 p.RepoURL,
+		DefaultBranch:        p.DefaultBranch,
+		Forge:                p.Forge,
+		MaxCostUSD:           p.MaxCostUSD,
+		ReportCostOnPR:       p.ReportCostOnPR,
+		MaxValidationRetries: p.MaxValidationRetries,
+		Jobs:                 jobs,
+		BranchPrefix:         p.BranchPrefix,
+		Labels:               p.Labels,
+		CommitAuthorName:     p.CommitAuthorName,
+		CommitAuthorEmail:    p.CommitAuthorEmail,
 	}
 }
 

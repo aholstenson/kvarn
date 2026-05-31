@@ -11,6 +11,7 @@ import (
 
 func f(v float64) *float64 { return &v }
 func b(v bool) *bool       { return &v }
+func i(v int) *int         { return &v }
 
 var _ = Describe("Resolve", func() {
 	It("falls back to built-ins when nothing is set", func() {
@@ -75,5 +76,54 @@ var _ = Describe("Resolve", func() {
 	It("WarnThreshold is user-level only", func() {
 		out := limits.Resolve(nil, modelcfg.Defaults{WarnThreshold: f(0.5)}, "implement")
 		Expect(out.WarnThreshold).To(Equal(0.5))
+	})
+
+	It("falls back to the built-in MaxValidationRetries", func() {
+		out := limits.Resolve(nil, modelcfg.Defaults{}, "implement")
+		Expect(out.MaxValidationRetries).To(Equal(limits.BuiltinMaxValidationRetries))
+	})
+
+	It("uses defaults.max_validation_retries when set", func() {
+		out := limits.Resolve(nil, modelcfg.Defaults{MaxValidationRetries: i(7)}, "implement")
+		Expect(out.MaxValidationRetries).To(Equal(7))
+	})
+
+	It("uses defaults.jobs.<mode>.max_validation_retries over defaults", func() {
+		defaults := modelcfg.Defaults{
+			MaxValidationRetries: i(7),
+			Jobs: map[string]modelcfg.JobDefaults{
+				"implement": {MaxValidationRetries: i(2)},
+			},
+		}
+		Expect(limits.Resolve(nil, defaults, "implement").MaxValidationRetries).To(Equal(2))
+		Expect(limits.Resolve(nil, defaults, "fix").MaxValidationRetries).To(Equal(7))
+	})
+
+	It("uses project.max_validation_retries over defaults", func() {
+		defaults := modelcfg.Defaults{
+			MaxValidationRetries: i(7),
+			Jobs:                 map[string]modelcfg.JobDefaults{"implement": {MaxValidationRetries: i(2)}},
+		}
+		proj := &project.Project{MaxValidationRetries: i(5)}
+		Expect(limits.Resolve(proj, defaults, "implement").MaxValidationRetries).To(Equal(5))
+	})
+
+	It("uses project.jobs.<mode>.max_validation_retries over project.max_validation_retries", func() {
+		defaults := modelcfg.Defaults{
+			MaxValidationRetries: i(7),
+			Jobs:                 map[string]modelcfg.JobDefaults{"implement": {MaxValidationRetries: i(2)}},
+		}
+		proj := &project.Project{
+			MaxValidationRetries: i(5),
+			Jobs:                 map[string]project.JobLimits{"implement": {MaxValidationRetries: i(1)}},
+		}
+		Expect(limits.Resolve(proj, defaults, "implement").MaxValidationRetries).To(Equal(1))
+		Expect(limits.Resolve(proj, defaults, "fix").MaxValidationRetries).To(Equal(5))
+	})
+
+	It("honours MaxValidationRetries=0 as 'no retries'", func() {
+		proj := &project.Project{MaxValidationRetries: i(0)}
+		Expect(limits.Resolve(proj, modelcfg.Defaults{MaxValidationRetries: i(5)}, "implement").MaxValidationRetries).
+			To(Equal(0))
 	})
 })

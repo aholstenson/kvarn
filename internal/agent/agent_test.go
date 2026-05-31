@@ -10,9 +10,9 @@ import (
 )
 
 var _ = Describe("NoopAgent", func() {
-	It("runs without error", func() {
+	It("runs without error via RunOnce", func() {
 		a := &agent.NoopAgent{}
-		result, err := a.Run(context.Background(), &agent.Context{
+		result, err := agent.RunOnce(context.Background(), a, &agent.Context{
 			ProjectName: "test",
 			Prompt:      "do something",
 			WorkingDir:  "/home/kvarn/workspace",

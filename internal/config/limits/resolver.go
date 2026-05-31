@@ -11,19 +11,22 @@ import (
 // Built-in fallbacks. These apply only when neither project nor defaults
 // configure a value; they keep a brand-new install from running forever.
 const (
-	BuiltinMaxCostUSD     = 5.00
-	BuiltinWarnThreshold  = 0.80
-	BuiltinReportCostOnPR = true
+	BuiltinMaxCostUSD           = 5.00
+	BuiltinWarnThreshold        = 0.80
+	BuiltinReportCostOnPR       = true
+	BuiltinMaxValidationRetries = 3
 )
 
 // Limits is the resolved per-job configuration. MaxCostUSD is the hard cap;
 // WarnThreshold is the fraction of MaxCostUSD at which the soft warning
 // fires; ReportCostOnPR decides whether the work-log PR comment shows the
-// cost section.
+// cost section; MaxValidationRetries is the maximum number of additional
+// agent passes allowed after the first when required validation fails.
 type Limits struct {
-	MaxCostUSD     float64
-	WarnThreshold  float64
-	ReportCostOnPR bool
+	MaxCostUSD           float64
+	WarnThreshold        float64
+	ReportCostOnPR       bool
+	MaxValidationRetries int
 }
 
 // Resolve produces a Limits value for the given (project, defaults, mode)
@@ -38,13 +41,17 @@ type Limits struct {
 // ReportCostOnPR resolves project → defaults → built-in. WarnThreshold is
 // user-level only (defaults → built-in); there is no project knob.
 //
+// MaxValidationRetries follows the same five-step rule as MaxCostUSD
+// (project.jobs.<mode> → project → defaults.jobs.<mode> → defaults → builtin).
+//
 // Both arguments may be nil/zero. A nil project means "no project-level
 // overrides"; a zero Defaults means "no user-level config".
 func Resolve(proj *project.Project, defaults modelcfg.Defaults, mode string) Limits {
 	out := Limits{
-		MaxCostUSD:     BuiltinMaxCostUSD,
-		WarnThreshold:  BuiltinWarnThreshold,
-		ReportCostOnPR: BuiltinReportCostOnPR,
+		MaxCostUSD:           BuiltinMaxCostUSD,
+		WarnThreshold:        BuiltinWarnThreshold,
+		ReportCostOnPR:       BuiltinReportCostOnPR,
+		MaxValidationRetries: BuiltinMaxValidationRetries,
 	}
 
 	if defaults.MaxCostUSD != nil {
@@ -63,6 +70,25 @@ func Resolve(proj *project.Project, defaults modelcfg.Defaults, mode string) Lim
 		if mode != "" {
 			if j, ok := proj.Jobs[mode]; ok && j.MaxCostUSD != nil {
 				out.MaxCostUSD = *j.MaxCostUSD
+			}
+		}
+	}
+
+	if defaults.MaxValidationRetries != nil {
+		out.MaxValidationRetries = *defaults.MaxValidationRetries
+	}
+	if mode != "" {
+		if j, ok := defaults.Jobs[mode]; ok && j.MaxValidationRetries != nil {
+			out.MaxValidationRetries = *j.MaxValidationRetries
+		}
+	}
+	if proj != nil {
+		if proj.MaxValidationRetries != nil {
+			out.MaxValidationRetries = *proj.MaxValidationRetries
+		}
+		if mode != "" {
+			if j, ok := proj.Jobs[mode]; ok && j.MaxValidationRetries != nil {
+				out.MaxValidationRetries = *j.MaxValidationRetries
 			}
 		}
 	}

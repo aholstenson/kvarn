@@ -24,16 +24,18 @@ type entryData struct {
 
 // jobDefaults mirrors a single [defaults.jobs.<mode>] block.
 type jobDefaults struct {
-	MaxCostUSD *float64 `toml:"max_cost_usd,omitempty"`
+	MaxCostUSD           *float64 `toml:"max_cost_usd,omitempty"`
+	MaxValidationRetries *int     `toml:"max_validation_retries,omitempty"`
 }
 
 // defaultsData mirrors the [defaults] block. The Jobs map carries per-mode
 // overrides keyed by mode name (auto, implement, fix, review, research).
 type defaultsData struct {
-	MaxCostUSD     *float64               `toml:"max_cost_usd,omitempty"`
-	WarnThreshold  *float64               `toml:"warn_threshold,omitempty"`
-	ReportCostOnPR *bool                  `toml:"report_cost_on_pr,omitempty"`
-	Jobs           map[string]jobDefaults `toml:"jobs,omitempty"`
+	MaxCostUSD           *float64               `toml:"max_cost_usd,omitempty"`
+	WarnThreshold        *float64               `toml:"warn_threshold,omitempty"`
+	ReportCostOnPR       *bool                  `toml:"report_cost_on_pr,omitempty"`
+	MaxValidationRetries *int                   `toml:"max_validation_retries,omitempty"`
+	Jobs                 map[string]jobDefaults `toml:"jobs,omitempty"`
 }
 
 // fileData mirrors the on-disk layout:
@@ -132,14 +134,18 @@ func (s *Store) Defaults(_ context.Context) (modelcfg.Defaults, error) {
 	}
 
 	out := modelcfg.Defaults{
-		MaxCostUSD:     fd.Defaults.MaxCostUSD,
-		WarnThreshold:  fd.Defaults.WarnThreshold,
-		ReportCostOnPR: fd.Defaults.ReportCostOnPR,
+		MaxCostUSD:           fd.Defaults.MaxCostUSD,
+		WarnThreshold:        fd.Defaults.WarnThreshold,
+		ReportCostOnPR:       fd.Defaults.ReportCostOnPR,
+		MaxValidationRetries: fd.Defaults.MaxValidationRetries,
 	}
 	if len(fd.Defaults.Jobs) > 0 {
 		out.Jobs = make(map[string]modelcfg.JobDefaults, len(fd.Defaults.Jobs))
 		for mode, j := range fd.Defaults.Jobs {
-			out.Jobs[mode] = modelcfg.JobDefaults{MaxCostUSD: j.MaxCostUSD}
+			out.Jobs[mode] = modelcfg.JobDefaults{
+				MaxCostUSD:           j.MaxCostUSD,
+				MaxValidationRetries: j.MaxValidationRetries,
+			}
 		}
 	}
 	return out, nil
