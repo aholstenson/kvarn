@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.2.0](https://github.com/aholstenson/kvarn/compare/v0.1.0...v0.2.0) (2026-05-31)
+
+
+### Features
+
+* Ability to limit number of jobs executing based on their resource usage ([224035f](https://github.com/aholstenson/kvarn/commit/224035fcf4b831ce228133b9be5205780038f1dd))
+* Add improved operating instructions for agent ([4545b54](https://github.com/aholstenson/kvarn/commit/4545b5495d69128e336da34cedeb7a38e8055f63))
+* Add observability metrics and improve logging ([e87baa8](https://github.com/aholstenson/kvarn/commit/e87baa886424bda08f292e8533085f8aeca5bce3))
+* Clean up orphaned VMs and limit their runtime ([261a7c5](https://github.com/aholstenson/kvarn/commit/261a7c5e960e83f00de634cd22bf08ce47ff61cb))
+* Graceful shutdown of orchestrator ([ad08eea](https://github.com/aholstenson/kvarn/commit/ad08eea934a42a2468219509f145a6e23131b92d))
+* Harden runner bridge against in-VM impersonation ([f3cb040](https://github.com/aholstenson/kvarn/commit/f3cb040216a832001c3b3123781c8797c096dc75))
+* Improve caching layer to support lockfiles ([5d34c3e](https://github.com/aholstenson/kvarn/commit/5d34c3e2acaff8eb725c9385825e0448f012dc49))
+* Improve UI for local commands ([6d00fe7](https://github.com/aholstenson/kvarn/commit/6d00fe7e42a319a0903d19f8ff107114af4f4e38))
+* Protect against multiple processes changing the same file ([a91275f](https://github.com/aholstenson/kvarn/commit/a91275f9d98dbb1488cbe592d9d95960b485a78a))
+* Support for per-project overrides of branch and commit info ([10e471f](https://github.com/aholstenson/kvarn/commit/10e471f043b2386d548405c36b6dd9e3eefb2e3a))
+* Use commit title to create branch name ([103a639](https://github.com/aholstenson/kvarn/commit/103a639d83ce890ab4188957bed9a7bc4ec98296))
+* Use reasoning effort instead of thinking tokens ([d3ce214](https://github.com/aholstenson/kvarn/commit/d3ce21414d5bb52f7af6159cc7ed661aec50d34f))
+* When validation step fails ask agent to fix it ([ad2ef7e](https://github.com/aholstenson/kvarn/commit/ad2ef7e83a0ff998e25e0e816259b7e0d90d9371))
+
+
+### Bug Fixes
+
+* Avoid leaking auth rejected details over API ([d4b5f96](https://github.com/aholstenson/kvarn/commit/d4b5f961528c4a459c2dd6078e537b03c4aaaa55))
+
 ## 0.1.0 (2026-05-22)
 
 
