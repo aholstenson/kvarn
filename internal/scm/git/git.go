@@ -194,6 +194,7 @@ func authMethod(url string, creds *scm.Credentials) (transport.AuthMethod, error
 			if err != nil {
 				return nil, fmt.Errorf("ssh key: %w", err)
 			}
+			keys.HostKeyCallback = newHostKeyCallback()
 			slog.Info("using SSH key auth")
 			return keys, nil
 		}
