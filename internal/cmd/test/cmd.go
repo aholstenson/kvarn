@@ -18,6 +18,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/config/secret"
 	secrettoml "github.com/aholstenson/kvarn/internal/config/secret/tomlstore"
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
+	"github.com/aholstenson/kvarn/internal/linebuf"
 	"github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
@@ -296,10 +297,23 @@ func (c *Cmd) Run() error {
 		func(string, string, string, string),
 	) {
 		childItems := make(map[string]*taskui.Item, len(steps))
+		stdoutBufs := make(map[string]*linebuf.Buffer, len(steps))
+		stderrBufs := make(map[string]*linebuf.Buffer, len(steps))
 		for _, step := range steps {
 			child := renderer.AddChild(parent, step.Name)
 			child.Status = taskui.StatusPending
 			childItems[step.Name] = child
+			stdoutBufs[step.Name] = &linebuf.Buffer{}
+			stderrBufs[step.Name] = &linebuf.Buffer{}
+		}
+
+		bufFor := func(m map[string]*linebuf.Buffer, name string) *linebuf.Buffer {
+			buf, ok := m[name]
+			if !ok {
+				buf = &linebuf.Buffer{}
+				m[name] = buf
+			}
+			return buf
 		}
 
 		outputCb := func(stepName string, _ string, stdout string, stderr string) {
@@ -311,15 +325,11 @@ func (c *Cmd) Run() error {
 			if item.Status == taskui.StatusPending {
 				renderer.SetStatus(item, taskui.StatusRunning, "")
 			}
-			for _, line := range strings.Split(strings.TrimRight(stdout, "\n"), "\n") {
-				if line != "" {
-					renderer.AppendOutput(item, line)
-				}
+			for _, line := range bufFor(stdoutBufs, stepName).Append(stdout) {
+				renderer.AppendOutput(item, line)
 			}
-			for _, line := range strings.Split(strings.TrimRight(stderr, "\n"), "\n") {
-				if line != "" {
-					renderer.AppendOutput(item, line)
-				}
+			for _, line := range bufFor(stderrBufs, stepName).Append(stderr) {
+				renderer.AppendOutput(item, line)
 			}
 		}
 
@@ -330,6 +340,15 @@ func (c *Cmd) Run() error {
 				childItems[result.Name] = item
 			}
 
+			// Flush any partial trailing line so an unterminated final chunk
+			// still appears in the live view.
+			if tail := bufFor(stdoutBufs, result.Name).Flush(); tail != "" {
+				renderer.AppendOutput(item, tail)
+			}
+			if tail := bufFor(stderrBufs, result.Name).Flush(); tail != "" {
+				renderer.AppendOutput(item, tail)
+			}
+
 			if result.Skipped {
 				summary.skipped++
 				renderer.SetStatus(item, taskui.StatusSkipped, "(no matching files)")
@@ -337,27 +356,23 @@ func (c *Cmd) Run() error {
 				summary.failed++
 				renderer.SetStatus(item, taskui.StatusFailed, "")
 
-				// Save details for reprinting after the TUI.
-				hasOutput := len(item.Output) > 0
-				if !hasOutput {
-					summary.failedDetails = append(summary.failedDetails, stepOutput{
-						name:   result.Name,
-						stdout: result.Stdout,
-						stderr: result.Stderr,
-						err:    result.Err,
-					})
-				} else if result.Err != nil {
-					summary.failedDetails = append(summary.failedDetails, stepOutput{
-						name: result.Name,
-						err:  result.Err,
-					})
-				}
+				// StepResult carries the complete output from the final RPC
+				// response, so the post-run dump always replays the full body
+				// regardless of what the live tail was capped to.
+				summary.failedDetails = append(summary.failedDetails, stepOutput{
+					name:   result.Name,
+					stdout: result.Stdout,
+					stderr: result.Stderr,
+					err:    result.Err,
+				})
 			} else {
 				summary.passed++
 				renderer.SetStatus(item, taskui.StatusPassed, "")
 			}
 
 			delete(childItems, result.Name)
+			delete(stdoutBufs, result.Name)
+			delete(stderrBufs, result.Name)
 		}
 
 		return stepDone, outputCb
