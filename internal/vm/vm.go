@@ -3,6 +3,7 @@ package vm
 import (
 	"context"
 	"net"
+	"net/http"
 	"time"
 
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
@@ -76,6 +77,22 @@ type NetworkConfig struct {
 	// SecretInjector enriches outbound proxied requests with credentials
 	// before they are sent upstream. May be nil to forward unmodified.
 	SecretInjector egressproxy.SecretInjector
+
+	// ImageCacheHandler, when non-nil, is bound on the per-VM gateway IP
+	// at ImageCachePort so the VM's container runtime can use it as a
+	// pull-through OCI registry mirror. Same handler is shared across
+	// every VM — the cache itself is global, content-addressed, and
+	// project-agnostic.
+	ImageCacheHandler http.Handler
+
+	// ImageCachePort is the TCP port for ImageCacheHandler on the gateway
+	// IP. Ignored when ImageCacheHandler is nil.
+	ImageCachePort uint16
+
+	// ImageCacheUpstreams lists the registry hostnames the cache is
+	// configured to mirror. The cloud-init layer turns this list into
+	// one [[registry]] block per entry pointing at the gateway:port.
+	ImageCacheUpstreams []string
 }
 
 type Provider interface {

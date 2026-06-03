@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -22,6 +23,8 @@ import (
 	"github.com/aholstenson/kvarn/internal/forge"
 	forgegit "github.com/aholstenson/kvarn/internal/forge/git"
 	forgegithub "github.com/aholstenson/kvarn/internal/forge/github"
+	imageproxy "github.com/aholstenson/kvarn/internal/imagecache/proxy"
+	imagestore "github.com/aholstenson/kvarn/internal/imagecache/store"
 	"github.com/aholstenson/kvarn/internal/observability/metrics"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
@@ -178,6 +181,37 @@ func (c *Cmd) Run() error {
 		"dir", cacheProvider.BaseDir,
 	)
 
+	imageCacheCfg, err := resolveImageCacheConfig(orchFile.ImageCache)
+	if err != nil {
+		return fmt.Errorf("image-cache: %w", err)
+	}
+	var imageCacheNet vm.NetworkConfig
+	if imageCacheCfg.Enabled {
+		dir, err := imagestore.DefaultDir()
+		if err != nil {
+			return fmt.Errorf("image-cache dir: %w", err)
+		}
+		st := imagestore.New(dir)
+		handler := imageproxy.New(imageproxy.Config{
+			Store:            st,
+			Upstreams:        imageCacheCfg.Upstreams,
+			ManifestTagTTL:   imageCacheCfg.ManifestTagTTL,
+			GlobalQuotaBytes: imageCacheCfg.GlobalBytes,
+		})
+		imageCacheNet = vm.NetworkConfig{
+			ImageCacheHandler:   handler,
+			ImageCachePort:      imageCacheCfg.Port,
+			ImageCacheUpstreams: imageCacheCfg.Upstreams,
+		}
+		slog.Info("image cache enabled",
+			"dir", dir,
+			"listen", fmt.Sprintf("%s:%d", imageCacheCfg.GatewayHost, imageCacheCfg.Port),
+			"upstreams", imageCacheCfg.Upstreams,
+			"global_bytes", imageCacheCfg.GlobalBytes,
+			"manifest_tag_ttl", imageCacheCfg.ManifestTagTTL,
+		)
+	}
+
 	meter, shutdownMeter, err := metrics.Setup(ctx, metrics.Config{
 		Enabled:     c.OtelMetricsEnabled,
 		Endpoint:    c.OtelExporterEndpoint,
@@ -229,7 +263,7 @@ func (c *Cmd) Run() error {
 
 	return run(ctx, c.Addr, ServiceOpts{
 		Provider:           p,
-		CreateOpts:         vm.CreateOpts{Image: image, MaxLifetime: maxLifetime},
+		CreateOpts:         vm.CreateOpts{Image: image, MaxLifetime: maxLifetime, Network: imageCacheNet},
 		ProjectStore:       projtoml.New(projectsPath),
 		CredentialStore:    credtoml.New(credentialsPath),
 		SecretStore:        secrettoml.New(secretsPath),
@@ -260,6 +294,92 @@ const (
 	defaultCachePerProjectBytes = int64(10) * 1024 * 1024 * 1024  // 10 GiB
 	defaultCacheGlobalBytes     = int64(100) * 1024 * 1024 * 1024 // 100 GiB
 )
+
+// imageCacheResolved is the resolved image-cache configuration applied by
+// the orchestrator at startup.
+type imageCacheResolved struct {
+	Enabled        bool
+	GatewayHost    string
+	Port           uint16
+	Upstreams      []string
+	ManifestTagTTL time.Duration
+	GlobalBytes    int64
+}
+
+const (
+	defaultImageCacheGlobalBytes    = int64(50) * 1024 * 1024 * 1024 // 50 GiB
+	defaultImageCacheManifestTagTTL = 5 * time.Minute
+	defaultImageCacheListenAddr     = "10.0.2.1:5000"
+)
+
+var defaultImageCacheUpstreams = []string{"docker.io", "ghcr.io", "quay.io", "gcr.io"}
+
+func resolveImageCacheConfig(c orchcfg.ImageCache) (imageCacheResolved, error) {
+	out := imageCacheResolved{
+		Enabled:        true,
+		Upstreams:      defaultImageCacheUpstreams,
+		ManifestTagTTL: defaultImageCacheManifestTagTTL,
+		GlobalBytes:    defaultImageCacheGlobalBytes,
+	}
+	if c.Enabled != nil {
+		out.Enabled = *c.Enabled
+	}
+	listen := c.ListenAddr
+	if listen == "" {
+		listen = defaultImageCacheListenAddr
+	}
+	host, port, err := splitHostPort(listen)
+	if err != nil {
+		return imageCacheResolved{}, fmt.Errorf("listen_addr: %w", err)
+	}
+	out.GatewayHost = host
+	out.Port = port
+	if len(c.Upstreams) > 0 {
+		out.Upstreams = append([]string(nil), c.Upstreams...)
+	}
+	if c.ManifestTagTTL != "" {
+		d, err := time.ParseDuration(c.ManifestTagTTL)
+		if err != nil {
+			return imageCacheResolved{}, fmt.Errorf("manifest_tag_ttl: %w", err)
+		}
+		if d <= 0 {
+			return imageCacheResolved{}, fmt.Errorf("manifest_tag_ttl must be positive")
+		}
+		out.ManifestTagTTL = d
+	}
+	if c.GlobalBytes != "" {
+		n, err := projconfig.ParseSize(c.GlobalBytes)
+		if err != nil {
+			return imageCacheResolved{}, fmt.Errorf("global_bytes: %w", err)
+		}
+		out.GlobalBytes = n
+	}
+	return out, nil
+}
+
+// splitHostPort parses a "host:port" pair, requiring port to be a positive
+// uint16. The host portion is returned verbatim so IPv4/IPv6/hostnames all
+// work; this layer doesn't validate it further because the gvisor listener
+// will reject an invalid bind on startup.
+func splitHostPort(s string) (string, uint16, error) {
+	i := -1
+	for j := len(s) - 1; j >= 0; j-- {
+		if s[j] == ':' {
+			i = j
+			break
+		}
+	}
+	if i < 0 || i == len(s)-1 {
+		return "", 0, fmt.Errorf("expected host:port, got %q", s)
+	}
+	host := s[:i]
+	portStr := s[i+1:]
+	p, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil || p == 0 {
+		return "", 0, fmt.Errorf("invalid port %q", portStr)
+	}
+	return host, uint16(p), nil
+}
 
 // resolveCacheQuota parses the [cache] quotas, falling back to the built-in
 // defaults when a field is empty.

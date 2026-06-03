@@ -71,6 +71,38 @@ var _ = Describe("CreateCloudInitDisk", func() {
 		Expect(userData).NotTo(ContainSubstring("kvarn-proxy.crt"))
 	})
 
+	It("writes a registries.conf mirror block when ImageCacheAddr is set", func() {
+		path := GinkgoT().TempDir() + "/cidata.iso"
+
+		Expect(disk.CreateCloudInitDisk(path, disk.CloudInitOpts{
+			Token:               "tok",
+			VsockPort:           1024,
+			ImageCacheAddr:      "10.0.2.1:5000",
+			ImageCacheUpstreams: []string{"docker.io", "ghcr.io"},
+		})).To(Succeed())
+
+		d, err := diskfs.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		defer d.Close()
+
+		fs, err := d.GetFilesystem(0)
+		Expect(err).NotTo(HaveOccurred())
+
+		userDataPath := "/user-data"
+		if _, err := fs.OpenFile(userDataPath, os.O_RDONLY); err != nil {
+			userDataPath = "/USER_DATA.;1"
+		}
+		userData := readISOFile(fs, userDataPath)
+		Expect(userData).To(ContainSubstring("/etc/containers/registries.conf.d/01-mirrors.conf"))
+		Expect(userData).To(ContainSubstring(`location = "docker.io"`))
+		Expect(userData).To(ContainSubstring(`location = "ghcr.io"`))
+		// Mirror location embeds the upstream suffix so the cache's
+		// /v2/<upstream>/<repo>/... routing receives the upstream name.
+		Expect(userData).To(ContainSubstring(`location = "10.0.2.1:5000/docker.io"`))
+		Expect(userData).To(ContainSubstring(`location = "10.0.2.1:5000/ghcr.io"`))
+		Expect(userData).To(ContainSubstring("insecure = true"))
+	})
+
 	It("includes the proxy CA when provided", func() {
 		path := GinkgoT().TempDir() + "/cidata.iso"
 

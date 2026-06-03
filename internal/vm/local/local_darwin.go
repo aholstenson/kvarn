@@ -142,12 +142,17 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	// Create cloud-init seed disk with per-VM token, vsock port, CA, and the
 	// runner binary the in-VM setup script stages.
 	tmpSeed = tmpDisk + ".cidata.iso"
-	if err := disk.CreateCloudInitDisk(tmpSeed, disk.CloudInitOpts{
-		Token:     token,
-		VsockPort: vsockPort,
-		Runner:    runnerBin,
-		ProxyCA:   ca.CertPEM(),
-	}); err != nil {
+	cloudInit := disk.CloudInitOpts{
+		Token:               token,
+		VsockPort:           vsockPort,
+		Runner:              runnerBin,
+		ProxyCA:             ca.CertPEM(),
+		ImageCacheUpstreams: opts.Network.ImageCacheUpstreams,
+	}
+	if opts.Network.ImageCacheHandler != nil && opts.Network.ImageCachePort != 0 {
+		cloudInit.ImageCacheAddr = fmt.Sprintf("%s:%d", link.GatewayIP, opts.Network.ImageCachePort)
+	}
+	if err := disk.CreateCloudInitDisk(tmpSeed, cloudInit); err != nil {
 		return nil, nil, fmt.Errorf("create cloud-init seed disk: %w", err)
 	}
 

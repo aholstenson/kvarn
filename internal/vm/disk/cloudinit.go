@@ -31,6 +31,17 @@ type CloudInitOpts struct {
 	// update-ca-certificates is run on first boot so that in-VM TLS
 	// clients trust the per-VM egress proxy.
 	ProxyCA []byte
+
+	// ImageCacheAddr is the "host:port" of the in-VM pull-through OCI
+	// registry mirror. When non-empty together with ImageCacheUpstreams,
+	// cloud-init writes a containers/registries.conf.d drop-in that lists
+	// each upstream with the mirror pointed at this address.
+	ImageCacheAddr string
+
+	// ImageCacheUpstreams names the registry hostnames the mirror serves
+	// (e.g. "docker.io", "ghcr.io"). One [[registry]] block is emitted per
+	// entry. Ignored when ImageCacheAddr is empty.
+	ImageCacheUpstreams []string
 }
 
 // CreateCloudInitDisk creates an ISO9660 image with the NoCloud datasource
@@ -134,6 +145,32 @@ func buildUserData(opts CloudInitOpts) string {
 			b.WriteString(line)
 			b.WriteByte('\n')
 		}
+	}
+	if opts.ImageCacheAddr != "" && len(opts.ImageCacheUpstreams) > 0 {
+		// Drop-in sorts after the base image's 00-kvarn.conf, so
+		// unqualified-search-registries stays in place and we only add
+		// mirror blocks on top. insecure=true is safe because the cache
+		// only listens on the gateway IP inside this VM's private
+		// netstack — no other process can reach it.
+		//
+		// The mirror location embeds the upstream name as a path suffix
+		// (e.g. "10.0.2.1:5000/docker.io"). Podman rewrites a pull of
+		// docker.io/library/python:3.12 into a request for
+		// /v2/docker.io/library/python/manifests/3.12, which is what the
+		// cache handler routes on. Without the suffix the upstream prefix
+		// would be stripped and every request would 404.
+		b.WriteString("  - path: /etc/containers/registries.conf.d/01-mirrors.conf\n")
+		b.WriteString("    permissions: '0644'\n")
+		b.WriteString("    content: |\n")
+		for _, ups := range opts.ImageCacheUpstreams {
+			fmt.Fprintf(&b, "      [[registry]]\n")
+			fmt.Fprintf(&b, "      location = %q\n", ups)
+			fmt.Fprintf(&b, "      [[registry.mirror]]\n")
+			fmt.Fprintf(&b, "      location = %q\n", opts.ImageCacheAddr+"/"+ups)
+			fmt.Fprintf(&b, "      insecure = true\n")
+		}
+	}
+	if len(opts.ProxyCA) > 0 {
 		b.WriteString("runcmd:\n")
 		b.WriteString("  - update-ca-certificates\n")
 	}

@@ -16,8 +16,21 @@ import (
 // value is meaningful, e.g. CPUs=0) so callers can distinguish "operator set
 // this explicitly" from "operator left it unset, fall through to defaults".
 type Config struct {
-	Scheduler Scheduler `toml:"scheduler"`
-	Cache     Cache     `toml:"cache"`
+	Scheduler  Scheduler  `toml:"scheduler"`
+	Cache      Cache      `toml:"cache"`
+	ImageCache ImageCache `toml:"image-cache"`
+}
+
+// ImageCache mirrors the [image-cache] table: configuration for the
+// pull-through OCI image cache that sits on the per-VM gvisor gateway.
+// Empty fields fall through to the built-in defaults applied by the CLI
+// layer.
+type ImageCache struct {
+	Enabled        *bool    `toml:"enabled,omitempty"`
+	ListenAddr     string   `toml:"listen_addr,omitempty"`
+	GlobalBytes    string   `toml:"global_bytes,omitempty"`
+	Upstreams      []string `toml:"upstreams,omitempty"`
+	ManifestTagTTL string   `toml:"manifest_tag_ttl,omitempty"`
 }
 
 // Cache mirrors the [cache] table: the disk quotas for the tool-cache LRU

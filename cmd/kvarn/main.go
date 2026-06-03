@@ -3,6 +3,7 @@ package main
 import (
 	cachecmd "github.com/aholstenson/kvarn/internal/cmd/cache"
 	imagecmd "github.com/aholstenson/kvarn/internal/cmd/image"
+	imagecachecmd "github.com/aholstenson/kvarn/internal/cmd/imagecache"
 	"github.com/aholstenson/kvarn/internal/cmd/key"
 	runcmd "github.com/aholstenson/kvarn/internal/cmd/run"
 	"github.com/aholstenson/kvarn/internal/cmd/secrets"
@@ -22,6 +23,7 @@ type CLI struct {
 	Test         testcmd.Cmd      `cmd:"" help:"Test project configuration in a local VM."`
 	Image        imagecmd.Cmd     `cmd:"" help:"Manage the VM disk image."`
 	Cache        cachecmd.Cmd     `cmd:"" help:"Inspect and clear tool caches."`
+	ImageCache   imagecachecmd.Cmd `cmd:"" name:"image-cache" help:"Inspect and manage the pull-through OCI image cache."`
 }
 
 func main() {
