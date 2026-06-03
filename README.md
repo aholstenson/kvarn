@@ -146,7 +146,7 @@ Every job runs in a throwaway VM, and the only path off that VM is a host-side e
 
 ## Project configuration
 
-Each repository is configured with `kvarn.yml` (or `kvarn.yaml`, `.kvarn.yml`, `.kvarn.yaml`). The schema is in `kvarn.schema.json`. A larger example:
+Each repository is configured with `kvarn.yml` (or `kvarn.yaml`, `.kvarn.yml`, `.kvarn.yaml`). The schema is in `kvarn.schema.json`. A full example using Nix dependencies:
 
 ```yaml
 dependencies:
@@ -166,6 +166,11 @@ network:
 cache:
   paths:
     - /home/kvarn/.cache/go-build
+  entries:
+    - path: /home/kvarn/.cache/custom-tool
+      lockfiles:
+        - package-lock.json
+      bucket: custom-tool
 
 environment:
   CI: "true"
@@ -177,6 +182,7 @@ setup:
   steps:
     - name: Install
       run: npm ci
+      working_dir: frontend
       timeout: 10m
       retry: 1
   health_checks:
@@ -194,11 +200,30 @@ validation:
         - "**/*.ts"
 ```
 
+To use an OCI container image instead of Nix for the build environment, replace `dependencies:` with `image:`:
+
+```yaml
+image: node:22-alpine
+
+setup:
+  steps:
+    - name: Install
+      run: npm ci
+      timeout: 10m
+
+validation:
+  required:
+    - name: Tests
+      run: npm test
+```
+
 Important constraints:
 
+- `vm.cpus` defaults to `2`, `vm.memory` to `4G`, and `vm.disk` to `16G`. Set them only when a job needs more (or less) than the defaults.
 - `image` and `dependencies` are mutually exclusive.
+- `dependencies` keys may be `nixpkgs`, `nixpkgs/<channel>` (e.g. `nixpkgs/nixos-24.11`), `github:owner/repo`, `gitlab:owner/repo`, `git+https://…`, `git+ssh://…`, `https://…`, or `tarball+https://…`.
 - `network.allowed_hosts` entries are hostnames or IP addresses only; do not include a scheme, path, or port.
-- `cache.paths` entries must be absolute guest paths and must not be under `/home/kvarn/workspace` or `/nix`.
+- `cache.paths` entries must be absolute guest paths and must not be under `/home/kvarn/workspace` or `/nix`. The same rule applies to `cache.entries[*].path`.
 - `environment` keys and `secrets` names must be valid POSIX environment variable names.
 - Step `working_dir` values must be relative to the workspace root.
 - Step `timeout` accepts either seconds or a Go duration string such as `30s`, `10m`, or `1h30m`.
