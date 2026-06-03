@@ -7,16 +7,19 @@
   "additionalProperties": false,
   "properties": {
     "image": {
-      "description": "Docker image to run steps in. Mutually exclusive with 'tools'.",
+      "description": "OCI container image to run steps in (e.g. \"node:22-alpine\"). Mutually exclusive with 'dependencies'.",
       "type": "string",
       "minLength": 1
     },
-    "tools": {
-      "description": "Built-in tools to install into the VM before setup. Mutually exclusive with 'image'.",
-      "type": "array",
-      "items": {
-        "type": "string",
-        "pattern": "^[a-z][a-z0-9-]*(@[a-zA-Z0-9._-]+)?$"
+    "dependencies": {
+      "description": "Nix flake sources mapped to the attribute names to install. Keys are flake references: \"nixpkgs\", \"nixpkgs/<channel>\", \"github:owner/repo\", \"gitlab:owner/repo\", \"git+https://...\", \"git+ssh://...\", \"https://...\", or \"tarball+https://...\". Mutually exclusive with 'image'.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "vm": {
@@ -25,7 +28,7 @@
       "additionalProperties": false,
       "properties": {
         "disk": {
-          "description": "Disk size (e.g. \"4G\", \"8GiB\", \"8192M\"). Minimum 4G.",
+          "description": "Disk size (e.g. \"4G\", \"8GiB\", \"8192M\"). Minimum 4G, default 16G.",
           "type": "string",
           "pattern": "^\\s*[0-9]+(M|MiB|G|GiB)\\s*$"
         },
@@ -35,7 +38,7 @@
           "minimum": 1
         },
         "memory": {
-          "description": "Memory size (e.g. \"2G\", \"4GiB\", \"512M\"). Minimum 512M.",
+          "description": "Memory size (e.g. \"2G\", \"4GiB\", \"4096M\"). Minimum 2G, default 4G.",
           "type": "string",
           "pattern": "^\\s*[0-9]+(M|MiB|G|GiB)\\s*$"
         }
@@ -62,13 +65,33 @@
       "additionalProperties": false,
       "properties": {
         "paths": {
-          "description": "Additional absolute guest paths to cache. Must not be under /home/kvarn/workspace. Tool cache paths (e.g. Go modules, npm cache) are included automatically.",
+          "description": "Additional guest paths to cache. Absolute paths are used as-is; relative paths resolve under the workspace (/home/kvarn/workspace); paths starting with ~ expand to the kvarn user's home (/home/kvarn). Caching the workspace root itself or anything under /nix is rejected. Tool cache paths (e.g. Go modules, npm cache) are included automatically.",
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^/"
+            "minLength": 1
           }
+        },
+        "entries": {
+          "description": "Keyed cache entries for fine-grained cache control. Each entry may use lockfiles for content-addressed keying, a fixed key, or a bucket name.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/cacheEntry" }
         }
+      }
+    },
+    "environment": {
+      "description": "Environment variables injected into every step inside the VM. Keys must be valid POSIX env-var names (letters, digits, underscore; must not start with a digit).",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "secrets": {
+      "description": "Names of runtime secrets the project requires. Each name must be a valid POSIX env-var name and must be registered in the orchestrator's secrets store before a job starts.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
       }
     },
     "setup": {
@@ -150,6 +173,32 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 10
+        }
+      }
+    },
+    "cacheEntry": {
+      "description": "A single keyed cache entry for a guest path.",
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Guest path to cache. Absolute paths are used as-is; relative paths resolve under the workspace (/home/kvarn/workspace); paths starting with ~ expand to the kvarn user's home (/home/kvarn). The workspace root itself and anything under /nix are rejected.",
+          "type": "string",
+          "minLength": 1
+        },
+        "lockfiles": {
+          "description": "Paths to lockfiles used to compute a content-addressed cache key (e.g. package-lock.json).",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "key": {
+          "description": "Fixed cache key string. The caller owns invalidation.",
+          "type": "string"
+        },
+        "bucket": {
+          "description": "Cache bucket name used to group related entries.",
+          "type": "string"
         }
       }
     }
