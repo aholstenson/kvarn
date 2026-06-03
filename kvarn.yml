@@ -3,6 +3,7 @@ dependencies:
     - go
     - buf
     - go-task
+    - ginkgo
 
 setup:
   steps:
@@ -11,9 +12,6 @@ setup:
     
     - name: go mod tidy
       run: go mod tidy
-
-    - name: Install Ginkgo
-      run: go install github.com/onsi/ginkgo/v2/ginkgo
 
 validation:
   required:
