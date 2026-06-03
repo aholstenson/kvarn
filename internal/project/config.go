@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -14,6 +15,13 @@ import (
 	"fmt"
 
 	"gopkg.in/yaml.v3"
+)
+
+// Guest paths inside the VM. The runner runs jobs as the unprivileged "kvarn"
+// user, with the project source mounted at GuestWorkspace.
+const (
+	GuestHome      = "/home/kvarn"
+	GuestWorkspace = "/home/kvarn/workspace"
 )
 
 const (
@@ -373,21 +381,49 @@ func Load(dir string) (*Config, error) {
 	return nil, nil
 }
 
-// validateCachePath enforces the shared rules for any guest-side cache path:
-// it must be absolute, outside the workspace (which is transferred separately),
-// and not under /nix (the store cannot round-trip as a plain tarball; a Nix
-// cache is a first-class, separate mechanism).
-func validateCachePath(field, p string) error {
-	if !filepath.IsAbs(p) {
-		return fmt.Errorf("%s entry %q must be absolute", field, p)
+// normalizeCachePath resolves a user-supplied cache path into an absolute
+// guest path:
+//   - "~" and "~/foo" expand against GuestHome
+//   - relative paths resolve under GuestWorkspace (and must not escape it via "..")
+//   - absolute paths are cleaned but otherwise left alone
+func normalizeCachePath(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "", errors.New("path is empty")
 	}
-	if strings.HasPrefix(p, "/home/kvarn/workspace") {
-		return fmt.Errorf("%s entry %q must not be under /home/kvarn/workspace", field, p)
+	switch {
+	case p == "~":
+		return GuestHome, nil
+	case strings.HasPrefix(p, "~/"):
+		return path.Join(GuestHome, p[2:]), nil
+	case path.IsAbs(p):
+		return path.Clean(p), nil
+	default:
+		abs := path.Join(GuestWorkspace, p)
+		if abs != GuestWorkspace && !strings.HasPrefix(abs, GuestWorkspace+"/") {
+			return "", fmt.Errorf("relative path %q escapes the workspace", p)
+		}
+		return abs, nil
 	}
-	if p == "/nix" || p == "/nix/store" || strings.HasPrefix(p, "/nix/") {
-		return fmt.Errorf("%s entry %q is not allowed; caching /nix is a first-class feature", field, p)
+}
+
+// validateCachePath normalizes a user-supplied cache path and enforces that it
+// resolves to a usable absolute guest path: not the workspace root itself
+// (which is transferred separately), and not under /nix (the store cannot
+// round-trip as a plain tarball; a Nix cache is a first-class, separate
+// mechanism). Subpaths of the workspace are permitted.
+func validateCachePath(field, original string) (string, error) {
+	norm, err := normalizeCachePath(original)
+	if err != nil {
+		return "", fmt.Errorf("%s entry %q: %v", field, original, err)
 	}
-	return nil
+	if norm == GuestWorkspace {
+		return "", fmt.Errorf("%s entry %q resolves to the workspace root, which is transferred separately", field, original)
+	}
+	if norm == "/nix" || strings.HasPrefix(norm, "/nix/") {
+		return "", fmt.Errorf("%s entry %q is not allowed; caching /nix is a first-class feature", field, original)
+	}
+	return norm, nil
 }
 
 func (c *Config) validate() error {
@@ -454,16 +490,22 @@ func (c *Config) validate() error {
 		}
 	}
 
-	// Validate cache paths (unkeyed) and entries (keyed overrides).
-	for _, p := range c.Cache.Paths {
-		if err := validateCachePath("cache.paths", p); err != nil {
+	// Validate cache paths (unkeyed) and entries (keyed overrides). Normalize
+	// in place so downstream code (layer derivation, cache transfer) always
+	// sees absolute guest paths.
+	for i, p := range c.Cache.Paths {
+		norm, err := validateCachePath("cache.paths", p)
+		if err != nil {
 			return err
 		}
+		c.Cache.Paths[i] = norm
 	}
-	for _, e := range c.Cache.Entries {
-		if err := validateCachePath("cache.entries", e.Path); err != nil {
+	for i, e := range c.Cache.Entries {
+		norm, err := validateCachePath("cache.entries", e.Path)
+		if err != nil {
 			return err
 		}
+		c.Cache.Entries[i].Path = norm
 	}
 
 	// Validate environment variable names and values.

@@ -661,6 +661,125 @@ setup:
 	})
 })
 
+var _ = Describe("Cache path normalization", func() {
+	var dir string
+
+	BeforeEach(func() {
+		var err error
+		dir, err = os.MkdirTemp("", "projectconfig-test-*")
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	AfterEach(func() {
+		os.RemoveAll(dir)
+	})
+
+	It("resolves relative cache paths under the workspace", func() {
+		writeYAML(dir, "kvarn.yml", `
+cache:
+  paths:
+    - target
+    - ./build/out
+  entries:
+    - path: node_modules
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+		cfg, err := project.Load(dir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Cache.Paths).To(Equal([]string{
+			"/home/kvarn/workspace/target",
+			"/home/kvarn/workspace/build/out",
+		}))
+		Expect(cfg.Cache.Entries).To(HaveLen(1))
+		Expect(cfg.Cache.Entries[0].Path).To(Equal("/home/kvarn/workspace/node_modules"))
+	})
+
+	It("expands ~ to the kvarn home", func() {
+		writeYAML(dir, "kvarn.yml", `
+cache:
+  paths:
+    - "~/.cache/custom"
+    - "~"
+  entries:
+    - path: "~/.local/state"
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+		cfg, err := project.Load(dir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Cache.Paths).To(Equal([]string{
+			"/home/kvarn/.cache/custom",
+			"/home/kvarn",
+		}))
+		Expect(cfg.Cache.Entries[0].Path).To(Equal("/home/kvarn/.local/state"))
+	})
+
+	It("leaves absolute cache paths unchanged", func() {
+		writeYAML(dir, "kvarn.yml", `
+cache:
+  paths:
+    - /var/cache/app
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+		cfg, err := project.Load(dir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Cache.Paths).To(Equal([]string{"/var/cache/app"}))
+	})
+
+	It("rejects relative paths that escape the workspace", func() {
+		writeYAML(dir, "kvarn.yml", `
+cache:
+  paths:
+    - ../escape
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+		_, err := project.Load(dir)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("escapes the workspace"))
+	})
+
+	It("rejects the workspace root itself", func() {
+		writeYAML(dir, "kvarn.yml", `
+cache:
+  paths:
+    - /home/kvarn/workspace
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+		_, err := project.Load(dir)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("workspace root"))
+	})
+
+	It("rejects empty cache paths", func() {
+		writeYAML(dir, "kvarn.yml", `
+cache:
+  paths:
+    - ""
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+		_, err := project.Load(dir)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("empty"))
+	})
+})
+
 var _ = Describe("Network config", func() {
 	var dir string
 
