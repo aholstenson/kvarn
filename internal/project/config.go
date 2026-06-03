@@ -466,7 +466,7 @@ func (c *Config) validate() error {
 			return fmt.Errorf("vm.memory: %w", err)
 		}
 		if uint64(size) < MinMemory {
-			return fmt.Errorf("vm.memory %q is below minimum of 512M", c.VM.Memory)
+			return fmt.Errorf("vm.memory %q is below minimum of 2G", c.VM.Memory)
 		}
 	}
 
