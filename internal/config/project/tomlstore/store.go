@@ -33,6 +33,7 @@ type projectEntry struct {
 	Labels               []string            `toml:"labels,omitempty"`
 	CommitAuthorName     string              `toml:"commit_author_name,omitempty"`
 	CommitAuthorEmail    string              `toml:"commit_author_email,omitempty"`
+	CloneDepth           *int                `toml:"clone_depth,omitempty"`
 }
 
 // Store is a TOML file-backed project store.
@@ -110,6 +111,7 @@ func entryToProject(name string, entry *projectEntry) *project.Project {
 		Labels:               labels,
 		CommitAuthorName:     entry.CommitAuthorName,
 		CommitAuthorEmail:    entry.CommitAuthorEmail,
+		CloneDepth:           entry.CloneDepth,
 	}
 }
 
@@ -136,6 +138,7 @@ func projectToEntry(p *project.Project) *projectEntry {
 		Labels:               p.Labels,
 		CommitAuthorName:     p.CommitAuthorName,
 		CommitAuthorEmail:    p.CommitAuthorEmail,
+		CloneDepth:           p.CloneDepth,
 	}
 }
 

@@ -40,6 +40,11 @@ type Project struct {
 	Labels            []string
 	CommitAuthorName  string
 	CommitAuthorEmail string
+	// CloneDepth overrides the default shallow-clone depth. Nil inherits
+	// scm.DefaultCloneDepth. A positive value caps history to that many
+	// commits; 0 means a full clone (use for projects whose tooling needs
+	// complete history, e.g. version inference from tags).
+	CloneDepth *int
 }
 
 // Store provides CRUD operations for projects.

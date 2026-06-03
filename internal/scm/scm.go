@@ -11,6 +11,11 @@ type Credentials struct {
 	Password   string
 }
 
+// DefaultCloneDepth bounds history fetched at job start. Deep enough for
+// `git log`/`git blame` to give the agent meaningful context, shallow enough
+// to skip the long tail of a multi-year repo.
+const DefaultCloneDepth = 100
+
 // CloneOpts configures a clone operation.
 type CloneOpts struct {
 	URL         string

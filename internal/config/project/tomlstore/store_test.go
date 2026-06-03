@@ -121,6 +121,40 @@ var _ = Describe("Project TomlStore", func() {
 		Expect(proj.CommitAuthorEmail).To(BeEmpty())
 	})
 
+	It("round-trips clone_depth override", func() {
+		depth := 250
+		Expect(store.Put(ctx, &project.Project{
+			Name:       "deep",
+			RepoURL:    "org/deep",
+			CloneDepth: &depth,
+		})).To(Succeed())
+
+		proj, err := store.Get(ctx, "deep")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(proj.CloneDepth).NotTo(BeNil())
+		Expect(*proj.CloneDepth).To(Equal(250))
+
+		full := 0
+		Expect(store.Put(ctx, &project.Project{
+			Name:       "full",
+			RepoURL:    "org/full",
+			CloneDepth: &full,
+		})).To(Succeed())
+
+		proj, err = store.Get(ctx, "full")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(proj.CloneDepth).NotTo(BeNil())
+		Expect(*proj.CloneDepth).To(Equal(0))
+	})
+
+	It("leaves clone_depth nil when unset", func() {
+		Expect(store.Put(ctx, &project.Project{Name: "app", RepoURL: "org/app"})).To(Succeed())
+
+		proj, err := store.Get(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(proj.CloneDepth).To(BeNil())
+	})
+
 	It("handles missing file gracefully", func() {
 		projs, err := store.List(ctx)
 		Expect(err).NotTo(HaveOccurred())

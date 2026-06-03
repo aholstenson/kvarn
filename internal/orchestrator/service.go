@@ -572,11 +572,16 @@ func (s *Service) runJob(requestID, sessionID string, proj *project.Project, bra
 		scmImpl = &gitscm.Git{}
 	}
 
+	cloneDepth := scm.DefaultCloneDepth
+	if proj.CloneDepth != nil {
+		cloneDepth = *proj.CloneDepth
+	}
 	cloneOpts := scm.CloneOpts{
 		URL:         cloneURL,
 		Branch:      branch,
 		Destination: cloneDir,
 		Credentials: creds,
+		Depth:       cloneDepth,
 	}
 
 	if err := scmImpl.Clone(ctx, cloneOpts); err != nil {
