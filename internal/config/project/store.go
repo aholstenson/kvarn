@@ -47,7 +47,8 @@ type Project struct {
 	CloneDepth *int
 }
 
-// Store provides CRUD operations for projects.
+// Store provides CRUD operations for projects. Get and Delete return
+// tomlstore.ErrNotFound when no entry matches.
 type Store interface {
 	Get(ctx context.Context, name string) (*Project, error)
 	List(ctx context.Context) ([]*Project, error)

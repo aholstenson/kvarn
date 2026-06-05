@@ -13,6 +13,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/cmd/client"
 	"github.com/aholstenson/kvarn/internal/config/apikey"
 	"github.com/aholstenson/kvarn/internal/config/project"
+	"github.com/aholstenson/kvarn/internal/config/tomlstore"
 	"github.com/aholstenson/kvarn/internal/orchestrator"
 	"github.com/aholstenson/kvarn/internal/orchestrator/auth"
 	"github.com/aholstenson/kvarn/internal/session"
@@ -28,7 +29,7 @@ type memAPIKeyStore struct {
 func (m *memAPIKeyStore) Get(_ context.Context, keyID string) (*apikey.APIKey, error) {
 	k, ok := m.keys[keyID]
 	if !ok {
-		return nil, apikey.ErrNotFound
+		return nil, tomlstore.ErrNotFound
 	}
 	return k, nil
 }

@@ -2,14 +2,11 @@ package tomlstore
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 
-	"github.com/aholstenson/kvarn/internal/config/atomicfile"
 	"github.com/aholstenson/kvarn/internal/config/project"
-	"github.com/pelletier/go-toml/v2"
+	"github.com/aholstenson/kvarn/internal/config/tomlstore"
 )
 
 type fileData struct {
@@ -38,13 +35,47 @@ type projectEntry struct {
 
 // Store is a TOML file-backed project store.
 type Store struct {
-	path string
-	mu   sync.RWMutex
+	inner *tomlstore.Store[string, fileData, *projectEntry, *project.Project]
 }
 
 // New creates a Store backed by the given file path.
 func New(path string) *Store {
-	return &Store{path: path}
+	return &Store{inner: tomlstore.New(
+		path,
+		tomlstore.Config,
+		tomlstore.Schema[string, fileData, *projectEntry]{
+			NewFileData: func() fileData {
+				return fileData{Projects: map[string]*projectEntry{}}
+			},
+			Get: func(fd fileData, k string) (*projectEntry, bool) {
+				e, ok := fd.Projects[k]
+				return e, ok
+			},
+			Put: func(fd *fileData, k string, e *projectEntry) {
+				if fd.Projects == nil {
+					fd.Projects = map[string]*projectEntry{}
+				}
+				fd.Projects[k] = e
+			},
+			Delete: func(fd *fileData, k string) bool {
+				if _, ok := fd.Projects[k]; !ok {
+					return false
+				}
+				delete(fd.Projects, k)
+				return true
+			},
+			Keys: func(fd fileData) []string {
+				ks := make([]string, 0, len(fd.Projects))
+				for k := range fd.Projects {
+					ks = append(ks, k)
+				}
+				return ks
+			},
+			Less: func(a, b string) bool { return a < b },
+		},
+		entryToProject,
+		projectToEntry,
+	)}
 }
 
 // DefaultPath returns the default project store path.
@@ -53,39 +84,7 @@ func DefaultPath() string {
 	return filepath.Join(home, ".config", "kvarn", "projects.toml")
 }
 
-func (s *Store) load() (*fileData, error) {
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &fileData{Projects: make(map[string]*projectEntry)}, nil
-		}
-		return nil, err
-	}
-
-	var fd fileData
-	if err := toml.Unmarshal(data, &fd); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", s.path, err)
-	}
-	if fd.Projects == nil {
-		fd.Projects = make(map[string]*projectEntry)
-	}
-	return &fd, nil
-}
-
-func (s *Store) save(fd *fileData) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
-		return err
-	}
-
-	data, err := toml.Marshal(fd)
-	if err != nil {
-		return err
-	}
-
-	return atomicfile.Write(s.path, data, 0644)
-}
-
-func entryToProject(name string, entry *projectEntry) *project.Project {
+func entryToProject(name string, entry *projectEntry) (*project.Project, error) {
 	var jobs map[string]project.JobLimits
 	if len(entry.Jobs) > 0 {
 		jobs = make(map[string]project.JobLimits, len(entry.Jobs))
@@ -112,10 +111,10 @@ func entryToProject(name string, entry *projectEntry) *project.Project {
 		CommitAuthorName:     entry.CommitAuthorName,
 		CommitAuthorEmail:    entry.CommitAuthorEmail,
 		CloneDepth:           entry.CloneDepth,
-	}
+	}, nil
 }
 
-func projectToEntry(p *project.Project) *projectEntry {
+func projectToEntry(p *project.Project) (string, *projectEntry) {
 	var jobs map[string]jobEntry
 	if len(p.Jobs) > 0 {
 		jobs = make(map[string]jobEntry, len(p.Jobs))
@@ -126,7 +125,7 @@ func projectToEntry(p *project.Project) *projectEntry {
 			}
 		}
 	}
-	return &projectEntry{
+	return p.Name, &projectEntry{
 		Repo:                 p.RepoURL,
 		DefaultBranch:        p.DefaultBranch,
 		Forge:                p.Forge,
@@ -142,70 +141,18 @@ func projectToEntry(p *project.Project) *projectEntry {
 	}
 }
 
-func (s *Store) Get(_ context.Context, name string) (*project.Project, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	fd, err := s.load()
-	if err != nil {
-		return nil, err
-	}
-
-	entry, ok := fd.Projects[name]
-	if !ok {
-		return nil, fmt.Errorf("project %q not found", name)
-	}
-
-	return entryToProject(name, entry), nil
+func (s *Store) Get(ctx context.Context, name string) (*project.Project, error) {
+	return s.inner.Get(ctx, name)
 }
 
-func (s *Store) List(_ context.Context) ([]*project.Project, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	fd, err := s.load()
-	if err != nil {
-		return nil, err
-	}
-
-	var result []*project.Project
-	for name, entry := range fd.Projects {
-		result = append(result, entryToProject(name, entry))
-	}
-	return result, nil
+func (s *Store) List(ctx context.Context) ([]*project.Project, error) {
+	return s.inner.List(ctx)
 }
 
-func (s *Store) Put(_ context.Context, p *project.Project) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return atomicfile.WithLock(s.path, func() error {
-		fd, err := s.load()
-		if err != nil {
-			return err
-		}
-
-		fd.Projects[p.Name] = projectToEntry(p)
-
-		return s.save(fd)
-	})
+func (s *Store) Put(ctx context.Context, p *project.Project) error {
+	return s.inner.Put(ctx, p)
 }
 
-func (s *Store) Delete(_ context.Context, name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return atomicfile.WithLock(s.path, func() error {
-		fd, err := s.load()
-		if err != nil {
-			return err
-		}
-
-		if _, ok := fd.Projects[name]; !ok {
-			return fmt.Errorf("project %q not found", name)
-		}
-
-		delete(fd.Projects, name)
-		return s.save(fd)
-	})
+func (s *Store) Delete(ctx context.Context, name string) error {
+	return s.inner.Delete(ctx, name)
 }

@@ -4,15 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"sync"
-
-	"fmt"
-
-	"github.com/pelletier/go-toml/v2"
 
 	llms "github.com/aholstenson/llms-go"
 
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
+	"github.com/aholstenson/kvarn/internal/config/tomlstore"
 )
 
 // entryData mirrors a single [models.<alias>] block in agents.toml.
@@ -57,15 +53,75 @@ type fileData struct {
 	Models   map[string]entryData `toml:"models"`
 }
 
-// Store is a TOML file-backed model-alias override store.
+// modelDomain is the per-alias domain value List would return. Model only uses
+// the full-map All() accessor (List is unused), but the generic store still
+// requires entry⇄domain callbacks; this struct carries the alias alongside
+// the raw entry so List would behave correctly if a caller ever reached for it.
+type modelDomain struct {
+	Alias string
+	Raw   modelcfg.RawEntry
+}
+
+// Store is a TOML file-backed model-alias override store. It is effectively
+// read-only — agents.toml is hand-edited — so Put/Delete are unused, though
+// the generic store exposes them.
 type Store struct {
-	path string
-	mu   sync.RWMutex
+	inner *tomlstore.Store[string, fileData, entryData, modelDomain]
 }
 
 // New creates a Store backed by the given file path.
 func New(path string) *Store {
-	return &Store{path: path}
+	return &Store{inner: tomlstore.New(
+		path,
+		tomlstore.Config,
+		tomlstore.Schema[string, fileData, entryData]{
+			NewFileData: func() fileData {
+				return fileData{Models: map[string]entryData{}}
+			},
+			Get: func(fd fileData, k string) (entryData, bool) {
+				e, ok := fd.Models[k]
+				return e, ok
+			},
+			Put: func(fd *fileData, k string, e entryData) {
+				if fd.Models == nil {
+					fd.Models = map[string]entryData{}
+				}
+				fd.Models[k] = e
+			},
+			Delete: func(fd *fileData, k string) bool {
+				if _, ok := fd.Models[k]; !ok {
+					return false
+				}
+				delete(fd.Models, k)
+				return true
+			},
+			Keys: func(fd fileData) []string {
+				ks := make([]string, 0, len(fd.Models))
+				for k := range fd.Models {
+					ks = append(ks, k)
+				}
+				return ks
+			},
+			Less: func(a, b string) bool { return a < b },
+		},
+		func(alias string, e entryData) (modelDomain, error) {
+			return modelDomain{
+				Alias: alias,
+				Raw: modelcfg.RawEntry{
+					ModelID:         e.Model,
+					ReasoningEffort: e.ReasoningEffort,
+					MaxOutputTokens: e.MaxOutputTokens,
+				},
+			}, nil
+		},
+		func(d modelDomain) (string, entryData) {
+			return d.Alias, entryData{
+				Model:           d.Raw.ModelID,
+				ReasoningEffort: d.Raw.ReasoningEffort,
+				MaxOutputTokens: d.Raw.MaxOutputTokens,
+			}
+		},
+	)}
 }
 
 // DefaultPath returns the default agents config path.
@@ -83,33 +139,13 @@ func OpenDefault(path string) *Store {
 	return New(path)
 }
 
-func (s *Store) load() (fileData, error) {
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fileData{}, nil
-		}
-		return fileData{}, err
-	}
-	var fd fileData
-	if err := toml.Unmarshal(data, &fd); err != nil {
-		return fileData{}, fmt.Errorf("parse %s: %w", s.path, err)
-	}
-	return fd, nil
-}
-
-func (s *Store) All(_ context.Context) (map[string]modelcfg.RawEntry, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	fd, err := s.load()
+// All returns every model alias override. A missing file is not an error;
+// callers receive an empty map.
+func (s *Store) All(ctx context.Context) (map[string]modelcfg.RawEntry, error) {
+	fd, err := s.inner.Load(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if fd.Models == nil {
-		return map[string]modelcfg.RawEntry{}, nil
-	}
-
 	out := make(map[string]modelcfg.RawEntry, len(fd.Models))
 	for alias, e := range fd.Models {
 		out[alias] = modelcfg.RawEntry{
@@ -122,17 +158,12 @@ func (s *Store) All(_ context.Context) (map[string]modelcfg.RawEntry, error) {
 }
 
 // Defaults returns the parsed [defaults] block from agents.toml. A missing
-// file yields a zero-value Defaults with no error so callers can layer
-// built-in fallbacks on top.
-func (s *Store) Defaults(_ context.Context) (modelcfg.Defaults, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	fd, err := s.load()
+// file yields a zero-value Defaults; a malformed file surfaces as an error.
+func (s *Store) Defaults(ctx context.Context) (modelcfg.Defaults, error) {
+	fd, err := s.inner.Load(ctx)
 	if err != nil {
 		return modelcfg.Defaults{}, err
 	}
-
 	out := modelcfg.Defaults{
 		MaxCostUSD:           fd.Defaults.MaxCostUSD,
 		WarnThreshold:        fd.Defaults.WarnThreshold,

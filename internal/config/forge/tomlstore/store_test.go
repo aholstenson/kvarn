@@ -10,6 +10,7 @@ import (
 
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 	"github.com/aholstenson/kvarn/internal/config/forge/tomlstore"
+	generic "github.com/aholstenson/kvarn/internal/config/tomlstore"
 )
 
 var _ = Describe("Forge Config TomlStore", func() {
@@ -65,16 +66,14 @@ var _ = Describe("Forge Config TomlStore", func() {
 		Expect(err).To(HaveOccurred())
 	})
 
-	It("returns error for missing forge config", func() {
+	It("returns ErrNotFound for missing forge config", func() {
 		_, err := store.Get(ctx, "nonexistent")
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("not found"))
+		Expect(err).To(MatchError(generic.ErrNotFound))
 	})
 
-	It("returns error when deleting missing forge config", func() {
+	It("returns ErrNotFound when deleting missing forge config", func() {
 		err := store.Delete(ctx, "nonexistent")
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("not found"))
+		Expect(err).To(MatchError(generic.ErrNotFound))
 	})
 
 	It("stores all fields", func() {
@@ -152,6 +151,15 @@ branch_prefix = "myorg"
 		fc, err := store.Get(ctx, "github-myorg")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fc.BranchPrefix).To(Equal("myorg"))
+	})
+
+	It("surfaces a parse error from Defaults rather than silently falling back", func() {
+		path := filepath.Join(tmpDir, "forges.toml")
+		Expect(os.WriteFile(path, []byte("not = valid = toml"), 0o644)).To(Succeed())
+
+		_, err := store.Defaults(ctx)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("parse "))
 	})
 
 	It("preserves an existing [defaults] block across a Put", func() {

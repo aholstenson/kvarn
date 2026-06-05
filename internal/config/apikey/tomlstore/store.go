@@ -5,13 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"sync"
 	"time"
 
 	"github.com/aholstenson/kvarn/internal/config/apikey"
-	"github.com/aholstenson/kvarn/internal/config/atomicfile"
-	"github.com/pelletier/go-toml/v2"
+	"github.com/aholstenson/kvarn/internal/config/tomlstore"
 )
 
 // apiKeyEntry is the on-disk representation of a single key. The KeyID is the
@@ -30,18 +27,47 @@ type apiKeyEntry struct {
 // fileData mirrors the [keyid] table-per-key TOML layout.
 type fileData map[string]apiKeyEntry
 
-// Store is a TOML file-backed API key store. The file is enforced to mode 0600
-// on every write so key hashes never leak to other users. Each call re-reads
-// the file, so changes made by `kvarn key create` are picked up without a
-// restart; writes are atomic so a concurrent read never sees a partial file.
+// Store is a TOML file-backed API key store.
 type Store struct {
-	path string
-	mu   sync.RWMutex
+	inner *tomlstore.Store[string, fileData, apiKeyEntry, *apikey.APIKey]
 }
 
 // New creates a Store backed by the given file path.
 func New(path string) *Store {
-	return &Store{path: path}
+	return &Store{inner: tomlstore.New(
+		path,
+		tomlstore.Secret,
+		tomlstore.Schema[string, fileData, apiKeyEntry]{
+			NewFileData: func() fileData { return fileData{} },
+			Get: func(fd fileData, k string) (apiKeyEntry, bool) {
+				e, ok := fd[k]
+				return e, ok
+			},
+			Put: func(fd *fileData, k string, e apiKeyEntry) {
+				if *fd == nil {
+					*fd = fileData{}
+				}
+				(*fd)[k] = e
+			},
+			Delete: func(fd *fileData, k string) bool {
+				if _, ok := (*fd)[k]; !ok {
+					return false
+				}
+				delete(*fd, k)
+				return true
+			},
+			Keys: func(fd fileData) []string {
+				ks := make([]string, 0, len(fd))
+				for k := range fd {
+					ks = append(ks, k)
+				}
+				return ks
+			},
+			Less: func(a, b string) bool { return a < b },
+		},
+		entryToKey,
+		keyToEntry,
+	)}
 }
 
 // DefaultPath returns the default API key store path.
@@ -58,38 +84,6 @@ func OpenDefault(path string) *Store {
 		path = DefaultPath()
 	}
 	return New(path)
-}
-
-func (s *Store) load() (fileData, error) {
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fileData{}, nil
-		}
-		return nil, err
-	}
-
-	var fd fileData
-	if err := toml.Unmarshal(data, &fd); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", s.path, err)
-	}
-	if fd == nil {
-		fd = fileData{}
-	}
-	return fd, nil
-}
-
-func (s *Store) save(fd fileData) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-
-	data, err := toml.Marshal(fd)
-	if err != nil {
-		return err
-	}
-
-	return atomicfile.Write(s.path, data, 0o600)
 }
 
 func entryToKey(keyID string, e apiKeyEntry) (*apikey.APIKey, error) {
@@ -114,91 +108,35 @@ func entryToKey(keyID string, e apiKeyEntry) (*apikey.APIKey, error) {
 	}, nil
 }
 
-func (s *Store) Get(_ context.Context, keyID string) (*apikey.APIKey, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	fd, err := s.load()
-	if err != nil {
-		return nil, err
+func keyToEntry(k *apikey.APIKey) (string, apiKeyEntry) {
+	projects := make([]string, len(k.Projects))
+	copy(projects, k.Projects)
+	var expires string
+	if k.Expires != nil {
+		expires = k.Expires.UTC().Format(time.RFC3339)
 	}
-
-	entry, ok := fd[keyID]
-	if !ok {
-		return nil, apikey.ErrNotFound
+	return k.KeyID, apiKeyEntry{
+		Name:     k.Name,
+		Hash:     k.Hash,
+		Projects: projects,
+		Created:  k.Created,
+		Expires:  expires,
+		Disabled: k.Disabled,
 	}
-	return entryToKey(keyID, entry)
 }
 
-func (s *Store) List(_ context.Context) ([]*apikey.APIKey, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	fd, err := s.load()
-	if err != nil {
-		return nil, err
-	}
-
-	ids := make([]string, 0, len(fd))
-	for id := range fd {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-
-	result := make([]*apikey.APIKey, 0, len(fd))
-	for _, id := range ids {
-		k, err := entryToKey(id, fd[id])
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, k)
-	}
-	return result, nil
+func (s *Store) Get(ctx context.Context, keyID string) (*apikey.APIKey, error) {
+	return s.inner.Get(ctx, keyID)
 }
 
-func (s *Store) Put(_ context.Context, k *apikey.APIKey) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return atomicfile.WithLock(s.path, func() error {
-		fd, err := s.load()
-		if err != nil {
-			return err
-		}
-
-		projects := make([]string, len(k.Projects))
-		copy(projects, k.Projects)
-		var expires string
-		if k.Expires != nil {
-			expires = k.Expires.UTC().Format(time.RFC3339)
-		}
-		fd[k.KeyID] = apiKeyEntry{
-			Name:     k.Name,
-			Hash:     k.Hash,
-			Projects: projects,
-			Created:  k.Created,
-			Expires:  expires,
-			Disabled: k.Disabled,
-		}
-
-		return s.save(fd)
-	})
+func (s *Store) List(ctx context.Context) ([]*apikey.APIKey, error) {
+	return s.inner.List(ctx)
 }
 
-func (s *Store) Delete(_ context.Context, keyID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) Put(ctx context.Context, k *apikey.APIKey) error {
+	return s.inner.Put(ctx, k)
+}
 
-	return atomicfile.WithLock(s.path, func() error {
-		fd, err := s.load()
-		if err != nil {
-			return err
-		}
-
-		if _, ok := fd[keyID]; !ok {
-			return apikey.ErrNotFound
-		}
-		delete(fd, keyID)
-		return s.save(fd)
-	})
+func (s *Store) Delete(ctx context.Context, keyID string) error {
+	return s.inner.Delete(ctx, keyID)
 }

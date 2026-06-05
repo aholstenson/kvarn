@@ -12,6 +12,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/aholstenson/kvarn/internal/config/apikey"
+	"github.com/aholstenson/kvarn/internal/config/tomlstore"
 	"github.com/aholstenson/kvarn/internal/observability/reqid"
 )
 
@@ -79,7 +80,7 @@ func (i *Interceptor) authenticate(header http.Header) (*Identity, string, strin
 
 	key, err := i.store.Get(context.Background(), keyID)
 	if err != nil {
-		if errors.Is(err, apikey.ErrNotFound) {
+		if errors.Is(err, tomlstore.ErrNotFound) {
 			return nil, keyID, reasonUnknownKey, errAuthFailed
 		}
 		return nil, keyID, reasonStoreError,

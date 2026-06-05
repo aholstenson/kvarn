@@ -22,7 +22,9 @@ type Secret struct {
 	Value   string
 }
 
-// Store provides CRUD operations for project-scoped secrets.
+// Store provides CRUD operations for project-scoped secrets. Get and Delete
+// return tomlstore.ErrNotFound when no entry matches; List returns an empty,
+// non-nil slice for a project that has no secrets.
 type Store interface {
 	Get(ctx context.Context, project, name string) (*Secret, error)
 	List(ctx context.Context, project string) ([]*Secret, error)

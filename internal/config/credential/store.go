@@ -9,7 +9,8 @@ type Credential struct {
 	Config map[string]string
 }
 
-// Store provides CRUD operations for credentials.
+// Store provides CRUD operations for credentials. Get and Delete return
+// tomlstore.ErrNotFound when no entry matches.
 type Store interface {
 	Get(ctx context.Context, name string) (*Credential, error)
 	List(ctx context.Context) ([]*Credential, error)

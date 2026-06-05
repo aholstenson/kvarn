@@ -122,7 +122,8 @@ func (fc *ForgeConfig) ResolveBehavior(d Defaults, o Overrides) Behavior {
 	return b
 }
 
-// Store provides CRUD operations for forge configurations.
+// Store provides CRUD operations for forge configurations. Get and Delete
+// return tomlstore.ErrNotFound when no entry matches.
 type Store interface {
 	Get(ctx context.Context, name string) (*ForgeConfig, error)
 	List(ctx context.Context) ([]*ForgeConfig, error)

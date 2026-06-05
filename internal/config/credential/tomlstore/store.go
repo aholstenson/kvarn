@@ -2,14 +2,11 @@ package tomlstore
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 
-	"github.com/aholstenson/kvarn/internal/config/atomicfile"
 	"github.com/aholstenson/kvarn/internal/config/credential"
-	"github.com/pelletier/go-toml/v2"
+	"github.com/aholstenson/kvarn/internal/config/tomlstore"
 )
 
 type fileData struct {
@@ -18,13 +15,47 @@ type fileData struct {
 
 // Store is a TOML file-backed credential store.
 type Store struct {
-	path string
-	mu   sync.RWMutex
+	inner *tomlstore.Store[string, fileData, map[string]string, *credential.Credential]
 }
 
 // New creates a Store backed by the given file path.
 func New(path string) *Store {
-	return &Store{path: path}
+	return &Store{inner: tomlstore.New(
+		path,
+		tomlstore.Secret,
+		tomlstore.Schema[string, fileData, map[string]string]{
+			NewFileData: func() fileData {
+				return fileData{Credentials: map[string]map[string]string{}}
+			},
+			Get: func(fd fileData, k string) (map[string]string, bool) {
+				e, ok := fd.Credentials[k]
+				return e, ok
+			},
+			Put: func(fd *fileData, k string, e map[string]string) {
+				if fd.Credentials == nil {
+					fd.Credentials = map[string]map[string]string{}
+				}
+				fd.Credentials[k] = e
+			},
+			Delete: func(fd *fileData, k string) bool {
+				if _, ok := fd.Credentials[k]; !ok {
+					return false
+				}
+				delete(fd.Credentials, k)
+				return true
+			},
+			Keys: func(fd fileData) []string {
+				ks := make([]string, 0, len(fd.Credentials))
+				for k := range fd.Credentials {
+					ks = append(ks, k)
+				}
+				return ks
+			},
+			Less: func(a, b string) bool { return a < b },
+		},
+		entryToCredential,
+		credentialToEntry,
+	)}
 }
 
 // DefaultPath returns the default credential store path.
@@ -33,121 +64,37 @@ func DefaultPath() string {
 	return filepath.Join(home, ".config", "kvarn", "credentials.toml")
 }
 
-func (s *Store) load() (*fileData, error) {
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &fileData{Credentials: make(map[string]map[string]string)}, nil
-		}
-		return nil, err
-	}
-
-	var fd fileData
-	if err := toml.Unmarshal(data, &fd); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", s.path, err)
-	}
-	if fd.Credentials == nil {
-		fd.Credentials = make(map[string]map[string]string)
-	}
-	return &fd, nil
-}
-
-func (s *Store) save(fd *fileData) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
-		return err
-	}
-
-	data, err := toml.Marshal(fd)
-	if err != nil {
-		return err
-	}
-
-	return atomicfile.Write(s.path, data, 0600)
-}
-
-func (s *Store) Get(_ context.Context, name string) (*credential.Credential, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	fd, err := s.load()
-	if err != nil {
-		return nil, err
-	}
-
-	entry, ok := fd.Credentials[name]
-	if !ok {
-		return nil, fmt.Errorf("credential %q not found", name)
-	}
-
+func entryToCredential(name string, entry map[string]string) (*credential.Credential, error) {
 	config := make(map[string]string, len(entry))
 	for k, v := range entry {
 		config[k] = v
 	}
-
 	return &credential.Credential{
 		Name:   name,
 		Config: config,
 	}, nil
 }
 
-func (s *Store) List(_ context.Context) ([]*credential.Credential, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	fd, err := s.load()
-	if err != nil {
-		return nil, err
+func credentialToEntry(c *credential.Credential) (string, map[string]string) {
+	config := make(map[string]string, len(c.Config))
+	for k, v := range c.Config {
+		config[k] = v
 	}
-
-	var result []*credential.Credential
-	for name, entry := range fd.Credentials {
-		config := make(map[string]string, len(entry))
-		for k, v := range entry {
-			config[k] = v
-		}
-		result = append(result, &credential.Credential{
-			Name:   name,
-			Config: config,
-		})
-	}
-	return result, nil
+	return c.Name, config
 }
 
-func (s *Store) Put(_ context.Context, c *credential.Credential) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return atomicfile.WithLock(s.path, func() error {
-		fd, err := s.load()
-		if err != nil {
-			return err
-		}
-
-		config := make(map[string]string, len(c.Config))
-		for k, v := range c.Config {
-			config[k] = v
-		}
-		fd.Credentials[c.Name] = config
-
-		return s.save(fd)
-	})
+func (s *Store) Get(ctx context.Context, name string) (*credential.Credential, error) {
+	return s.inner.Get(ctx, name)
 }
 
-func (s *Store) Delete(_ context.Context, name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) List(ctx context.Context) ([]*credential.Credential, error) {
+	return s.inner.List(ctx)
+}
 
-	return atomicfile.WithLock(s.path, func() error {
-		fd, err := s.load()
-		if err != nil {
-			return err
-		}
+func (s *Store) Put(ctx context.Context, c *credential.Credential) error {
+	return s.inner.Put(ctx, c)
+}
 
-		if _, ok := fd.Credentials[name]; !ok {
-			return fmt.Errorf("credential %q not found", name)
-		}
-
-		delete(fd.Credentials, name)
-		return s.save(fd)
-	})
+func (s *Store) Delete(ctx context.Context, name string) error {
+	return s.inner.Delete(ctx, name)
 }

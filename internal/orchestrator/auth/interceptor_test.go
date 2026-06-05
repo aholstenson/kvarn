@@ -8,6 +8,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/aholstenson/kvarn/internal/config/apikey"
+	"github.com/aholstenson/kvarn/internal/config/tomlstore"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -24,7 +25,7 @@ func (m *memStore) Get(_ context.Context, keyID string) (*apikey.APIKey, error) 
 	}
 	k, ok := m.keys[keyID]
 	if !ok {
-		return nil, apikey.ErrNotFound
+		return nil, tomlstore.ErrNotFound
 	}
 	return k, nil
 }

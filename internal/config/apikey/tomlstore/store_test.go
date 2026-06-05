@@ -8,6 +8,7 @@ import (
 
 	"github.com/aholstenson/kvarn/internal/config/apikey"
 	"github.com/aholstenson/kvarn/internal/config/apikey/tomlstore"
+	generic "github.com/aholstenson/kvarn/internal/config/tomlstore"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -29,7 +30,7 @@ var _ = Describe("Store", func() {
 
 	It("returns ErrNotFound for a missing key", func() {
 		_, err := store.Get(ctx, "nope")
-		Expect(err).To(MatchError(apikey.ErrNotFound))
+		Expect(err).To(MatchError(generic.ErrNotFound))
 	})
 
 	It("returns an empty list when the file does not exist", func() {
@@ -109,9 +110,9 @@ var _ = Describe("Store", func() {
 		})).To(Succeed())
 		Expect(store.Delete(ctx, "k1")).To(Succeed())
 		_, err := store.Get(ctx, "k1")
-		Expect(err).To(MatchError(apikey.ErrNotFound))
+		Expect(err).To(MatchError(generic.ErrNotFound))
 
-		Expect(store.Delete(ctx, "missing")).To(MatchError(apikey.ErrNotFound))
+		Expect(store.Delete(ctx, "missing")).To(MatchError(generic.ErrNotFound))
 	})
 
 	It("writes the file with 0600 mode", func() {

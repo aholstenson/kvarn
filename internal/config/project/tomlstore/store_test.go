@@ -10,6 +10,7 @@ import (
 
 	"github.com/aholstenson/kvarn/internal/config/project"
 	"github.com/aholstenson/kvarn/internal/config/project/tomlstore"
+	generic "github.com/aholstenson/kvarn/internal/config/tomlstore"
 )
 
 var _ = Describe("Project TomlStore", func() {
@@ -67,16 +68,14 @@ var _ = Describe("Project TomlStore", func() {
 		Expect(err).To(HaveOccurred())
 	})
 
-	It("returns error for missing project", func() {
+	It("returns ErrNotFound for missing project", func() {
 		_, err := store.Get(ctx, "nonexistent")
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("not found"))
+		Expect(err).To(MatchError(generic.ErrNotFound))
 	})
 
-	It("returns error when deleting missing project", func() {
+	It("returns ErrNotFound when deleting missing project", func() {
 		err := store.Delete(ctx, "nonexistent")
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("not found"))
+		Expect(err).To(MatchError(generic.ErrNotFound))
 	})
 
 	It("stores forge reference", func() {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/aholstenson/kvarn/internal/config/secret"
 	"github.com/aholstenson/kvarn/internal/config/secret/tomlstore"
+	generic "github.com/aholstenson/kvarn/internal/config/tomlstore"
 )
 
 var _ = Describe("Secret TomlStore", func() {
@@ -76,16 +77,14 @@ var _ = Describe("Secret TomlStore", func() {
 		Expect(err).To(HaveOccurred())
 	})
 
-	It("returns error for missing secret", func() {
+	It("returns ErrNotFound for missing secret", func() {
 		_, err := store.Get(ctx, "a", "X")
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("not found"))
+		Expect(err).To(MatchError(generic.ErrNotFound))
 	})
 
-	It("returns error when deleting missing secret", func() {
+	It("returns ErrNotFound when deleting missing secret", func() {
 		err := store.Delete(ctx, "a", "X")
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("not found"))
+		Expect(err).To(MatchError(generic.ErrNotFound))
 	})
 
 	It("updates an existing secret", func() {

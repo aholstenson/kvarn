@@ -2,7 +2,6 @@ package apikey
 
 import (
 	"context"
-	"errors"
 	"time"
 )
 
@@ -38,14 +37,10 @@ func (k *APIKey) Expired(now time.Time) bool {
 	return k.Expires != nil && now.After(*k.Expires)
 }
 
-// ErrNotFound is returned by Store.Get when no key matches the given ID. It is
-// a distinct sentinel so callers can tell "unknown key" (reject) apart from a
-// store or parse failure (fail closed).
-var ErrNotFound = errors.New("api key not found")
-
-// Store provides CRUD operations for API keys, keyed by their ID.
+// Store provides CRUD operations for API keys, keyed by their ID. Get and
+// Delete return tomlstore.ErrNotFound when no key matches.
 type Store interface {
-	Get(ctx context.Context, keyID string) (*APIKey, error) // ErrNotFound if missing
+	Get(ctx context.Context, keyID string) (*APIKey, error)
 	List(ctx context.Context) ([]*APIKey, error)
 	Put(ctx context.Context, k *APIKey) error
 	Delete(ctx context.Context, keyID string) error
