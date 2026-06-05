@@ -19,7 +19,7 @@ const Repo = "aholstenson/kvarn"
 // only remaining contract is the coarser base-OS/tooling ABI of the image,
 // expressed here and resolved to a concrete published image at runtime. Bump
 // it deliberately when the runner needs a newer image contract.
-var ImageConstraint = ">=0.2.0 <0.3.0"
+var ImageConstraint = ">=0.2.0 <0.4.0"
 
 var releaseRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
 
