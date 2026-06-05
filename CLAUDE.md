@@ -24,6 +24,7 @@ task --list         # see all available tasks
 - `internal/config/` — User-level config stores (credential, project, secret, forge, apikey); `atomicfile` for temp-file+rename writes
 - `internal/jobconfig/` — Per-repo kvarn.yml parsing and step execution
 - `internal/orchestrator/` — Orchestrator service; `auth/` holds the API-key interceptor + identity
+- `internal/session/` — Orchestrator-owned session store. `Store` (sessions + per-session monotonic event log) has two impls: `memstore` (tests) and `sqlite/` (production, pure-Go `modernc.org/sqlite`). `Manager` owns the in-memory pub/sub hub and layers replay + reconnect-from-cursor on top; `codec.go` encodes the durable event kinds (256 KiB payload cap) and the session↔row mapping
 - `internal/runner/` — Runner service (ConnectRPC handler)
 - `internal/runnerbin/` — Embeds the linux runner binary into the CLI (build with `-tags embedrunner`; the artifact is gitignored and produced by `task build:runner`)
 - `internal/cmd/` — CLI command handlers (startjob, secrets, key, client)
@@ -72,6 +73,14 @@ task image:clean         # remove dist/
 - Auth is **enforced by default**; `--no-auth` (or `KVARN_NO_AUTH`) disables it for local dev. With auth on and zero keys, all requests are denied. Keys are bootstrapped with `kvarn key create`, which writes `apikeys.toml` directly — no running orchestrator needed.
 - **TLS is out of scope**: the orchestrator stays on h2c and assumes an external TLS-terminating reverse proxy. A bearer token is only safe over TLS.
 - **Hot-reload**: every tomlstore re-reads its file per `Get`/`List`, so key changes apply on the next request with no restart. All stores write atomically (`internal/config/atomicfile`, temp file + rename) so a concurrent `kvarn key create` is never read mid-write. Writers also hold a `flock(2)` on `<file>.lock` around the load → mutate → save sequence (`atomicfile.WithLock`) so two CLI invocations (or a CLI racing the orchestrator) can't lose each other's edits; readers don't need the lock.
+
+## Sessions
+
+- Sessions are **persistent and orchestrator-owned** (the CLI never writes them), backed by SQLite at `~/.config/kvarn/sessions.db` (`--sessions-db` to override). Single-process access uses WAL + `busy_timeout` + `SetMaxOpenConns(1)`; no cross-process `flock` is needed.
+- Each session carries a **monotonic event log** (per-session `seq` starting at 1). Clients **watch** live (`WatchSession`, resumable via `from_sequence`) or **poll** history (`ListSessionEvents`, paged via `after_sequence`). `SessionUpdate.sequence` is the durable seq (0 = ephemeral/live-only).
+- **Durable kinds** persisted to history: `state_change`, `agent_message`, `agent_tool_use`, `agent_tool_result`, `step_result`, `cost`, `pull_request`, `vm_info`. High-volume telemetry (VM console, step stdout/stderr chunks, transfer/cache/dependency progress) is broadcast live-only. Each persisted payload is truncated at 256 KiB; live watchers still get the full stream.
+- **Slow watchers** are disconnected on lag rather than silently dropping a durable event (which would create an undetectable gap). The client reconnects via `Watch(from_sequence=lastSeen)` and replays the gap from the store, the source of truth.
+- **Startup reconciliation**: non-terminal sessions are flipped to `failed` on boot (their VMs are gone), appending a `state_change` event. **Retention**: terminal sessions older than `[sessions].retention` (default 720h; `0` = keep forever) are pruned on startup and hourly; events cascade.
 
 ## Conventions
 

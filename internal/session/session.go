@@ -206,21 +206,37 @@ type CostEvent struct {
 
 func (CostEvent) isSessionEvent() {}
 
-// Manager provides operations for managing sessions.
+// WatchEvent pairs an Event with the durable sequence number assigned when it
+// was persisted. Seq is 0 for ephemeral events (broadcast live-only, never
+// replayed).
+type WatchEvent struct {
+	Seq   int64
+	Event Event
+}
+
+// Manager provides operations for managing sessions. It owns the live pub/sub
+// hub and delegates all persistence to a Store, layering replayable history and
+// reconnect-from-cursor streaming on top.
 type Manager interface {
 	Create(ctx context.Context, projectName string, prompt string, mode string) (*Session, error)
 	Get(ctx context.Context, id string) (*Session, error)
-	List(ctx context.Context) ([]*Session, error)
+	List(ctx context.Context, filter SessionFilter) ([]*Session, error)
 	UpdateState(ctx context.Context, id string, state State, message string) error
 	// UpdateCost persists the latest cost snapshot on the session. Watchers
 	// see it on the next state change; mid-run snapshots are also broadcast
-	// via CostEvent.
+	// via an explicit CostEvent through EmitEvent.
 	UpdateCost(ctx context.Context, id string, report cost.Report) error
+	// SetPullRequest persists the PR URL on the session and broadcasts a
+	// PullRequestEvent.
+	SetPullRequest(ctx context.Context, id, url string, number int, branch string) error
 	Fail(ctx context.Context, id string, err error) error
-	// EmitEvent broadcasts an ephemeral event to watchers without mutating session state.
+	// EmitEvent persists the event when its kind is durable and broadcasts it to
+	// watchers; ephemeral kinds are broadcast live-only with Seq 0.
 	EmitEvent(ctx context.Context, id string, event Event) error
-	// Watch returns a channel that receives events whenever the session changes
-	// or agent events occur. The channel is closed when the session reaches a
+	// Watch returns a channel that replays history with seq > fromSeq, then
+	// streams live events. The channel is closed when the session reaches a
 	// terminal state or ctx is cancelled.
-	Watch(ctx context.Context, id string) (<-chan Event, error)
+	Watch(ctx context.Context, id string, fromSeq int64) (<-chan WatchEvent, error)
+	// ListEvents returns durable history with seq > afterSeq for polling.
+	ListEvents(ctx context.Context, id string, afterSeq int64, limit int) ([]WatchEvent, error)
 }

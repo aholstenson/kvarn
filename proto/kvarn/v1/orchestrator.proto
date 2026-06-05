@@ -66,19 +66,52 @@ enum CostUpdateKind {
   COST_UPDATE_KIND_FINAL = 3;
 }
 
-message ListSessionsRequest {}
+message ListSessionsRequest {
+  // Filter to a single project; empty means any project the caller may access.
+  string project = 1;
+  // When true, only non-terminal (active) sessions are returned.
+  bool active_only = 2;
+  // Maximum sessions to return; 0 lets the server pick a default.
+  int32 limit = 3;
+  // Opaque cursor from a previous response's next_page_cursor; empty starts
+  // from the most recent session.
+  string page_cursor = 4;
+}
 
 message ListSessionsResponse {
   repeated GetSessionResponse sessions = 1;
+  // Opaque cursor to pass as the next request's page_cursor; empty when the
+  // last page has been returned.
+  string next_page_cursor = 2;
 }
 
 message WatchSessionRequest {
   string session_id = 1;
+  // Resume cursor: only events with sequence > from_sequence are delivered.
+  // 0 streams the full available history before live events.
+  int64 from_sequence = 2;
+}
+
+message ListSessionEventsRequest {
+  string session_id = 1;
+  // Only events with sequence > after_sequence are returned.
+  int64 after_sequence = 2;
+  // Maximum events to return; 0 lets the server pick a default.
+  int32 limit = 3;
+}
+
+message ListSessionEventsResponse {
+  repeated SessionUpdate events = 1;
+  // Sequence of the last event in this page; pass as the next request's
+  // after_sequence to continue polling.
+  int64 last_sequence = 2;
 }
 
 message SessionUpdate {
   string session_id = 1;
   string project = 2;
+  // Durable per-session sequence number; 0 for ephemeral (live-only) events.
+  int64 sequence = 3;
 
   oneof event {
     StateChange state_change = 10;
@@ -175,4 +208,5 @@ service OrchestratorService {
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc WatchSession(WatchSessionRequest) returns (stream SessionUpdate);
+  rpc ListSessionEvents(ListSessionEventsRequest) returns (ListSessionEventsResponse);
 }

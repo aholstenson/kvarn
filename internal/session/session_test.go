@@ -3,7 +3,6 @@ package session_test
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -12,175 +11,245 @@ import (
 	"github.com/aholstenson/kvarn/internal/session"
 )
 
-var _ = Describe("MemoryManager", func() {
+// drainClosed reads from ch until it is closed or the timeout elapses,
+// returning everything collected. The second return is true if the channel
+// closed within the timeout.
+func drainClosed(ch <-chan session.WatchEvent, timeout time.Duration) ([]session.WatchEvent, bool) {
+	var out []session.WatchEvent
+	deadline := time.After(timeout)
+	for {
+		select {
+		case we, ok := <-ch:
+			if !ok {
+				return out, true
+			}
+			out = append(out, we)
+		case <-deadline:
+			return out, false
+		}
+	}
+}
+
+// durableSeqs extracts the non-zero (durable) sequence numbers in order.
+func durableSeqs(events []session.WatchEvent) []int64 {
+	var seqs []int64
+	for _, we := range events {
+		if we.Seq != 0 {
+			seqs = append(seqs, we.Seq)
+		}
+	}
+	return seqs
+}
+
+var _ = Describe("Manager", func() {
 	var (
-		mgr *session.MemoryManager
+		mgr session.Manager
 		ctx context.Context
 	)
 
 	BeforeEach(func() {
-		mgr = session.NewMemoryManager()
+		mgr = session.NewManager(session.NewMemStore())
 		ctx = context.Background()
 	})
 
 	It("creates a session with pending state", func() {
-		sess, err := mgr.Create(ctx, "my-project", "do something", "")
+		sess, err := mgr.Create(ctx, "my-project", "do something", "auto")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(sess.ID).NotTo(BeEmpty())
 		Expect(sess.ProjectName).To(Equal("my-project"))
-		Expect(sess.Prompt).To(Equal("do something"))
 		Expect(sess.State).To(Equal(session.StatePending))
 	})
 
-	It("gets a session by ID", func() {
-		created, err := mgr.Create(ctx, "proj", "prompt", "")
+	It("gets and lists sessions", func() {
+		a, err := mgr.Create(ctx, "a", "p1", "auto")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = mgr.Create(ctx, "b", "p2", "auto")
 		Expect(err).NotTo(HaveOccurred())
 
-		got, err := mgr.Get(ctx, created.ID)
+		got, err := mgr.Get(ctx, a.ID)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(got.ID).To(Equal(created.ID))
-		Expect(got.ProjectName).To(Equal("proj"))
+		Expect(got.ID).To(Equal(a.ID))
+
+		all, err := mgr.List(ctx, session.SessionFilter{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(all).To(HaveLen(2))
 	})
 
-	It("returns error for unknown session", func() {
-		_, err := mgr.Get(ctx, "nonexistent")
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("not found"))
-	})
-
-	It("lists sessions", func() {
-		_, err := mgr.Create(ctx, "a", "p1", "")
-		Expect(err).NotTo(HaveOccurred())
-		_, err = mgr.Create(ctx, "b", "p2", "")
+	It("updates state and fails sessions", func() {
+		sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
 		Expect(err).NotTo(HaveOccurred())
 
-		sessions, err := mgr.List(ctx)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(sessions).To(HaveLen(2))
-	})
-
-	It("updates session state", func() {
-		sess, err := mgr.Create(ctx, "proj", "prompt", "")
-		Expect(err).NotTo(HaveOccurred())
-
-		err = mgr.UpdateState(ctx, sess.ID, session.StateCloning, "Cloning repo")
-		Expect(err).NotTo(HaveOccurred())
-
+		Expect(mgr.UpdateState(ctx, sess.ID, session.StateCloning, "Cloning")).To(Succeed())
 		got, err := mgr.Get(ctx, sess.ID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got.State).To(Equal(session.StateCloning))
-		Expect(got.Message).To(Equal("Cloning repo"))
-	})
+		Expect(got.Message).To(Equal("Cloning"))
 
-	It("fails a session", func() {
-		sess, err := mgr.Create(ctx, "proj", "prompt", "")
-		Expect(err).NotTo(HaveOccurred())
-
-		err = mgr.Fail(ctx, sess.ID, fmt.Errorf("something broke"))
-		Expect(err).NotTo(HaveOccurred())
-
-		got, err := mgr.Get(ctx, sess.ID)
+		Expect(mgr.Fail(ctx, sess.ID, fmt.Errorf("boom"))).To(Succeed())
+		got, err = mgr.Get(ctx, sess.ID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got.State).To(Equal(session.StateFailed))
-		Expect(got.Error).To(Equal("something broke"))
+		Expect(got.Error).To(Equal("boom"))
 	})
 
-	It("returns error when updating unknown session", func() {
-		err := mgr.UpdateState(ctx, "bad-id", session.StateRunning, "")
+	It("persists the pull request URL via SetPullRequest", func() {
+		sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(mgr.SetPullRequest(ctx, sess.ID, "https://example.com/pr/7", 7, "feature/x")).To(Succeed())
+		got, err := mgr.Get(ctx, sess.ID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.PullRequestURL).To(Equal("https://example.com/pr/7"))
+	})
+
+	It("returns error for unknown session", func() {
+		_, err := mgr.Get(ctx, "nope")
+		Expect(err).To(HaveOccurred())
+		_, err = mgr.Watch(ctx, "nope", 0)
 		Expect(err).To(HaveOccurred())
 	})
 
 	Describe("Watch", func() {
-		It("receives state updates", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt", "")
+		It("replays history from seq 0 then streams live with no gap or dup", func() {
+			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
 			Expect(err).NotTo(HaveOccurred())
+
+			// Pre-Watch durable history.
+			Expect(mgr.UpdateState(ctx, sess.ID, session.StateCloning, "1")).To(Succeed())
+			Expect(mgr.UpdateState(ctx, sess.ID, session.StateRunning, "2")).To(Succeed())
 
 			watchCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
-
-			ch, err := mgr.Watch(watchCtx, sess.ID)
+			ch, err := mgr.Watch(watchCtx, sess.ID, 0)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Update state and check we receive it.
-			err = mgr.UpdateState(ctx, sess.ID, session.StateCloning, "cloning")
-			Expect(err).NotTo(HaveOccurred())
+			// Live durable events after Watch.
+			Expect(mgr.EmitEvent(ctx, sess.ID, session.AgentMessageEvent{SessionID: sess.ID, Text: "hi"})).To(Succeed())
+			Expect(mgr.UpdateState(ctx, sess.ID, session.StateCompleted, "done")).To(Succeed())
 
-			var event session.Event
-			Eventually(ch).Should(Receive(&event))
-			stateChange, ok := event.(session.StateChangeEvent)
-			Expect(ok).To(BeTrue())
-			Expect(stateChange.Session.State).To(Equal(session.StateCloning))
-		})
-
-		It("closes channel on terminal state", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt", "")
-			Expect(err).NotTo(HaveOccurred())
-
-			watchCtx, cancel := context.WithCancel(ctx)
-			defer cancel()
-
-			ch, err := mgr.Watch(watchCtx, sess.ID)
-			Expect(err).NotTo(HaveOccurred())
-
-			err = mgr.UpdateState(ctx, sess.ID, session.StateCompleted, "done")
-			Expect(err).NotTo(HaveOccurred())
-
-			// Drain the update.
-			Eventually(ch).Should(Receive())
-
-			// Channel should be closed.
-			Eventually(ch).Should(BeClosed())
-		})
-
-		It("returns closed channel with final state for already-terminal session", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt", "")
-			Expect(err).NotTo(HaveOccurred())
-
-			err = mgr.UpdateState(ctx, sess.ID, session.StateCompleted, "done")
-			Expect(err).NotTo(HaveOccurred())
-
-			ch, err := mgr.Watch(ctx, sess.ID)
-			Expect(err).NotTo(HaveOccurred())
-
-			var event session.Event
-			Eventually(ch).Should(Receive(&event))
-			stateChange, ok := event.(session.StateChangeEvent)
-			Expect(ok).To(BeTrue())
-			Expect(stateChange.Session.State).To(Equal(session.StateCompleted))
-
-			Eventually(ch).Should(BeClosed())
-		})
-
-		It("returns error for unknown session", func() {
-			_, err := mgr.Watch(ctx, "nonexistent")
-			Expect(err).To(HaveOccurred())
-		})
-
-		It("handles concurrent access safely", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt", "")
-			Expect(err).NotTo(HaveOccurred())
-
-			var wg sync.WaitGroup
-			for i := 0; i < 10; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					mgr.Get(ctx, sess.ID)
-				}()
+			events, closed := drainClosed(ch, 2*time.Second)
+			Expect(closed).To(BeTrue())
+			seqs := durableSeqs(events)
+			// Contiguous 1..N starting at 1.
+			Expect(seqs).NotTo(BeEmpty())
+			for i, s := range seqs {
+				Expect(s).To(Equal(int64(i + 1)))
 			}
+		})
 
-			wg.Add(1)
+		It("resumes from a cursor, skipping events <= fromSeq", func() {
+			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mgr.UpdateState(ctx, sess.ID, session.StateCloning, "1")).To(Succeed())
+			Expect(mgr.UpdateState(ctx, sess.ID, session.StateRunning, "2")).To(Succeed())
+			Expect(mgr.UpdateState(ctx, sess.ID, session.StateCompleted, "3")).To(Succeed())
+
+			ch, err := mgr.Watch(ctx, sess.ID, 2)
+			Expect(err).NotTo(HaveOccurred())
+			events, closed := drainClosed(ch, 2*time.Second)
+			Expect(closed).To(BeTrue())
+			seqs := durableSeqs(events)
+			Expect(seqs).To(Equal([]int64{3}))
+		})
+
+		It("returns history then closes for an already-terminal session", func() {
+			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mgr.UpdateState(ctx, sess.ID, session.StateCompleted, "done")).To(Succeed())
+
+			ch, err := mgr.Watch(ctx, sess.ID, 0)
+			Expect(err).NotTo(HaveOccurred())
+			events, closed := drainClosed(ch, 2*time.Second)
+			Expect(closed).To(BeTrue())
+			Expect(durableSeqs(events)).To(Equal([]int64{1}))
+			last := events[len(events)-1].Event.(session.StateChangeEvent)
+			Expect(last.Session.State).To(Equal(session.StateCompleted))
+		})
+
+		It("delivers ephemeral events live with seq 0 and never replays them", func() {
+			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+			Expect(err).NotTo(HaveOccurred())
+
+			ch, err := mgr.Watch(ctx, sess.ID, 0)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(mgr.EmitEvent(ctx, sess.ID, session.ConsoleOutputEvent{SessionID: sess.ID, Output: "log"})).To(Succeed())
+
+			var got session.WatchEvent
+			Eventually(ch).Should(Receive(&got))
+			Expect(got.Seq).To(Equal(int64(0)))
+			_, ok := got.Event.(session.ConsoleOutputEvent)
+			Expect(ok).To(BeTrue())
+
+			// Ephemeral events are not in the durable log.
+			polled, err := mgr.ListEvents(ctx, sess.ID, 0, 0)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(polled).To(BeEmpty())
+		})
+
+		It("disconnects a lagging subscriber and recovers the gap on re-Watch", func() {
+			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+			Expect(err).NotTo(HaveOccurred())
+
+			ch, err := mgr.Watch(ctx, sess.ID, 0)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Flood durable events without reading; the subscriber should be
+			// disconnected once it falls too far behind.
+			const n = 300
+			for i := 0; i < n; i++ {
+				Expect(mgr.EmitEvent(ctx, sess.ID, session.AgentMessageEvent{SessionID: sess.ID, Text: "x"})).To(Succeed())
+			}
+			Expect(mgr.UpdateState(ctx, sess.ID, session.StateCompleted, "done")).To(Succeed())
+
+			first, closed := drainClosed(ch, 2*time.Second)
+			Expect(closed).To(BeTrue())
+			firstSeqs := durableSeqs(first)
+			Expect(len(firstSeqs)).To(BeNumerically("<", n+1), "lagging watcher should be cut short")
+
+			// Reconnect from the last seen seq and replay the gap to terminal.
+			var lastSeen int64
+			if len(firstSeqs) > 0 {
+				lastSeen = firstSeqs[len(firstSeqs)-1]
+			}
+			ch2, err := mgr.Watch(ctx, sess.ID, lastSeen)
+			Expect(err).NotTo(HaveOccurred())
+			second, closed2 := drainClosed(ch2, 3*time.Second)
+			Expect(closed2).To(BeTrue())
+			secondSeqs := durableSeqs(second)
+			Expect(secondSeqs).NotTo(BeEmpty())
+			// No gap: first delivered seq is exactly lastSeen+1, contiguous to the end.
+			Expect(secondSeqs[0]).To(Equal(lastSeen + 1))
+			for i := 1; i < len(secondSeqs); i++ {
+				Expect(secondSeqs[i]).To(Equal(secondSeqs[i-1] + 1))
+			}
+			Expect(secondSeqs[len(secondSeqs)-1]).To(Equal(int64(n + 1)))
+		})
+
+		It("delivers strictly increasing contiguous seqs when watching during an append burst", func() {
+			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+			Expect(err).NotTo(HaveOccurred())
+
+			ch, err := mgr.Watch(ctx, sess.ID, 0)
+			Expect(err).NotTo(HaveOccurred())
+
+			const n = 100
 			go func() {
-				defer wg.Done()
-				time.Sleep(10 * time.Millisecond)
-				mgr.UpdateState(ctx, sess.ID, session.StateCompleted, "done")
+				defer GinkgoRecover()
+				for i := 0; i < n; i++ {
+					Expect(mgr.EmitEvent(ctx, sess.ID, session.AgentMessageEvent{SessionID: sess.ID, Text: "x"})).To(Succeed())
+				}
+				Expect(mgr.UpdateState(ctx, sess.ID, session.StateCompleted, "done")).To(Succeed())
 			}()
 
-			wg.Wait()
-
-			got, err := mgr.Get(ctx, sess.ID)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(got.State).To(Equal(session.StateCompleted))
+			events, closed := drainClosed(ch, 5*time.Second)
+			Expect(closed).To(BeTrue())
+			seqs := durableSeqs(events)
+			Expect(seqs[0]).To(Equal(int64(1)))
+			for i := 1; i < len(seqs); i++ {
+				Expect(seqs[i]).To(Equal(seqs[i-1] + 1))
+			}
+			Expect(seqs[len(seqs)-1]).To(Equal(int64(n + 1)))
 		})
 	})
 })

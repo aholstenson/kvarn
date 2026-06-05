@@ -350,7 +350,7 @@ var _ = Describe("StartJob", func() {
 		server        *http.Server
 		mockScm       *mockSCM
 		mockForgeInst *mockForge
-		sessionMgr    *session.MemoryManager
+		sessionMgr    session.Manager
 		listener      net.Listener
 		bareDir       string
 		tmpDir        string
@@ -358,7 +358,7 @@ var _ = Describe("StartJob", func() {
 
 	BeforeEach(func() {
 		mockScm = &mockSCM{}
-		sessionMgr = session.NewMemoryManager()
+		sessionMgr = session.NewManager(session.NewMemStore())
 
 		var err error
 		listener, err = net.Listen("tcp", "127.0.0.1:0")
@@ -739,7 +739,7 @@ var _ = Describe("StartJob with secrets", func() {
 		client       kvarnv1connect.OrchestratorServiceClient
 		server       *http.Server
 		mockScm      *mockSCM
-		sessionMgr   *session.MemoryManager
+		sessionMgr   session.Manager
 		listener     net.Listener
 		tmpDir       string
 		secretStore  *memSecretStore
@@ -748,7 +748,7 @@ var _ = Describe("StartJob with secrets", func() {
 
 	BeforeEach(func() {
 		mockScm = &mockSCM{}
-		sessionMgr = session.NewMemoryManager()
+		sessionMgr = session.NewManager(session.NewMemStore())
 		secretStore = newMemSecretStore()
 
 		var err error
@@ -952,7 +952,7 @@ var _ = Describe("StartJob submission flow", func() {
 		server        *http.Server
 		mockScm       *mockSCM
 		mockForgeInst *mockForge
-		sessionMgr    *session.MemoryManager
+		sessionMgr    session.Manager
 		listener      net.Listener
 		tmpDir        string
 		testAgent     *scriptedAgent
@@ -960,7 +960,7 @@ var _ = Describe("StartJob submission flow", func() {
 
 	BeforeEach(func() {
 		mockScm = &mockSCM{}
-		sessionMgr = session.NewMemoryManager()
+		sessionMgr = session.NewManager(session.NewMemStore())
 
 		var err error
 		listener, err = net.Listen("tcp", "127.0.0.1:0")
@@ -1118,7 +1118,7 @@ var _ = Describe("StartJob admission scheduler", func() {
 	var (
 		client     kvarnv1connect.OrchestratorServiceClient
 		server     *http.Server
-		sessionMgr *session.MemoryManager
+		sessionMgr session.Manager
 		listener   net.Listener
 		tmpDir     string
 		gates      []chan struct{}
@@ -1126,7 +1126,7 @@ var _ = Describe("StartJob admission scheduler", func() {
 	)
 
 	BeforeEach(func() {
-		sessionMgr = session.NewMemoryManager()
+		sessionMgr = session.NewManager(session.NewMemStore())
 		gates = []chan struct{}{
 			make(chan struct{}),
 			make(chan struct{}),

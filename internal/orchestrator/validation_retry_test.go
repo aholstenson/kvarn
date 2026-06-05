@@ -80,7 +80,7 @@ var _ = Describe("StartJob validation retry", func() {
 		server        *http.Server
 		mockScm       *mockSCM
 		mockForgeInst *mockForge
-		sessionMgr    *session.MemoryManager
+		sessionMgr    session.Manager
 		listener      net.Listener
 		tmpDir        string
 		ag            *retryAgent
@@ -89,7 +89,7 @@ var _ = Describe("StartJob validation retry", func() {
 
 	BeforeEach(func() {
 		mockScm = &mockSCM{}
-		sessionMgr = session.NewMemoryManager()
+		sessionMgr = session.NewManager(session.NewMemStore())
 		ag = &retryAgent{}
 
 		var err error

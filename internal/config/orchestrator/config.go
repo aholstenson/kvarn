@@ -19,6 +19,16 @@ type Config struct {
 	Scheduler  Scheduler  `toml:"scheduler"`
 	Cache      Cache      `toml:"cache"`
 	ImageCache ImageCache `toml:"image-cache"`
+	Sessions   Sessions   `toml:"sessions"`
+}
+
+// Sessions mirrors the [sessions] table: retention policy for the persistent
+// session store. Empty/unset falls through to the built-in default applied by
+// the CLI layer.
+type Sessions struct {
+	// Retention is how long terminal sessions are kept (e.g. "720h", "30d").
+	// "0" keeps them forever; empty falls through to the built-in default.
+	Retention string `toml:"retention,omitempty"`
 }
 
 // ImageCache mirrors the [image-cache] table: configuration for the

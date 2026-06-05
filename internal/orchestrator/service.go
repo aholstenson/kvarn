@@ -2,12 +2,14 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1076,12 +1078,9 @@ func (s *Service) submitChanges(
 	}
 
 	log.Info("pull request created", "url", pr.URL, "number", pr.Number)
-	s.sessionMgr.EmitEvent(ctx, sessionID, session.PullRequestEvent{
-		SessionID: sessionID,
-		URL:       pr.URL,
-		Number:    pr.Number,
-		Branch:    prBranch,
-	})
+	// Persist the PR URL on the session (and broadcast a PullRequestEvent) so
+	// GetSession returns it after the run, not just live watchers.
+	s.sessionMgr.SetPullRequest(ctx, sessionID, pr.URL, pr.Number, prBranch)
 
 	// Post task + work log as a PR comment so it stays out of any
 	// squash-merge commit message.
@@ -1216,26 +1215,82 @@ func (s *Service) GetSession(ctx context.Context, req *connect.Request[v1.GetSes
 	}), nil
 }
 
-func (s *Service) ListSessions(ctx context.Context, _ *connect.Request[v1.ListSessionsRequest]) (*connect.Response[v1.ListSessionsResponse], error) {
+// Server-side bounds for ListSessions paging.
+const (
+	defaultSessionsLimit = 100
+	maxSessionsLimit     = 500
+)
+
+func (s *Service) ListSessions(ctx context.Context, req *connect.Request[v1.ListSessionsRequest]) (*connect.Response[v1.ListSessionsResponse], error) {
 	if s.sessionMgr == nil {
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
 	}
 
-	sessions, err := s.sessionMgr.List(ctx)
+	limit := int(req.Msg.Limit)
+	if limit <= 0 {
+		limit = defaultSessionsLimit
+	}
+	if limit > maxSessionsLimit {
+		limit = maxSessionsLimit
+	}
+
+	cursorTime, cursorID, err := decodePageCursor(req.Msg.PageCursor)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("page_cursor: %w", err))
 	}
 
 	// When auth is enabled, restrict the listing to the projects the key
 	// covers. A missing identity (unreachable behind the interceptor) yields
 	// an empty list rather than an error.
 	id, hasIdentity := auth.IdentityFrom(ctx)
-
-	var resp []*v1.GetSessionResponse
-	for _, sess := range sessions {
-		if s.authEnabled && (!hasIdentity || !id.AllowsProject(sess.ProjectName)) {
-			continue
+	allowed := func(projectName string) bool {
+		if !s.authEnabled {
+			return true
 		}
+		return hasIdentity && id.AllowsProject(projectName)
+	}
+
+	// Over-fetch and re-page: the identity post-filter can drop rows from the
+	// middle of a store page, so keep pulling batches (advancing the keyset
+	// cursor) until we have a full page of authorized rows or the store is
+	// exhausted. next_page_cursor points at the last *included* row.
+	var (
+		included []*session.Session
+		lastRow  *session.Session
+	)
+	for len(included) < limit {
+		batch, err := s.sessionMgr.List(ctx, session.SessionFilter{
+			Project:        req.Msg.Project,
+			ActiveOnly:     req.Msg.ActiveOnly,
+			Limit:          limit,
+			AfterCreatedAt: cursorTime,
+			AfterID:        cursorID,
+		})
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		for _, sess := range batch {
+			cursorTime, cursorID = sess.CreatedAt, sess.ID
+			if !allowed(sess.ProjectName) {
+				continue
+			}
+			included = append(included, sess)
+			lastRow = sess
+			if len(included) == limit {
+				break
+			}
+		}
+		if len(batch) < limit {
+			// Store returned a short page: no more rows to fetch.
+			break
+		}
+	}
+
+	resp := make([]*v1.GetSessionResponse, 0, len(included))
+	for _, sess := range included {
 		resp = append(resp, &v1.GetSessionResponse{
 			SessionId:      sess.ID,
 			Project:        sess.ProjectName,
@@ -1249,9 +1304,42 @@ func (s *Service) ListSessions(ctx context.Context, _ *connect.Request[v1.ListSe
 		})
 	}
 
+	nextCursor := ""
+	if len(included) == limit && lastRow != nil {
+		nextCursor = encodePageCursor(lastRow.CreatedAt, lastRow.ID)
+	}
+
 	return connect.NewResponse(&v1.ListSessionsResponse{
-		Sessions: resp,
+		Sessions:       resp,
+		NextPageCursor: nextCursor,
 	}), nil
+}
+
+// encodePageCursor / decodePageCursor serialize the (created_at, id) keyset
+// cursor as an opaque base64 token. created_at is carried as unix micros UTC to
+// match the store ordering exactly.
+func encodePageCursor(createdAt time.Time, id string) string {
+	raw := fmt.Sprintf("%d|%s", createdAt.UTC().UnixMicro(), id)
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+func decodePageCursor(cursor string) (time.Time, string, error) {
+	if cursor == "" {
+		return time.Time{}, "", nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return time.Time{}, "", fmt.Errorf("invalid cursor encoding")
+	}
+	sep := strings.IndexByte(string(raw), '|')
+	if sep < 0 {
+		return time.Time{}, "", fmt.Errorf("malformed cursor")
+	}
+	micros, err := strconv.ParseInt(string(raw[:sep]), 10, 64)
+	if err != nil {
+		return time.Time{}, "", fmt.Errorf("malformed cursor timestamp")
+	}
+	return time.UnixMicro(micros).UTC(), string(raw[sep+1:]), nil
 }
 
 func (s *Service) WatchSession(ctx context.Context, req *connect.Request[v1.WatchSessionRequest], stream *connect.ServerStream[v1.SessionUpdate]) error {
@@ -1269,157 +1357,13 @@ func (s *Service) WatchSession(ctx context.Context, req *connect.Request[v1.Watc
 		return err
 	}
 
-	ch, err := s.sessionMgr.Watch(ctx, req.Msg.SessionId)
+	ch, err := s.sessionMgr.Watch(ctx, req.Msg.SessionId, req.Msg.FromSequence)
 	if err != nil {
 		return connect.NewError(connect.CodeNotFound, err)
 	}
 
-	for event := range ch {
-		var update *v1.SessionUpdate
-		switch e := event.(type) {
-		case session.StateChangeEvent:
-			update = &v1.SessionUpdate{
-				SessionId: e.Session.ID,
-				Project:   e.Session.ProjectName,
-				Event: &v1.SessionUpdate_StateChange{
-					StateChange: &v1.StateChange{
-						State:   string(e.Session.State),
-						Message: e.Session.Message,
-						Error:   e.Session.Error,
-					},
-				},
-			}
-		case session.AgentMessageEvent:
-			update = &v1.SessionUpdate{
-				SessionId: e.SessionID,
-				Event: &v1.SessionUpdate_AgentMessage{
-					AgentMessage: &v1.AgentMessage{
-						Text:    e.Text,
-						Final:   e.Final,
-						AgentId: e.AgentID,
-					},
-				},
-			}
-		case session.AgentToolUseEvent:
-			update = &v1.SessionUpdate{
-				SessionId: e.SessionID,
-				Event: &v1.SessionUpdate_AgentToolUse{
-					AgentToolUse: &v1.AgentToolUse{
-						ToolId:        e.ToolID,
-						ArgumentsJson: e.ArgumentsJSON,
-						AgentId:       e.AgentID,
-					},
-				},
-			}
-		case session.AgentToolResultEvent:
-			update = &v1.SessionUpdate{
-				SessionId: e.SessionID,
-				Event: &v1.SessionUpdate_AgentToolResult{
-					AgentToolResult: &v1.AgentToolResult{
-						ToolId:  e.ToolID,
-						Result:  e.Result,
-						IsError: e.IsError,
-						AgentId: e.AgentID,
-					},
-				},
-			}
-		case session.StepResultEvent:
-			update = &v1.SessionUpdate{
-				SessionId: e.SessionID,
-				Event: &v1.SessionUpdate_StepResult{
-					StepResult: &v1.StepResult{
-						Name:     e.Name,
-						Phase:    stepPhaseToProto(e.Phase),
-						ExitCode: e.ExitCode,
-						Stdout:   e.Stdout,
-						Stderr:   e.Stderr,
-						Passed:   e.Passed,
-						Skipped:  e.Skipped,
-					},
-				},
-			}
-		case session.StepOutputEvent:
-			update = &v1.SessionUpdate{
-				SessionId: e.SessionID,
-				Event: &v1.SessionUpdate_StepOutput{
-					StepOutput: &v1.StepOutput{
-						Name:   e.Name,
-						Phase:  stepPhaseToProto(e.Phase),
-						Stdout: e.Stdout,
-						Stderr: e.Stderr,
-					},
-				},
-			}
-		case session.VmInfoEvent:
-			update = &v1.SessionUpdate{
-				SessionId: e.SessionID,
-				Event: &v1.SessionUpdate_VmInfo{
-					VmInfo: &v1.VmInfo{
-						CpuCount:       e.CpuCount,
-						CpuModel:       e.CpuModel,
-						MemTotalMb:     e.MemTotalMB,
-						MemAvailableMb: e.MemAvailMB,
-						DiskUsedMb:     e.DiskUsedMB,
-						DiskTotalMb:    e.DiskTotalMB,
-					},
-				},
-			}
-		case session.TransferProgressEvent:
-			update = &v1.SessionUpdate{
-				SessionId: e.SessionID,
-				Event: &v1.SessionUpdate_TransferProgress{
-					TransferProgress: &v1.TransferProgress{
-						BytesSent:  e.BytesSent,
-						TotalBytes: e.TotalBytes,
-					},
-				},
-			}
-		case session.DependencyOutputEvent:
-			update = &v1.SessionUpdate{
-				SessionId: e.SessionID,
-				Event: &v1.SessionUpdate_DependencyOutput{
-					DependencyOutput: &v1.DependencyOutput{
-						Stdout: e.Stdout,
-						Stderr: e.Stderr,
-					},
-				},
-			}
-		case session.CacheProgressEvent:
-			update = &v1.SessionUpdate{
-				SessionId: e.SessionID,
-				Event: &v1.SessionUpdate_CacheProgress{
-					CacheProgress: &v1.CacheProgress{
-						Path:      e.Path,
-						Index:     int32(e.Index),
-						Total:     int32(e.Total),
-						Restoring: e.Restoring,
-					},
-				},
-			}
-		case session.PullRequestEvent:
-			update = &v1.SessionUpdate{
-				SessionId: e.SessionID,
-				Event: &v1.SessionUpdate_PullRequestCreated{
-					PullRequestCreated: &v1.PullRequestCreated{
-						Url:    e.URL,
-						Number: int32(e.Number),
-						Branch: e.Branch,
-					},
-				},
-			}
-		case session.CostEvent:
-			update = &v1.SessionUpdate{
-				SessionId: e.SessionID,
-				Event: &v1.SessionUpdate_CostUpdate{
-					CostUpdate: &v1.CostUpdate{
-						Kind:         costKindToProto(e.Kind),
-						Report:       costReportToProto(e.Report),
-						LimitUsd:     e.Limit.MaxUSD,
-						WarnFraction: e.Limit.WarnFraction,
-					},
-				},
-			}
-		}
+	for we := range ch {
+		update := sessionEventToUpdate(we.Seq, we.Event)
 		if update != nil {
 			if err := stream.Send(update); err != nil {
 				return err
@@ -1428,6 +1372,213 @@ func (s *Service) WatchSession(ctx context.Context, req *connect.Request[v1.Watc
 	}
 
 	return nil
+}
+
+func (s *Service) ListSessionEvents(ctx context.Context, req *connect.Request[v1.ListSessionEventsRequest]) (*connect.Response[v1.ListSessionEventsResponse], error) {
+	if s.sessionMgr == nil {
+		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+	}
+
+	sess, err := s.sessionMgr.Get(ctx, req.Msg.SessionId)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, err)
+	}
+	if err := s.authorizeProject(ctx, sess.ProjectName, req.Spec().Procedure); err != nil {
+		return nil, err
+	}
+
+	limit := int(req.Msg.Limit)
+	if limit <= 0 {
+		limit = defaultSessionEventsLimit
+	}
+	if limit > maxSessionEventsLimit {
+		limit = maxSessionEventsLimit
+	}
+
+	events, err := s.sessionMgr.ListEvents(ctx, req.Msg.SessionId, req.Msg.AfterSequence, limit)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+
+	var (
+		updates []*v1.SessionUpdate
+		lastSeq int64
+	)
+	for _, we := range events {
+		update := sessionEventToUpdate(we.Seq, we.Event)
+		if update == nil {
+			continue
+		}
+		updates = append(updates, update)
+		lastSeq = we.Seq
+	}
+
+	return connect.NewResponse(&v1.ListSessionEventsResponse{
+		Events:       updates,
+		LastSequence: lastSeq,
+	}), nil
+}
+
+// Server-side bounds for ListSessionEvents polling.
+const (
+	defaultSessionEventsLimit = 500
+	maxSessionEventsLimit     = 2000
+)
+
+// sessionEventToUpdate converts an internal session Event (with its durable
+// sequence; 0 for ephemeral) into the proto SessionUpdate. Returns nil for
+// events that have no wire representation. Shared by WatchSession streaming and
+// ListSessionEvents polling.
+func sessionEventToUpdate(seq int64, event session.Event) *v1.SessionUpdate {
+	var update *v1.SessionUpdate
+	switch e := event.(type) {
+	case session.StateChangeEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.Session.ID,
+			Project:   e.Session.ProjectName,
+			Event: &v1.SessionUpdate_StateChange{
+				StateChange: &v1.StateChange{
+					State:   string(e.Session.State),
+					Message: e.Session.Message,
+					Error:   e.Session.Error,
+				},
+			},
+		}
+	case session.AgentMessageEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_AgentMessage{
+				AgentMessage: &v1.AgentMessage{
+					Text:    e.Text,
+					Final:   e.Final,
+					AgentId: e.AgentID,
+				},
+			},
+		}
+	case session.AgentToolUseEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_AgentToolUse{
+				AgentToolUse: &v1.AgentToolUse{
+					ToolId:        e.ToolID,
+					ArgumentsJson: e.ArgumentsJSON,
+					AgentId:       e.AgentID,
+				},
+			},
+		}
+	case session.AgentToolResultEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_AgentToolResult{
+				AgentToolResult: &v1.AgentToolResult{
+					ToolId:  e.ToolID,
+					Result:  e.Result,
+					IsError: e.IsError,
+					AgentId: e.AgentID,
+				},
+			},
+		}
+	case session.StepResultEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_StepResult{
+				StepResult: &v1.StepResult{
+					Name:     e.Name,
+					Phase:    stepPhaseToProto(e.Phase),
+					ExitCode: e.ExitCode,
+					Stdout:   e.Stdout,
+					Stderr:   e.Stderr,
+					Passed:   e.Passed,
+					Skipped:  e.Skipped,
+				},
+			},
+		}
+	case session.StepOutputEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_StepOutput{
+				StepOutput: &v1.StepOutput{
+					Name:   e.Name,
+					Phase:  stepPhaseToProto(e.Phase),
+					Stdout: e.Stdout,
+					Stderr: e.Stderr,
+				},
+			},
+		}
+	case session.VmInfoEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_VmInfo{
+				VmInfo: &v1.VmInfo{
+					CpuCount:       e.CpuCount,
+					CpuModel:       e.CpuModel,
+					MemTotalMb:     e.MemTotalMB,
+					MemAvailableMb: e.MemAvailMB,
+					DiskUsedMb:     e.DiskUsedMB,
+					DiskTotalMb:    e.DiskTotalMB,
+				},
+			},
+		}
+	case session.TransferProgressEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_TransferProgress{
+				TransferProgress: &v1.TransferProgress{
+					BytesSent:  e.BytesSent,
+					TotalBytes: e.TotalBytes,
+				},
+			},
+		}
+	case session.DependencyOutputEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_DependencyOutput{
+				DependencyOutput: &v1.DependencyOutput{
+					Stdout: e.Stdout,
+					Stderr: e.Stderr,
+				},
+			},
+		}
+	case session.CacheProgressEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_CacheProgress{
+				CacheProgress: &v1.CacheProgress{
+					Path:      e.Path,
+					Index:     int32(e.Index),
+					Total:     int32(e.Total),
+					Restoring: e.Restoring,
+				},
+			},
+		}
+	case session.PullRequestEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_PullRequestCreated{
+				PullRequestCreated: &v1.PullRequestCreated{
+					Url:    e.URL,
+					Number: int32(e.Number),
+					Branch: e.Branch,
+				},
+			},
+		}
+	case session.CostEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_CostUpdate{
+				CostUpdate: &v1.CostUpdate{
+					Kind:         costKindToProto(e.Kind),
+					Report:       costReportToProto(e.Report),
+					LimitUsd:     e.Limit.MaxUSD,
+					WarnFraction: e.Limit.WarnFraction,
+				},
+			},
+		}
+	}
+	if update != nil {
+		update.Sequence = seq
+	}
+	return update
 }
 
 // BridgeHandler returns the dispatch.Handler for this service, which implements

@@ -31,6 +31,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
 	"github.com/aholstenson/kvarn/internal/sandbox/transfer"
 	"github.com/aholstenson/kvarn/internal/session"
+	sessionsqlite "github.com/aholstenson/kvarn/internal/session/sqlite"
 	"github.com/aholstenson/kvarn/internal/vm"
 	"github.com/aholstenson/kvarn/internal/vm/local"
 	llms "github.com/aholstenson/llms-go"
@@ -45,6 +46,7 @@ type Cmd struct {
 	ForgesFile      string `help:"Path to forges TOML file." default:""`
 	AgentsFile      string `help:"Path to agents config TOML file." default:""`
 	APIKeysFile     string `help:"Path to API keys TOML file." default:""`
+	SessionsDB      string `help:"Path to the persistent sessions SQLite database. Defaults to ~/.config/kvarn/sessions.db." default:""`
 	NoAuth            bool   `help:"Disable API-key auth (local dev only)." env:"KVARN_NO_AUTH"`
 	Model             string `help:"LLM model alias for the coding agent." default:"coding-agent"`
 	OrchestratorFile  string `help:"Path to orchestrator TOML file (host-level settings, e.g. scheduler pool)." default:""`
@@ -230,20 +232,40 @@ func (c *Cmd) Run() error {
 		}
 	}()
 
-	sessionMgr := session.NewMemoryManager()
+	sessionsDBPath := c.SessionsDB
+	if sessionsDBPath == "" {
+		sessionsDBPath = sessionsqlite.DefaultPath()
+	}
+	sessionStore, err := sessionsqlite.New(sessionsDBPath)
+	if err != nil {
+		return fmt.Errorf("open sessions database: %w", err)
+	}
+	defer sessionStore.Close()
+	slog.Info("sessions database", "path", sessionsDBPath)
+
+	// VMs do not survive an orchestrator restart, so any session left
+	// non-terminal in the store can never make progress. Flip them to failed
+	// (appending a state_change event) before serving.
+	if ids, err := sessionStore.ReconcileNonTerminal(ctx, "orchestrator restarted"); err != nil {
+		return fmt.Errorf("reconcile sessions: %w", err)
+	} else if len(ids) > 0 {
+		slog.Info("reconciled non-terminal sessions to failed", "count", len(ids))
+	}
+
+	retention, err := resolveSessionRetention(orchFile.Sessions)
+	if err != nil {
+		return fmt.Errorf("sessions: %w", err)
+	}
+	startSessionRetention(ctx, sessionStore, retention)
+
+	sessionMgr := session.NewManager(sessionStore)
 	instruments, err := metrics.NewInstruments(meter,
 		func(ctx context.Context) (int64, error) {
-			ss, err := sessionMgr.List(ctx)
+			ss, err := sessionMgr.List(ctx, session.SessionFilter{ActiveOnly: true})
 			if err != nil {
 				return 0, err
 			}
-			var n int64
-			for _, s := range ss {
-				if !s.State.IsTerminal() {
-					n++
-				}
-			}
-			return n, nil
+			return int64(len(ss)), nil
 		},
 		func() metrics.SchedulerSample {
 			used, free, _ := sched.Snapshot()
@@ -494,6 +516,58 @@ func (c *Cmd) resolveMaxVMLifetime(fileCfg orchcfg.Scheduler) (time.Duration, er
 		return 0, fmt.Errorf("%s: must be non-negative", source)
 	}
 	return d, nil
+}
+
+// defaultSessionRetention is how long terminal sessions are kept when the
+// operator leaves [sessions].retention unset.
+const defaultSessionRetention = 720 * time.Hour // 30 days
+
+// resolveSessionRetention parses [sessions].retention. An empty value falls
+// through to the built-in default; an explicit "0" disables pruning (keep
+// forever). time.ParseDuration units apply (e.g. "720h").
+func resolveSessionRetention(cfg orchcfg.Sessions) (time.Duration, error) {
+	if cfg.Retention == "" {
+		return defaultSessionRetention, nil
+	}
+	d, err := time.ParseDuration(cfg.Retention)
+	if err != nil {
+		return 0, fmt.Errorf("sessions.retention: %w", err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("sessions.retention: must be non-negative")
+	}
+	return d, nil
+}
+
+// startSessionRetention prunes terminal sessions older than retention once at
+// startup and then hourly until ctx is cancelled. A non-positive retention
+// keeps sessions forever (no pruning).
+func startSessionRetention(ctx context.Context, store session.Store, retention time.Duration) {
+	if retention <= 0 {
+		slog.Info("session retention disabled; keeping terminal sessions forever")
+		return
+	}
+	prune := func() {
+		n, err := store.PruneTerminalBefore(ctx, time.Now().Add(-retention))
+		if err != nil {
+			slog.Warn("session prune failed", "error", err)
+		} else if n > 0 {
+			slog.Info("pruned terminal sessions", "count", n, "older_than", retention)
+		}
+	}
+	prune()
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				prune()
+			}
+		}
+	}()
 }
 
 // resolveSize applies CLI > file > host precedence to a size field. flagName /

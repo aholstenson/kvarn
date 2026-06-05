@@ -21,19 +21,19 @@ type Limit struct {
 
 // ModelCost is the per-model contribution to a Report.
 type ModelCost struct {
-	ModelID      string
-	InputTokens  int64
-	OutputTokens int64
-	CachedTokens int64
-	TotalUSD     float64
+	ModelID      string  `json:"model_id"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CachedTokens int64   `json:"cached_tokens"`
+	TotalUSD     float64 `json:"total_usd"`
 }
 
 // Report is a snapshot of accumulated LLM spend for a job.
 type Report struct {
-	InputTokens  int64
-	OutputTokens int64
-	CachedTokens int64
-	TotalUSD     float64
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CachedTokens int64   `json:"cached_tokens"`
+	TotalUSD     float64 `json:"total_usd"`
 	// PerModel is keyed by llms-go service name (the qualified model ID).
-	PerModel map[string]ModelCost
+	PerModel map[string]ModelCost `json:"per_model,omitempty"`
 }

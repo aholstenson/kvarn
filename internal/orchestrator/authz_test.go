@@ -71,7 +71,7 @@ var _ = Describe("OrchestratorService authorization", func() {
 		server         *http.Server
 		listener       net.Listener
 		addr           string
-		sessionMgr     *session.MemoryManager
+		sessionMgr     session.Manager
 		allowedSession string
 		otherSession   string
 		wildcardToken  string
@@ -85,7 +85,7 @@ var _ = Describe("OrchestratorService authorization", func() {
 		wildcardToken = addKey(apiKeyStore, "wild", "*")
 		scopedToken = addKey(apiKeyStore, "scoped", "allowed-project")
 
-		sessionMgr = session.NewMemoryManager()
+		sessionMgr = session.NewManager(session.NewMemStore())
 		s1, err := sessionMgr.Create(ctx, "allowed-project", "prompt", "auto")
 		Expect(err).NotTo(HaveOccurred())
 		allowedSession = s1.ID
@@ -207,7 +207,7 @@ var _ = Describe("OrchestratorService with auth disabled", func() {
 
 	BeforeEach(func() {
 		ctx := context.Background()
-		sessionMgr := session.NewMemoryManager()
+		sessionMgr := session.NewManager(session.NewMemStore())
 		_, err := sessionMgr.Create(ctx, "p1", "prompt", "auto")
 		Expect(err).NotTo(HaveOccurred())
 		_, err = sessionMgr.Create(ctx, "p2", "prompt", "auto")
