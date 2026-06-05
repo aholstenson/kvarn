@@ -55,6 +55,30 @@ var _ = Describe("Session.Close", func() {
 		Expect(order).To(Equal([]int{2, 1, 0}))
 	})
 
+	It("still runs remaining closers when an earlier one panics", func() {
+		sess := sandbox.NewTestSession()
+
+		var ran []string
+		var mu sync.Mutex
+		record := func(name string) {
+			mu.Lock()
+			ran = append(ran, name)
+			mu.Unlock()
+		}
+
+		// Registered first → runs last in reverse order.
+		sess.AddCloserForTest(func() { record("first") })
+		sess.AddCloserForTest(func() { record("second") })
+		// Registered last → runs first; panicking here must not skip the others.
+		sess.AddCloserForTest(func() {
+			record("panicker")
+			panic("boom")
+		})
+
+		Expect(func() { sess.Close() }).NotTo(Panic())
+		Expect(ran).To(Equal([]string{"panicker", "second", "first"}))
+	})
+
 	It("is idempotent: second Close after the first is a no-op", func() {
 		sess := sandbox.NewTestSession()
 

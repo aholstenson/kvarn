@@ -233,9 +233,21 @@ func (s *Session) Close() {
 		s.closersMu.Unlock()
 
 		for i := len(closers) - 1; i >= 0; i-- {
-			closers[i]()
+			runCloser(closers[i])
 		}
 	})
+}
+
+// runCloser invokes a closer and recovers from any panic so that one
+// misbehaving closer cannot skip the remaining teardown (VM destroy,
+// listener close, etc.).
+func runCloser(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic in sandbox session closer", "panic", r)
+		}
+	}()
+	fn()
 }
 
 func (s *Session) addCloser(fn func()) {
