@@ -69,9 +69,10 @@ echo "==> Mounting rootfs..."
 mkdir -p "$ROOTFS"
 
 # Ensure loop device nodes exist (Docker containers may not populate them
-# even with --privileged).
+# even with --privileged). Fail loudly if a node exists but isn't a block
+# device — silently skipping would produce a broken image at mount time.
 for i in $(seq 0 7); do
-    [ -b "/dev/loop$i" ] || mknod "/dev/loop$i" b 7 "$i" 2>/dev/null || true
+    [ -b "/dev/loop$i" ] || mknod "/dev/loop$i" b 7 "$i"
 done
 
 LOOP_DEV=$(losetup --find --show --offset="$OFFSET" --sizelimit="$SIZE" /dist/disk.img)
