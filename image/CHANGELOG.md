@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/aholstenson/kvarn/compare/image-v0.2.0...image-v0.3.0) (2026-06-05)
+
+
+### Features
+
+* Install Nix 2.34.7 in the image ([b4992c5](https://github.com/aholstenson/kvarn/commit/b4992c57d5b743a2f2728c0db1c9f47780bd2851))
+
 ## [0.2.0](https://github.com/aholstenson/kvarn/compare/image-v0.1.0...image-v0.2.0) (2026-05-30)
 
 
