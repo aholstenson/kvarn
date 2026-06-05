@@ -31,6 +31,16 @@ case "$ARCH" in
     *) echo "No recorded checksum for ARCH: $ARCH" >&2; exit 1 ;;
 esac
 
+# Pinned Nix release. releases.nixos.org publishes per-version, immutable
+# install scripts; the unpinned https://nixos.org/nix/install URL is a 302 to
+# whatever is current, which we don't want sneaking into a reproducible image.
+# The script self-verifies the per-arch tarball it downloads, so a single pin
+# on the script bytes covers every arch. When bumping, copy the published
+# digest:
+#   curl -fsSL https://releases.nixos.org/nix/nix-<version>/install.sha256
+NIX_VERSION="2.34.7"
+NIX_INSTALL_SHA256="e9d447ce3d2ff62d7ff9cb6ef401de6fa8acb148839dd00f7271945d7b638b14"
+
 ROOTFS="/mnt/rootfs"
 
 echo "==> Installing build dependencies..."
@@ -274,10 +284,18 @@ growpart:
 resize_rootfs: true
 CLOUDINIT
 
-echo "==> Installing Nix (single-user, kvarn-owned)..."
+echo "==> Installing Nix ${NIX_VERSION} (single-user, kvarn-owned)..."
 # Single-user install: ephemeral VMs are single-tenant, so the daemon mode
 # adds nothing but conflicts with rootless-podman uid mappings.
 chroot "$ROOTFS" install -d -o kvarn -g kvarn /nix
+
+# Fetch + verify outside the chroot so a corrupted/tampered script never runs.
+echo "==> Downloading Nix installer..."
+curl -fsSL "https://releases.nixos.org/nix/nix-${NIX_VERSION}/install" \
+    -o "$ROOTFS/tmp/nix-install.sh"
+echo "==> Verifying Nix installer checksum..."
+echo "${NIX_INSTALL_SHA256}  $ROOTFS/tmp/nix-install.sh" | sha256sum -c -
+chroot "$ROOTFS" chown kvarn:kvarn /tmp/nix-install.sh
 
 # `su -l` runs cloud-init's locale script which writes to /dev/null, and the
 # Nix installer opens a pseudoterminal master at /dev/ptmx. The rootfs /dev
@@ -287,7 +305,6 @@ mount --rbind /dev "$ROOTFS/dev"
 mount --make-rslave "$ROOTFS/dev"
 chroot "$ROOTFS" su -l kvarn -s /bin/sh -c '
   set -e
-  curl -fsSL https://nixos.org/nix/install -o /tmp/nix-install.sh
   sh /tmp/nix-install.sh --no-daemon --no-channel-add --yes
   rm /tmp/nix-install.sh
 '
