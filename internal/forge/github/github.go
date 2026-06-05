@@ -145,7 +145,10 @@ func (g *GitHub) getInstallationToken(ctx context.Context, appID, privateKeyPath
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read installation token response: %w", err)
+	}
 	if resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("create installation token: HTTP %d: %s", resp.StatusCode, string(body))
 	}
@@ -221,7 +224,10 @@ func (g *GitHub) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts)
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read PR response: %w", err)
+	}
 	if resp.StatusCode != http.StatusCreated {
 		return nil, fmt.Errorf("create PR: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -285,7 +291,10 @@ func (g *GitHub) PostComment(ctx context.Context, opts forge.PostCommentOpts) er
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("post comment: HTTP %d (read response: %v)", resp.StatusCode, err)
+		}
 		return fmt.Errorf("post comment: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -315,7 +324,10 @@ func (g *GitHub) addLabels(ctx context.Context, owner, repo string, number int, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("add labels: HTTP %d (read response: %v)", resp.StatusCode, err)
+		}
 		return fmt.Errorf("add labels: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
