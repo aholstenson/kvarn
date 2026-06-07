@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0](https://github.com/aholstenson/kvarn/compare/v0.2.0...v0.3.0) (2026-06-07)
+
+
+### Features
+
+* Add ability to control clone depth ([46d304f](https://github.com/aholstenson/kvarn/commit/46d304f77ba64918f7652702389c551f9a42f69c))
+* Add built-in hostkeys for Git cloning ([8b2b1a7](https://github.com/aholstenson/kvarn/commit/8b2b1a7c2a3266cbc99b0ae4fe5c49175f7cb43b))
+* Add cache for container images ([b80c25a](https://github.com/aholstenson/kvarn/commit/b80c25a3b6711305d7b47b9600a4a5fa5babd10a))
+* Add persistent storage for sessions ([b3d7fea](https://github.com/aholstenson/kvarn/commit/b3d7fea45b3d18558ea234fbfeb5409e19e51643))
+* Improve secret injection supporting bearer, basic and OAuth schemes ([9fcaa18](https://github.com/aholstenson/kvarn/commit/9fcaa183147738e459ec106fd767cc5eda4c5f0e))
+* Install Nix 2.34.7 in the image ([b4992c5](https://github.com/aholstenson/kvarn/commit/b4992c57d5b743a2f2728c0db1c9f47780bd2851))
+* Support relative cache paths ([d172431](https://github.com/aholstenson/kvarn/commit/d1724315f120e5e2ea479862061a4337b0890136))
+
+
+### Bug Fixes
+
+* Don't silently drop errors from Github ([9583eb1](https://github.com/aholstenson/kvarn/commit/9583eb1a35f491a3dc87b58340fbc053476817e8))
+* Gracefully handle panics during sandbox close ([db1a77f](https://github.com/aholstenson/kvarn/commit/db1a77fccdc58b200cc9a65b93b1f33ad948cdba))
+* Show full line-by-line output in run and test commands ([abed35a](https://github.com/aholstenson/kvarn/commit/abed35aec0ca71fe548b4d957a78a4a3402e3218))
+
 ## [0.2.0](https://github.com/aholstenson/kvarn/compare/v0.1.0...v0.2.0) (2026-05-31)
 
 
