@@ -53,7 +53,7 @@ type Config struct {
 	Network      Network           `yaml:"network"`
 	Cache        Cache             `yaml:"cache"`
 	Environment  map[string]string `yaml:"environment,omitempty"`
-	Secrets      []string          `yaml:"secrets,omitempty"`
+	Secrets      []SecretRef       `yaml:"secrets,omitempty"`
 	Setup        Setup             `yaml:"setup"`
 	Validation   Validation        `yaml:"validation"`
 }
@@ -81,6 +81,44 @@ type CacheEntry struct {
 // Network defines network egress controls for the VM.
 type Network struct {
 	AllowedHosts []string `yaml:"allowed_hosts,omitempty"`
+}
+
+// SecretRef is a single entry in the kvarn.yml `secrets:` list. It declares a
+// secret the project needs and, for managed secrets, how and where the egress
+// proxy should apply it. Both scheme and hosts are usage-site concerns: the
+// store type (env vs managed) only governs whether the real value enters the
+// VM, while scheme/hosts describe the protocol and scope at the call site.
+//
+// An entry may be written as a bare scalar (`- NAME`), which is shorthand for
+// the default scheme over any allowlisted host, or as a mapping with explicit
+// `name`, `scheme`, and `hosts` fields.
+type SecretRef struct {
+	// Name is the secret's name; it is exposed inside the VM as this env var.
+	Name string `yaml:"name"`
+	// Scheme selects how a managed secret is applied to an outbound request.
+	// Empty defaults to "bearer" at resolution time. One of "", "bearer",
+	// "basic", "oauth".
+	Scheme string `yaml:"scheme,omitempty"`
+	// Hosts scopes substitution to a set of allowlist host patterns (same
+	// wildcard syntax as network.allowed_hosts). Empty means any allowlisted
+	// host.
+	Hosts []string `yaml:"hosts,omitempty"`
+}
+
+// UnmarshalYAML accepts either a scalar (a bare secret name) or a mapping with
+// name/scheme/hosts fields.
+func (r *SecretRef) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		return value.Decode(&r.Name)
+	}
+	// Use an alias type to avoid recursing into this method.
+	type rawRef SecretRef
+	var raw rawRef
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*r = SecretRef(raw)
+	return nil
 }
 
 // hostnameRe validates hostnames per RFC 952/1123.
@@ -426,6 +464,36 @@ func validateCachePath(field, original string) (string, error) {
 	return norm, nil
 }
 
+// validateHostPattern validates a single host entry from an allowlist (either
+// network.allowed_hosts or a secret's scoping `hosts:`). It accepts hostnames,
+// IP addresses, and the "*.domain" wildcard form, and rejects schemes, paths,
+// and ports. field is used for error context.
+func validateHostPattern(field, host string) error {
+	if strings.TrimSpace(host) == "" {
+		return fmt.Errorf("%s contains empty entry", field)
+	}
+	if strings.Contains(host, "://") {
+		return fmt.Errorf("%s entry %q must not contain a scheme", field, host)
+	}
+	if strings.Contains(host, "/") {
+		return fmt.Errorf("%s entry %q must not contain a path", field, host)
+	}
+	// A "*.example.com" wildcard matches any subdomain; validate the suffix.
+	check := strings.TrimPrefix(host, "*.")
+	// Check for port, but skip IPv6 addresses (which contain colons).
+	if net.ParseIP(check) == nil && strings.Contains(check, ":") {
+		return fmt.Errorf("%s entry %q must not contain a port", field, host)
+	}
+	if net.ParseIP(check) == nil && !hostnameRe.MatchString(check) {
+		return fmt.Errorf("%s entry %q is not a valid hostname or IP", field, host)
+	}
+	return nil
+}
+
+// secretSchemes is the set of accepted kvarn.yml secret schemes. The empty
+// string is accepted and defaults to bearer at resolution time.
+var secretSchemes = map[string]bool{"": true, "bearer": true, "basic": true, "oauth": true}
+
 func (c *Config) validate() error {
 	// image and dependencies are mutually exclusive: shell sessions inside an
 	// image: job run via `podman exec`, so host-installed Nix binaries are
@@ -472,21 +540,8 @@ func (c *Config) validate() error {
 
 	// Validate network allowed_hosts.
 	for _, host := range c.Network.AllowedHosts {
-		if strings.TrimSpace(host) == "" {
-			return errors.New("network.allowed_hosts contains empty entry")
-		}
-		if strings.Contains(host, "://") {
-			return fmt.Errorf("network.allowed_hosts entry %q must not contain a scheme", host)
-		}
-		if strings.Contains(host, "/") {
-			return fmt.Errorf("network.allowed_hosts entry %q must not contain a path", host)
-		}
-		// Check for port, but skip IPv6 addresses (which contain colons).
-		if net.ParseIP(host) == nil && strings.Contains(host, ":") {
-			return fmt.Errorf("network.allowed_hosts entry %q must not contain a port", host)
-		}
-		if net.ParseIP(host) == nil && !hostnameRe.MatchString(host) {
-			return fmt.Errorf("network.allowed_hosts entry %q is not a valid hostname or IP", host)
+		if err := validateHostPattern("network.allowed_hosts", host); err != nil {
+			return err
 		}
 	}
 
@@ -521,24 +576,33 @@ func (c *Config) validate() error {
 		}
 	}
 
-	// Validate secret names. Secrets are delivered as env vars in the VM,
-	// so each name must be a valid POSIX env-var name. Duplicates and
-	// overlap with `environment:` would shadow one another, so reject both.
+	// Validate secret refs. Secrets are exposed as env vars in the VM, so each
+	// name must be a valid POSIX env-var name. Duplicates and overlap with
+	// `environment:` would shadow one another, so reject both. The scheme and
+	// host scope are usage-site concerns validated here too.
 	seenSecrets := make(map[string]bool, len(c.Secrets))
-	for _, name := range c.Secrets {
-		if name == "" {
+	for _, ref := range c.Secrets {
+		if ref.Name == "" {
 			return errors.New("secrets contains empty entry")
 		}
-		if !envNameRe.MatchString(name) {
-			return fmt.Errorf("secret name %q is not a valid POSIX env-var name", name)
+		if !envNameRe.MatchString(ref.Name) {
+			return fmt.Errorf("secret name %q is not a valid POSIX env-var name", ref.Name)
 		}
-		if seenSecrets[name] {
-			return fmt.Errorf("secret name %q is duplicated", name)
+		if seenSecrets[ref.Name] {
+			return fmt.Errorf("secret name %q is duplicated", ref.Name)
 		}
-		if _, ok := c.Environment[name]; ok {
-			return fmt.Errorf("secret name %q overlaps with environment key", name)
+		if _, ok := c.Environment[ref.Name]; ok {
+			return fmt.Errorf("secret name %q overlaps with environment key", ref.Name)
 		}
-		seenSecrets[name] = true
+		if !secretSchemes[ref.Scheme] {
+			return fmt.Errorf("secret %q has invalid scheme %q: must be one of bearer, basic, oauth", ref.Name, ref.Scheme)
+		}
+		for _, host := range ref.Hosts {
+			if err := validateHostPattern(fmt.Sprintf("secret %q hosts", ref.Name), host); err != nil {
+				return err
+			}
+		}
+		seenSecrets[ref.Name] = true
 	}
 
 	allSteps := make([]Step, 0)

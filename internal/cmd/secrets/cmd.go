@@ -29,7 +29,7 @@ type SetCmd struct {
 	SecretsFile string `help:"Path to per-project secrets TOML file." default:""`
 	Project     string `arg:"" help:"Project name."`
 	Name        string `arg:"" help:"Secret name (must be a valid POSIX env-var name)."`
-	Type        string `help:"Secret type: env or bearer." default:"env"`
+	Type        string `help:"Secret type: env or managed." default:"env"`
 	Value       string `help:"Secret value. If omitted, the value is read from stdin."`
 }
 

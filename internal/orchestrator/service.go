@@ -652,13 +652,14 @@ func (s *Service) runJob(requestID, sessionID string, proj *project.Project, bra
 		rc = &repocontext.RepoContext{}
 	}
 
-	// Resolve secrets declared in kvarn.yml. env-typed secrets become
-	// real env vars in the VM; bearer-typed secrets are exposed as
-	// per-job placeholders that the egress proxy substitutes for the
-	// real value just before the request leaves the host.
-	var secretEnv, bearerPlaceholders map[string]string
+	// Resolve secrets declared in kvarn.yml. env-typed secrets become real
+	// env vars in the VM; managed secrets are exposed as per-job placeholders
+	// that the egress proxy substitutes for the real value (per scheme) just
+	// before the request leaves the host.
+	var secretEnv map[string]string
+	var managed map[string]secret.Managed
 	if cfg != nil && len(cfg.Secrets) > 0 {
-		secretEnv, bearerPlaceholders, err = secret.Resolve(ctx, s.secretStore, proj.Name, cfg.Secrets)
+		secretEnv, managed, err = secret.Resolve(ctx, s.secretStore, proj.Name, secretRefs(cfg.Secrets))
 	}
 	if err != nil {
 		log.Error("failed to resolve secrets", "error", err)
@@ -667,8 +668,8 @@ func (s *Service) runJob(requestID, sessionID string, proj *project.Project, bra
 	}
 
 	createOpts := s.createOpts
-	if len(bearerPlaceholders) > 0 {
-		createOpts.Network.SecretInjector = egressproxy.NewPlaceholderInjector(bearerPlaceholders, log)
+	if len(managed) > 0 {
+		createOpts.Network.SecretInjector = egressproxy.NewPlaceholderInjector(managedSecrets(managed), log)
 	}
 
 	// Boot VM, transfer files, configure firewall/tools/container.
@@ -1684,6 +1685,31 @@ func costKindToProto(k session.CostUpdateKind) v1.CostUpdateKind {
 	default:
 		return v1.CostUpdateKind_COST_UPDATE_KIND_UNSPECIFIED
 	}
+}
+
+// secretRefs maps kvarn.yml secret declarations to resolution refs. The two
+// types are deliberately decoupled (project knows nothing about resolution);
+// the mapping lives at the call site.
+func secretRefs(refs []projconfig.SecretRef) []secret.Ref {
+	out := make([]secret.Ref, len(refs))
+	for i, r := range refs {
+		out[i] = secret.Ref{Name: r.Name, Scheme: r.Scheme, Hosts: r.Hosts}
+	}
+	return out
+}
+
+// managedSecrets translates resolved managed secrets into the proxy's
+// injector input.
+func managedSecrets(m map[string]secret.Managed) map[string]egressproxy.ManagedSecret {
+	out := make(map[string]egressproxy.ManagedSecret, len(m))
+	for ph, ms := range m {
+		out[ph] = egressproxy.ManagedSecret{
+			Value:  ms.Value,
+			Scheme: egressproxy.Scheme(ms.Scheme),
+			Hosts:  ms.Hosts,
+		}
+	}
+	return out
 }
 
 func stepPhaseToProto(sp session.StepPhase) v1.StepPhase {

@@ -149,10 +149,11 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 	}
 
 	// Resolve any secrets declared in kvarn.yml. env-typed secrets become
-	// real env vars in the VM; bearer-typed secrets are exposed as
-	// per-job placeholders that the local egress proxy substitutes for
-	// the real value just before the request leaves the host.
-	var secretEnv, bearerPlaceholders map[string]string
+	// real env vars in the VM; managed secrets are exposed as per-job
+	// placeholders that the local egress proxy substitutes for the real
+	// value (per scheme) just before the request leaves the host.
+	var secretEnv map[string]string
+	var managed map[string]secret.Managed
 	if len(cfg.Secrets) > 0 {
 		projectName, err := c.resolveProjectName(ctx)
 		if err != nil {
@@ -166,7 +167,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 			return err
 		}
 
-		secretEnv, bearerPlaceholders, err = secret.Resolve(ctx, store, projectName, cfg.Secrets)
+		secretEnv, managed, err = secret.Resolve(ctx, store, projectName, secretRefs(cfg.Secrets))
 		if err != nil {
 			renderer.Stop()
 			return fmt.Errorf("resolve secrets: %w", err)
@@ -212,8 +213,8 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 	}
 
 	createOpts := vm.CreateOpts{Image: img}
-	if len(bearerPlaceholders) > 0 {
-		createOpts.Network.SecretInjector = egressproxy.NewPlaceholderInjector(bearerPlaceholders, slog.Default())
+	if len(managed) > 0 {
+		createOpts.Network.SecretInjector = egressproxy.NewPlaceholderInjector(managedSecrets(managed), slog.Default())
 	}
 
 	var lastProvisionItem *taskui.Item
@@ -883,6 +884,29 @@ func gitOriginURL(dir string) (string, bool) {
 		return "", false
 	}
 	return url, true
+}
+
+// secretRefs maps kvarn.yml secret declarations to resolution refs.
+func secretRefs(refs []project.SecretRef) []secret.Ref {
+	out := make([]secret.Ref, len(refs))
+	for i, r := range refs {
+		out[i] = secret.Ref{Name: r.Name, Scheme: r.Scheme, Hosts: r.Hosts}
+	}
+	return out
+}
+
+// managedSecrets translates resolved managed secrets into the proxy's
+// injector input.
+func managedSecrets(m map[string]secret.Managed) map[string]egressproxy.ManagedSecret {
+	out := make(map[string]egressproxy.ManagedSecret, len(m))
+	for ph, ms := range m {
+		out[ph] = egressproxy.ManagedSecret{
+			Value:  ms.Value,
+			Scheme: egressproxy.Scheme(ms.Scheme),
+			Hosts:  ms.Hosts,
+		}
+	}
+	return out
 }
 
 func openSecretStore(path string) (secret.Store, error) {

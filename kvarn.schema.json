@@ -87,11 +87,40 @@
       }
     },
     "secrets": {
-      "description": "Names of runtime secrets the project requires. Each name must be a valid POSIX env-var name and must be registered in the orchestrator's secrets store before a job starts.",
+      "description": "Runtime secrets the project requires. Each must be registered in the orchestrator's secrets store before a job starts. An entry is either a bare name (string) or a mapping that, for managed secrets, also declares how (scheme) and where (hosts) the egress proxy applies it.",
       "type": "array",
       "items": {
-        "type": "string",
-        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        "oneOf": [
+          {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "description": "Secret name. Must be a valid POSIX env-var name; exposed inside the VM as this env var.",
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              },
+              "scheme": {
+                "description": "How a managed secret is applied to outbound requests: 'bearer' (header value), 'basic' (HTTP Basic auth blob), or 'oauth' (request body). Defaults to bearer.",
+                "type": "string",
+                "enum": ["bearer", "basic", "oauth"]
+              },
+              "hosts": {
+                "description": "Allowlist host patterns the substitution is scoped to (same wildcard syntax as network.allowed_hosts, e.g. \"*.example.com\"). Empty means any allowlisted host.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^\\*?[a-zA-Z0-9._-]+$"
+                }
+              }
+            }
+          }
+        ]
       }
     },
     "setup": {

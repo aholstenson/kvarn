@@ -1049,7 +1049,66 @@ setup:
 `)
 		cfg, err := project.Load(dir)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.Secrets).To(ConsistOf("HMAC_SIGN", "DOCKERHUB_TOKEN"))
+		names := make([]string, len(cfg.Secrets))
+		for i, s := range cfg.Secrets {
+			names[i] = s.Name
+		}
+		Expect(names).To(ConsistOf("HMAC_SIGN", "DOCKERHUB_TOKEN"))
+	})
+
+	It("parses a mapping entry with scheme and hosts", func() {
+		writeYAML(dir, "kvarn.yml", `
+secrets:
+  - PLAIN
+  - name: DOCKERHUB
+    scheme: basic
+    hosts:
+      - registry-1.docker.io
+      - "*.docker.io"
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+		cfg, err := project.Load(dir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Secrets).To(HaveLen(2))
+		Expect(cfg.Secrets[0]).To(Equal(project.SecretRef{Name: "PLAIN"}))
+		Expect(cfg.Secrets[1].Name).To(Equal("DOCKERHUB"))
+		Expect(cfg.Secrets[1].Scheme).To(Equal("basic"))
+		Expect(cfg.Secrets[1].Hosts).To(ConsistOf("registry-1.docker.io", "*.docker.io"))
+	})
+
+	It("rejects an invalid scheme", func() {
+		writeYAML(dir, "kvarn.yml", `
+secrets:
+  - name: TOKEN
+    scheme: sigv4
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+		_, err := project.Load(dir)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("invalid scheme"))
+	})
+
+	It("rejects a host scope with a scheme prefix", func() {
+		writeYAML(dir, "kvarn.yml", `
+secrets:
+  - name: TOKEN
+    scheme: bearer
+    hosts:
+      - "https://example.com"
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+		_, err := project.Load(dir)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("must not contain a scheme"))
 	})
 
 	It("rejects empty secret name", func() {

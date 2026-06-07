@@ -126,11 +126,11 @@ func OpenDefault(path string) *Store {
 
 func validateType(t string) error {
 	switch t {
-	case secret.TypeEnv, secret.TypeBearer:
+	case secret.TypeEnv, secret.TypeManaged:
 		return nil
 	}
 	return fmt.Errorf("invalid secret type %q: must be %q or %q",
-		t, secret.TypeEnv, secret.TypeBearer)
+		t, secret.TypeEnv, secret.TypeManaged)
 }
 
 func (s *Store) Get(ctx context.Context, project, name string) (*secret.Secret, error) {
@@ -163,4 +163,3 @@ func (s *Store) Put(ctx context.Context, sec *secret.Secret) error {
 func (s *Store) Delete(ctx context.Context, project, name string) error {
 	return s.inner.Delete(ctx, secretKey{Project: project, Name: name})
 }
-

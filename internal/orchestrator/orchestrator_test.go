@@ -856,7 +856,7 @@ var _ = Describe("StartJob with secrets", func() {
 		})).To(Succeed())
 		Expect(secretStore.Put(context.Background(), &secret.Secret{
 			Project: "test-project", Name: "DOCKERHUB_TOKEN",
-			Type: secret.TypeBearer, Value: "real-dockerhub-token",
+			Type: secret.TypeManaged, Value: "real-dockerhub-token",
 		})).To(Succeed())
 
 		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
@@ -881,7 +881,7 @@ var _ = Describe("StartJob with secrets", func() {
 		Expect(opts.Secrets).To(HaveKeyWithValue("HMAC_SIGN", "real-hmac-value"))
 		Expect(opts.Secrets).To(HaveKey("DOCKERHUB_TOKEN"))
 		placeholder := opts.Secrets["DOCKERHUB_TOKEN"]
-		Expect(placeholder).To(HavePrefix("kvarn:"))
+		Expect(placeholder).To(HavePrefix("kvarn_"))
 		Expect(placeholder).NotTo(Equal("real-dockerhub-token"))
 		Expect(opts.CreateOpts.Network.SecretInjector).NotTo(BeNil())
 	})

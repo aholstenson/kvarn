@@ -2,16 +2,19 @@ package secret
 
 import "context"
 
-// Type identifies how a secret is delivered to a job. Adding new types
-// requires changes in the orchestrator's resolution path and (for non-env
-// types) the egress proxy.
+// Type identifies whether a secret's real value enters the VM. Adding new
+// types requires changes in the orchestrator's resolution path and (for
+// non-env types) the egress proxy. It describes the delivery boundary only;
+// how a managed secret is applied (bearer/basic/oauth) is a separate concern
+// expressed per usage site in kvarn.yml.
 const (
-	// TypeEnv injects the value verbatim as an environment variable.
+	// TypeEnv injects the value verbatim as an environment variable; the real
+	// value lives inside the VM.
 	TypeEnv = "env"
-	// TypeBearer injects an unguessable placeholder as the env-var value;
-	// the egress proxy substitutes the placeholder for the real value in
-	// outbound request headers.
-	TypeBearer = "bearer"
+	// TypeManaged keeps the real value on the host: the VM only ever sees an
+	// unguessable placeholder, and the egress proxy substitutes the real value
+	// into matching outbound requests just before they leave the host.
+	TypeManaged = "managed"
 )
 
 // Secret holds a per-project named secret with delivery semantics.

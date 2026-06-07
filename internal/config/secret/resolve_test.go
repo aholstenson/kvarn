@@ -65,11 +65,11 @@ var _ = Describe("Resolve", func() {
 		store = newMemStore()
 	})
 
-	It("returns nil maps and nil error when no names are requested", func() {
-		env, bearer, err := secret.Resolve(ctx, store, "any", nil)
+	It("returns nil maps and nil error when no refs are requested", func() {
+		env, managed, err := secret.Resolve(ctx, store, "any", nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(env).To(BeNil())
-		Expect(bearer).To(BeNil())
+		Expect(managed).To(BeNil())
 	})
 
 	It("resolves env-typed secrets as direct env-var values", func() {
@@ -78,43 +78,82 @@ var _ = Describe("Resolve", func() {
 			Type: secret.TypeEnv, Value: "real-hmac-value",
 		})).To(Succeed())
 
-		env, bearer, err := secret.Resolve(ctx, store, "demo", []string{"HMAC_SIGN"})
+		env, managed, err := secret.Resolve(ctx, store, "demo", []secret.Ref{{Name: "HMAC_SIGN"}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(env).To(HaveKeyWithValue("HMAC_SIGN", "real-hmac-value"))
-		Expect(bearer).To(BeEmpty())
+		Expect(managed).To(BeEmpty())
 	})
 
-	It("resolves bearer-typed secrets as placeholder→value pairs", func() {
+	It("resolves managed secrets as placeholder→value pairs", func() {
 		Expect(store.Put(ctx, &secret.Secret{
 			Project: "demo", Name: "TOKEN",
-			Type: secret.TypeBearer, Value: "real-token",
+			Type: secret.TypeManaged, Value: "real-token",
 		})).To(Succeed())
 
-		env, bearer, err := secret.Resolve(ctx, store, "demo", []string{"TOKEN"})
+		env, managed, err := secret.Resolve(ctx, store, "demo", []secret.Ref{{Name: "TOKEN"}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(env).To(HaveKey("TOKEN"))
 		placeholder := env["TOKEN"]
-		Expect(placeholder).To(HavePrefix("kvarn:"))
+		Expect(placeholder).To(HavePrefix("kvarn_"))
 		Expect(placeholder).NotTo(Equal("real-token"))
-		Expect(bearer).To(HaveKeyWithValue(placeholder, "real-token"))
+		Expect(managed).To(HaveKey(placeholder))
+		Expect(managed[placeholder].Value).To(Equal("real-token"))
 	})
 
-	It("resolves a mix of env and bearer secrets in a single call", func() {
+	It("carries scheme and hosts through to the managed entry", func() {
+		Expect(store.Put(ctx, &secret.Secret{
+			Project: "demo", Name: "DOCKERHUB",
+			Type: secret.TypeManaged, Value: "dh-token",
+		})).To(Succeed())
+
+		env, managed, err := secret.Resolve(ctx, store, "demo", []secret.Ref{{
+			Name: "DOCKERHUB", Scheme: "basic", Hosts: []string{"registry-1.docker.io"},
+		}})
+		Expect(err).NotTo(HaveOccurred())
+		m := managed[env["DOCKERHUB"]]
+		Expect(m.Value).To(Equal("dh-token"))
+		Expect(m.Scheme).To(Equal("basic"))
+		Expect(m.Hosts).To(ConsistOf("registry-1.docker.io"))
+	})
+
+	It("rejects a scheme set on an env-typed secret", func() {
+		Expect(store.Put(ctx, &secret.Secret{
+			Project: "demo", Name: "PLAIN",
+			Type: secret.TypeEnv, Value: "v",
+		})).To(Succeed())
+
+		_, _, err := secret.Resolve(ctx, store, "demo", []secret.Ref{{Name: "PLAIN", Scheme: "bearer"}})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("apply only to"))
+	})
+
+	It("rejects hosts set on an env-typed secret", func() {
+		Expect(store.Put(ctx, &secret.Secret{
+			Project: "demo", Name: "PLAIN",
+			Type: secret.TypeEnv, Value: "v",
+		})).To(Succeed())
+
+		_, _, err := secret.Resolve(ctx, store, "demo", []secret.Ref{{Name: "PLAIN", Hosts: []string{"example.com"}}})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("apply only to"))
+	})
+
+	It("resolves a mix of env and managed secrets in a single call", func() {
 		Expect(store.Put(ctx, &secret.Secret{
 			Project: "demo", Name: "HMAC_SIGN",
 			Type: secret.TypeEnv, Value: "hmac",
 		})).To(Succeed())
 		Expect(store.Put(ctx, &secret.Secret{
 			Project: "demo", Name: "DOCKERHUB",
-			Type: secret.TypeBearer, Value: "dh-token",
+			Type: secret.TypeManaged, Value: "dh-token",
 		})).To(Succeed())
 
-		env, bearer, err := secret.Resolve(ctx, store, "demo",
-			[]string{"HMAC_SIGN", "DOCKERHUB"})
+		env, managed, err := secret.Resolve(ctx, store, "demo",
+			[]secret.Ref{{Name: "HMAC_SIGN"}, {Name: "DOCKERHUB"}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(env).To(HaveKeyWithValue("HMAC_SIGN", "hmac"))
-		Expect(env["DOCKERHUB"]).To(HavePrefix("kvarn:"))
-		Expect(bearer).To(HaveKeyWithValue(env["DOCKERHUB"], "dh-token"))
+		Expect(env["DOCKERHUB"]).To(HavePrefix("kvarn_"))
+		Expect(managed[env["DOCKERHUB"]].Value).To(Equal("dh-token"))
 	})
 
 	It("reports every missing name in a single error", func() {
@@ -124,7 +163,7 @@ var _ = Describe("Resolve", func() {
 		})).To(Succeed())
 
 		_, _, err := secret.Resolve(ctx, store, "demo",
-			[]string{"PRESENT", "MISSING_A", "MISSING_B"})
+			[]secret.Ref{{Name: "PRESENT"}, {Name: "MISSING_A"}, {Name: "MISSING_B"}})
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("missing secrets for project \"demo\""))
 		Expect(err.Error()).To(ContainSubstring("MISSING_A"))
@@ -133,7 +172,7 @@ var _ = Describe("Resolve", func() {
 	})
 
 	It("errors when names are requested but no store is configured", func() {
-		_, _, err := secret.Resolve(ctx, nil, "demo", []string{"X"})
+		_, _, err := secret.Resolve(ctx, nil, "demo", []secret.Ref{{Name: "X"}})
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("no secret store is configured"))
 	})
@@ -144,24 +183,24 @@ var _ = Describe("Resolve", func() {
 			Type: "aws", Value: "v",
 		})).To(Succeed())
 
-		_, _, err := secret.Resolve(ctx, store, "demo", []string{"WEIRD"})
+		_, _, err := secret.Resolve(ctx, store, "demo", []secret.Ref{{Name: "WEIRD"}})
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("unknown type"))
 	})
 
-	It("uses a fresh placeholder per bearer secret", func() {
+	It("uses a fresh placeholder per managed secret", func() {
 		Expect(store.Put(ctx, &secret.Secret{
 			Project: "demo", Name: "A",
-			Type: secret.TypeBearer, Value: "value-a",
+			Type: secret.TypeManaged, Value: "value-a",
 		})).To(Succeed())
 		Expect(store.Put(ctx, &secret.Secret{
 			Project: "demo", Name: "B",
-			Type: secret.TypeBearer, Value: "value-b",
+			Type: secret.TypeManaged, Value: "value-b",
 		})).To(Succeed())
 
-		env, bearer, err := secret.Resolve(ctx, store, "demo", []string{"A", "B"})
+		env, managed, err := secret.Resolve(ctx, store, "demo", []secret.Ref{{Name: "A"}, {Name: "B"}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(env["A"]).NotTo(Equal(env["B"]))
-		Expect(bearer).To(HaveLen(2))
+		Expect(managed).To(HaveLen(2))
 	})
 })

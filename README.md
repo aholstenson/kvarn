@@ -10,7 +10,7 @@ Kvarn is a server that runs coding-agent jobs in isolated VMs. You host the orch
 - **Coding agent with modes.** Pick `implement`, `fix` (test-first), `review`, and `research`, or let `auto` choose the best action.
 - **Reproducible environments from one file.** `kvarn.yml` declares dependencies (Nix flakes or an OCI image), setup steps, health checks, and required/advisory validation, with per-project caches reused across runs.
 - **Locked-down networking.** Outbound traffic is blocked unless you allowlist the host, enforced by a host egress proxy the VM can't bypass.
-- **Secrets the agent never sees.** Bearer tokens stay on the host and are injected into outbound requests by the proxy; inside the VM the agent only ever holds an unguessable placeholder.
+- **Secrets the agent never sees.** Managed secrets stay on the host and are applied to outbound requests by the proxy (per scheme: bearer header, HTTP Basic auth, or OAuth request body); inside the VM the agent only ever holds an unguessable placeholder.
 - **Cost guardrails.** Live per-model token and USD tracking, a soft warning threshold, and a hard budget cap that stops the run before it overspends.
 - **From prompt to pull request.** Send the orchestrator a project name and a prompt; it clones the repository, runs the agent, validates the result, pushes a branch, and opens a PR on GitHub. (For local development, `kvarn run --diff` / `--apply` does the same against your working tree.)
 
@@ -142,7 +142,7 @@ Every job runs in a throwaway VM, and the only path off that VM is a host-side e
 
 - **Per-job VM.** Each run boots a fresh VM (Apple Virtualization on macOS, KVM/QEMU on Linux) and tears it down afterward. The agent's shell commands run inside the guest, never on your host.
 - **Egress allowlist.** All outbound traffic flows through a proxy on the host. Requests to hosts that are not in `network.allowed_hosts` (plus the defaults needed to fetch dependencies) are blocked. The proxy terminates TLS using an ephemeral CA whose private key never leaves the host; only its public certificate is trusted inside the guest.
-- **Bearer secrets stay on the host.** A `bearer` secret is exposed to the job as an unguessable placeholder. The proxy swaps the placeholder for the real value just before the request leaves the host, so the credential itself never enters the VM.
+- **Managed secrets stay on the host.** A `managed` secret is exposed to the job as an unguessable placeholder. The proxy substitutes the real value just before the request leaves the host — per the scheme declared in `kvarn.yml` (`bearer` header value, `basic` HTTP auth blob, or `oauth` request body) and scoped to the declared hosts — so the credential itself never enters the VM.
 
 ## Project configuration
 
@@ -177,6 +177,11 @@ environment:
 
 secrets:
   - API_TOKEN
+  - name: DOCKERHUB
+    scheme: basic
+    hosts:
+      - registry-1.docker.io
+      - auth.docker.io
 
 setup:
   steps:
@@ -405,22 +410,32 @@ Use the CLI to manage per-project runtime secrets. Values are stored in `~/.conf
 
 ```sh
 printf '%s' "$API_TOKEN" | kvarn secrets set my-project API_TOKEN
-kvarn secrets set my-project GITHUB_TOKEN --type bearer --value "$GITHUB_TOKEN"
+kvarn secrets set my-project GITHUB_TOKEN --type managed --value "$GITHUB_TOKEN"
 kvarn secrets list my-project
 kvarn secrets remove my-project API_TOKEN
 ```
 
-Secret types:
+The store `type` says only whether the real value enters the VM:
 
-- `env` secrets are injected as environment variables in the VM.
-- `bearer` secrets are exposed to the job as placeholders; the host egress proxy replaces placeholders with the real bearer value before outbound requests leave the host.
+- `env` secrets are injected verbatim as environment variables in the VM.
+- `managed` secrets keep the real value on the host; the job sees only a placeholder, and the egress proxy substitutes the real value into matching outbound requests before they leave the host.
 
-A project must declare the names it needs in `kvarn.yml`:
+How a managed secret is applied is declared per usage site in `kvarn.yml` via `scheme` (and optionally scoped with `hosts`):
+
+- `bearer` (the default) substitutes the placeholder verbatim in header values, e.g. `Authorization: Bearer <placeholder>`.
+- `basic` decodes the HTTP Basic auth blob, substitutes inside `user:secret`, and re-encodes (used by Docker/podman/npm/git).
+- `oauth` substitutes inside the request body (e.g. a form-encoded or JSON token-exchange POST).
+
+A project must declare the secrets it needs in `kvarn.yml`. An entry is either a bare name (defaults to `bearer`, any allowlisted host) or a mapping:
 
 ```yaml
 secrets:
   - API_TOKEN
-  - GITHUB_TOKEN
+  - name: DOCKERHUB
+    scheme: basic
+    hosts:
+      - registry-1.docker.io
+      - auth.docker.io
 ```
 
 ### Model aliases

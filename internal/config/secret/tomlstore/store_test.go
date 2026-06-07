@@ -53,7 +53,7 @@ var _ = Describe("Secret TomlStore", func() {
 
 	It("lists secrets for a project sorted by name", func() {
 		Expect(store.Put(ctx, &secret.Secret{Project: "a", Name: "B", Type: secret.TypeEnv, Value: "v1"})).To(Succeed())
-		Expect(store.Put(ctx, &secret.Secret{Project: "a", Name: "A", Type: secret.TypeBearer, Value: "v2"})).To(Succeed())
+		Expect(store.Put(ctx, &secret.Secret{Project: "a", Name: "A", Type: secret.TypeManaged, Value: "v2"})).To(Succeed())
 		Expect(store.Put(ctx, &secret.Secret{Project: "other", Name: "X", Type: secret.TypeEnv, Value: "x"})).To(Succeed())
 
 		secrets, err := store.List(ctx, "a")
@@ -89,11 +89,11 @@ var _ = Describe("Secret TomlStore", func() {
 
 	It("updates an existing secret", func() {
 		Expect(store.Put(ctx, &secret.Secret{Project: "a", Name: "X", Type: secret.TypeEnv, Value: "old"})).To(Succeed())
-		Expect(store.Put(ctx, &secret.Secret{Project: "a", Name: "X", Type: secret.TypeBearer, Value: "new"})).To(Succeed())
+		Expect(store.Put(ctx, &secret.Secret{Project: "a", Name: "X", Type: secret.TypeManaged, Value: "new"})).To(Succeed())
 
 		s, err := store.Get(ctx, "a", "X")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(s.Type).To(Equal(secret.TypeBearer))
+		Expect(s.Type).To(Equal(secret.TypeManaged))
 		Expect(s.Value).To(Equal("new"))
 	})
 
