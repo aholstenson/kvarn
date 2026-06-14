@@ -215,25 +215,27 @@ If the task describes a bug — a reported failure, an error, a regression, or b
 
 If the task describes a new feature, refactor, or change where there is no concrete bug to reproduce, use the **implement workflow**:
 
-1. Call spawn_agent with name="plan" and pass the task message (plus any context you have gathered) as the prompt. Wait for the plan before editing.
-2. Follow the plan as a blueprint. Deviate only when you discover something the plan got wrong; note any deviation in your final summary.
+1. Gauge the size of the change. For a small, self-contained change where the approach is obvious, implement it directly. For anything larger or with non-obvious structure, call spawn_agent with name="plan", pass the task message (plus any context you have gathered) as the prompt, and wait for the plan before editing.
+2. If you planned, follow the plan as a blueprint. Deviate only when you discover something the plan got wrong; note any deviation in your final summary.
 3. After substantive edits, run the project's build and tests.
 
 If the task is mixed (e.g. fix one bug AND add a feature), handle the bug first via the fix workflow, then plan and implement the feature.`
 
-const implementIntro = `The task message describes a new feature, refactor, or change where there is no concrete bug to reproduce. Plan first, then implement and verify.
+const implementIntro = `The task message describes a new feature, refactor, or change where there is no concrete bug to reproduce. For anything non-trivial, plan first; then implement and verify.
 
 ## Plan before you edit
 
-Call spawn_agent with name="plan" and pass the task message (plus any context you have gathered) as the prompt. Treat the returned plan as the blueprint for your work: follow its steps in order, and only deviate when you discover something the plan got wrong — in which case note the deviation in your final summary.
+Gauge the size of the change first. For a small, self-contained change where the approach is already obvious (a localized edit to one or a few files), skip planning and go straight to implementing — a plan sub-agent would just cost a round trip. For anything larger or with non-obvious structure, plan before editing.
 
-Do not edit before the plan returns. If the plan is missing detail you need (e.g. exact file paths), use list_files / read_file / search_files to fill it in rather than re-invoking the planner.
+To plan, call spawn_agent with name="plan" and pass the task message (plus any context you have gathered) as the prompt. Treat the returned plan as the blueprint for your work: follow its steps in order, and only deviate when you discover something the plan got wrong — in which case note the deviation in your final summary.
+
+Once you've decided to plan, do not edit before the plan returns. If the plan is missing detail you need (e.g. exact file paths), use list_files / read_file / search_files to fill it in rather than re-invoking the planner.
 
 ## Workflow
 
-1. Spawn the plan sub-agent first; wait for its output before any edits.
+1. Decide whether the change warrants a plan. If it does, spawn the plan sub-agent first and wait for its output before any edits.
 2. Orient with list_files and search_files only as needed; avoid unfocused exploration.
-3. Apply the planned edits in order.
+3. Apply the edits in order.
 4. After substantive edits, run the project's build and tests (or the commands implied by the repo or task message).
 5. On failure, use the actual error output to drive the next fix. Repeat until green or until blocked by a clear external constraint; if blocked, state that briefly in your final summary.`
 
