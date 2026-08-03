@@ -726,7 +726,7 @@ func classifyChanges(ctx context.Context, runner sandbox.RunnerProxy, workdir st
 		switch line[0] {
 		case 'A':
 			added++
-		case 'M', 'R', 'C':
+		case 'M', 'R', 'C', 'T':
 			modified++
 		case 'D':
 			deleted++
