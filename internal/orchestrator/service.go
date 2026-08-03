@@ -986,29 +986,31 @@ func (s *Service) runJob(spec jobSpec) {
 	if userPrompt == "" {
 		userPrompt = spec.agentPrompt
 	}
-	if !mode.WritesChanges() {
+	var submitErr error
+	switch {
+	case !mode.WritesChanges():
 		log.Info("skipping PR submission: read-only mode")
-	} else if forgeImpl == nil {
+	case forgeImpl == nil:
 		log.Info("skipping PR submission: no forge configured")
-	} else if agentResult == nil {
+	case agentResult == nil:
 		log.Info("skipping PR submission: no agent result")
-	} else if creds == nil || creds.APIToken() == "" {
+	case creds == nil || creds.APIToken() == "":
 		log.Info("skipping PR submission: no token in credentials")
-	} else if spec.pr != nil {
-		if err := s.submitFollowup(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg,
+	case spec.pr != nil:
+		submitErr = s.submitFollowup(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg,
 			spec.pr, cloneURL, cloneDir, creds, userPrompt, worklog.snapshot(),
-			tracker.Snapshot(), costLimits.ReportCostOnPR, log); err != nil {
-			log.Error("failed to submit follow-up", "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, err)
-			return
-		}
-	} else {
-		s.submitChanges(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg, branch, cloneURL, cloneDir, creds, userPrompt, worklog.snapshot(), tracker.Snapshot(), costLimits.ReportCostOnPR, log)
+			tracker.Snapshot(), costLimits.ReportCostOnPR, log)
+	default:
+		submitErr = s.submitChanges(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg,
+			branch, cloneURL, cloneDir, creds, userPrompt, worklog.snapshot(),
+			tracker.Snapshot(), costLimits.ReportCostOnPR, log)
 	}
 
 	// Final cost snapshot. The agent has already populated the session with
 	// its partial snapshot above; this one captures any tail work, and the
-	// CostEvent gives watchers a clear end-of-run summary.
+	// CostEvent gives watchers a clear end-of-run summary. It is emitted before
+	// the outcome is decided so a run that spent money and then failed to
+	// submit still reports what it spent.
 	finalReport := tracker.Snapshot()
 	s.sessionMgr.UpdateCost(ctx, sessionID, finalReport)
 	s.sessionMgr.EmitEvent(ctx, sessionID, session.CostEvent{
@@ -1017,6 +1019,15 @@ func (s *Service) runJob(spec jobSpec) {
 		Report:    finalReport,
 		Limit:     cost.Limit{MaxUSD: costLimits.MaxCostUSD, WarnFraction: costLimits.WarnThreshold},
 	})
+
+	// A run whose work never reached the forge is not a success: reporting it as
+	// completed with an empty pull_request_url hides the failure from anyone
+	// listing sessions.
+	if submitErr != nil {
+		log.Error("failed to submit changes", "error", submitErr)
+		s.sessionMgr.Fail(ctx, sessionID, submitErr)
+		return
+	}
 
 	log.Info("job completed successfully")
 	s.sessionMgr.UpdateState(ctx, sessionID, session.StateCompleted, "Completed")
@@ -1073,6 +1084,8 @@ func branchSlug(title string) string {
 }
 
 // submitChanges extracts changes from the VM, commits, pushes, and creates a PR.
+// Everything up to and including PR creation is fatal to the run: without it
+// the agent's work exists only inside a VM that is about to be torn down.
 func (s *Service) submitChanges(
 	ctx context.Context,
 	sessionID string,
@@ -1090,16 +1103,15 @@ func (s *Service) submitChanges(
 	costReport cost.Report,
 	reportCostOnPR bool,
 	log *slog.Logger,
-) {
+) error {
 	// Check if there are any changes.
 	changedFiles, err := sess.ChangedFiles(ctx)
 	if err != nil {
-		log.Warn("failed to check changed files for submission", "error", err)
-		return
+		return fmt.Errorf("check changed files for submission: %w", err)
 	}
 	if len(changedFiles) == 0 {
 		log.Info("no changes to submit")
-		return
+		return nil
 	}
 
 	title := agentResult.Title
@@ -1112,8 +1124,7 @@ func (s *Service) submitChanges(
 
 	// Extract changes from VM to host clone dir.
 	if err := sess.ExtractChanges(ctx, cloneDir); err != nil {
-		log.Error("failed to extract changes from VM", "error", err)
-		return
+		return fmt.Errorf("extract changes from VM: %w", err)
 	}
 
 	// Resolve behavioral settings by layering, highest precedence first:
@@ -1165,8 +1176,7 @@ func (s *Service) submitChanges(
 		AuthorEmail: authorEmail,
 		Credentials: creds,
 	}); err != nil {
-		log.Error("failed to commit and push", "error", err)
-		return
+		return fmt.Errorf("commit and push to %s: %w", prBranch, err)
 	}
 
 	pr, err := forgeImpl.CreatePullRequest(ctx, forge.CreatePROpts{
@@ -1179,8 +1189,7 @@ func (s *Service) submitChanges(
 		Credentials: creds,
 	})
 	if err != nil {
-		log.Error("failed to create pull request", "error", err)
-		return
+		return fmt.Errorf("create pull request for %s: %w", prBranch, err)
 	}
 
 	log.Info("pull request created", "url", pr.URL, "ref", pr.Ref)
@@ -1198,8 +1207,10 @@ func (s *Service) submitChanges(
 		Body:        commentBody,
 		Credentials: creds,
 	}); err != nil {
+		// The PR exists and carries the change; a missing comment is cosmetic.
 		log.Warn("failed to post task/work-log comment", "error", err)
 	}
+	return nil
 }
 
 // submitFollowup extracts changes from the VM and pushes them as a follow-up

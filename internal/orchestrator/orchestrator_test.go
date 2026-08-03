@@ -244,6 +244,7 @@ type mockSCM struct {
 	mu            sync.Mutex
 	lastCloneOpts scm.CloneOpts
 	pushCalls     int
+	pushErr       error
 	lastPushOpts  scm.CommitAndPushOpts
 }
 
@@ -280,7 +281,7 @@ func (m *mockSCM) CommitAndPush(_ context.Context, opts scm.CommitAndPushOpts) e
 	defer m.mu.Unlock()
 	m.pushCalls++
 	m.lastPushOpts = opts
-	return nil
+	return m.pushErr
 }
 
 // mockForge wraps a mockSCM and records PR creation and comment calls. The
@@ -1160,6 +1161,58 @@ var _ = Describe("StartJob submission flow", func() {
 		Expect(commentOpts.Body).To(ContainSubstring("Tool: WriteFile"))
 		Expect(commentOpts.Body).To(ContainSubstring("Tool failed: Bash"))
 		Expect(commentOpts.Body).To(ContainSubstring("test failure: thing broke"))
+	})
+
+	It("fails the session when the push fails", func() {
+		mockScm.pushErr = stderrors.New("remote rejected")
+
+		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			Project: "test-project",
+			Prompt:  "Please add a greeting file.",
+		}))
+		Expect(err).NotTo(HaveOccurred())
+
+		var final *v1.GetSessionResponse
+		Eventually(func() string {
+			s, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
+				SessionId: resp.Msg.SessionId,
+			}))
+			if err != nil {
+				return ""
+			}
+			final = s.Msg
+			return s.Msg.State
+		}).Should(Equal("failed"))
+
+		Expect(final.Error).To(ContainSubstring("remote rejected"))
+		Expect(final.PullRequestUrl).To(BeEmpty())
+		Expect(mockForgeInst.prCalls).To(BeZero())
+	})
+
+	It("fails the session when pull request creation fails", func() {
+		mockForgeInst.prErr = stderrors.New("forge unavailable")
+
+		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			Project: "test-project",
+			Prompt:  "Please add a greeting file.",
+		}))
+		Expect(err).NotTo(HaveOccurred())
+
+		var final *v1.GetSessionResponse
+		Eventually(func() string {
+			s, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
+				SessionId: resp.Msg.SessionId,
+			}))
+			if err != nil {
+				return ""
+			}
+			final = s.Msg
+			return s.Msg.State
+		}).Should(Equal("failed"))
+
+		Expect(final.Error).To(ContainSubstring("forge unavailable"))
+		Expect(final.PullRequestUrl).To(BeEmpty())
+		Expect(mockScm.pushCalls).To(Equal(1))
 	})
 })
 
