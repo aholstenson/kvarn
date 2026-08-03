@@ -25,7 +25,9 @@ func (g *Git) ResolveCloneURL(repo string) (string, error) {
 	return repo, nil
 }
 
-func (g *Git) ResolveCredentials(_ context.Context, config map[string]string) (*scm.Credentials, error) {
+// ResolveCredentials returns a static source: plain git credentials are
+// long-lived values from config, with nothing to refresh.
+func (g *Git) ResolveCredentials(_ context.Context, config map[string]string) (scm.CredentialSource, error) {
 	creds := &scm.Credentials{}
 
 	if token := config["token"]; token != "" {
@@ -48,7 +50,7 @@ func (g *Git) ResolveCredentials(_ context.Context, config map[string]string) (*
 		creds.Password = password
 	}
 
-	return creds, nil
+	return scm.StaticCredentials(creds), nil
 }
 
 func (g *Git) CreatePullRequest(_ context.Context, _ forge.CreatePROpts) (*forge.PullRequest, error) {

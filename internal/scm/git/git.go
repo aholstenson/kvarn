@@ -43,8 +43,12 @@ func (g *Git) Clone(ctx context.Context, opts scm.CloneOpts) error {
 		cloneOpts.Depth = opts.Depth
 	}
 
-	if opts.Credentials != nil {
-		auth, err := authMethod(opts.URL, opts.Credentials)
+	creds, err := scm.Resolve(ctx, opts.Credentials)
+	if err != nil {
+		return fmt.Errorf("resolve credentials: %w", err)
+	}
+	if creds != nil {
+		auth, err := authMethod(opts.URL, creds)
 		if err != nil {
 			return fmt.Errorf("configure auth: %w", err)
 		}
@@ -56,16 +60,15 @@ func (g *Git) Clone(ctx context.Context, opts scm.CloneOpts) error {
 		"branch", opts.Branch,
 		"destination", opts.Destination,
 		"depth", opts.Depth,
-		"has_credentials", opts.Credentials != nil,
+		"has_credentials", creds != nil,
 	)
 
-	_, err := gogit.PlainCloneContext(ctx, opts.Destination, false, cloneOpts)
-	if err != nil {
+	if _, err := gogit.PlainCloneContext(ctx, opts.Destination, false, cloneOpts); err != nil {
 		if err.Error() == "invalid auth method" {
-			if isSSHURL(opts.URL) && opts.Credentials != nil && (opts.Credentials.Token != "" || opts.Credentials.Username != "") {
+			if isSSHURL(opts.URL) && creds != nil && (creds.Token != "" || creds.Username != "") {
 				return fmt.Errorf("clone: auth method mismatch: URL %q is SSH but credential uses token/password (use ssh_key instead)", opts.URL)
 			}
-			if !isSSHURL(opts.URL) && opts.Credentials != nil && len(opts.Credentials.SSHKey) > 0 {
+			if !isSSHURL(opts.URL) && creds != nil && len(creds.SSHKey) > 0 {
 				return fmt.Errorf("clone: auth method mismatch: URL %q is HTTPS but credential uses ssh_key (use token instead)", opts.URL)
 			}
 		}
@@ -144,7 +147,14 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 			config.RefSpec(branchRef + ":" + branchRef),
 		},
 	}
-	if opts.Credentials != nil {
+	// Resolved here rather than reused from clone time: the job between the two
+	// can outlive a short-lived token, and this is the last moment before the
+	// network call.
+	creds, err := scm.Resolve(ctx, opts.Credentials)
+	if err != nil {
+		return fmt.Errorf("resolve credentials: %w", err)
+	}
+	if creds != nil {
 		// Resolve the remote URL so auth method selection (SSH vs HTTPS)
 		// matches the actual remote.
 		remoteURL := ""
@@ -154,7 +164,7 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 				remoteURL = urls[0]
 			}
 		}
-		auth, err := authMethod(remoteURL, opts.Credentials)
+		auth, err := authMethod(remoteURL, creds)
 		if err != nil {
 			return fmt.Errorf("configure push auth: %w", err)
 		}

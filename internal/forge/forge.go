@@ -11,9 +11,11 @@ type Forge interface {
 	// SCM returns a source control manager configured for this forge.
 	SCM() scm.SCM
 
-	// ResolveCredentials interprets forge-specific credential config
-	// and returns SCM-level credentials (tokens, SSH keys, etc.).
-	ResolveCredentials(ctx context.Context, config map[string]string) (*scm.Credentials, error)
+	// ResolveCredentials interprets forge-specific credential config and
+	// returns a source of SCM-level credentials (tokens, SSH keys, etc.).
+	// A source rather than a fixed value because forge credentials can expire
+	// while a job runs; each operation re-reads it when it authenticates.
+	ResolveCredentials(ctx context.Context, config map[string]string) (scm.CredentialSource, error)
 
 	// ResolveCloneURL expands a repo reference into a full clone URL.
 	// GitHub: "org/repo" -> "https://github.com/org/repo.git"
@@ -42,7 +44,7 @@ type CreatePROpts struct {
 	Title       string
 	Body        string
 	Labels      []string
-	Credentials *scm.Credentials
+	Credentials scm.CredentialSource
 }
 
 // GetPROpts identifies a pull request to read. PRRef is opaque to kvarn — each
@@ -50,7 +52,7 @@ type CreatePROpts struct {
 type GetPROpts struct {
 	RepoURL     string
 	PRRef       string
-	Credentials *scm.Credentials
+	Credentials scm.CredentialSource
 }
 
 // PostCommentOpts configures posting a comment on a PR or issue.
@@ -58,7 +60,7 @@ type PostCommentOpts struct {
 	RepoURL     string
 	PRRef       string
 	Body        string
-	Credentials *scm.Credentials
+	Credentials scm.CredentialSource
 }
 
 // PullRequest holds information about a created PR.

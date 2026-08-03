@@ -80,10 +80,10 @@ func (g *GitHub) ResolveCloneURL(repo string) (string, error) {
 	return fmt.Sprintf("https://github.com/%s/%s.git", parts[0], parts[1]), nil
 }
 
-func (g *GitHub) ResolveCredentials(ctx context.Context, config map[string]string) (*scm.Credentials, error) {
+func (g *GitHub) ResolveCredentials(ctx context.Context, config map[string]string) (scm.CredentialSource, error) {
 	// PAT: config has "token".
 	if token := config["token"]; token != "" {
-		return &scm.Credentials{Token: token}, nil
+		return scm.StaticCredentials(&scm.Credentials{Token: token}), nil
 	}
 
 	// GitHub App: config has "app_id" + "private_key_path" + "installation_id".
@@ -91,14 +91,41 @@ func (g *GitHub) ResolveCredentials(ctx context.Context, config map[string]strin
 	privateKeyPath := config["private_key_path"]
 	installationID := config["installation_id"]
 	if appID != "" && privateKeyPath != "" && installationID != "" {
-		token, err := g.getInstallationToken(ctx, appID, privateKeyPath, installationID)
-		if err != nil {
-			return nil, fmt.Errorf("resolve GitHub App credentials: %w", err)
+		src := &installationTokenSource{
+			gh:             g,
+			appID:          appID,
+			privateKeyPath: privateKeyPath,
+			installationID: installationID,
 		}
-		return &scm.Credentials{Token: token}, nil
+		// Mint one token now so a misconfigured app (unreadable key, wrong
+		// installation) is reported where the credential is configured rather
+		// than at push time. It also warms the cache for the clone that follows.
+		if _, err := src.Credentials(ctx); err != nil {
+			return nil, err
+		}
+		return src, nil
 	}
 
 	return nil, errors.New("github credentials require either \"token\" or \"app_id\"+\"private_key_path\"+\"installation_id\"")
+}
+
+// installationTokenSource mints GitHub App installation tokens on demand.
+// Those tokens expire after an hour, so a job that runs longer than that must
+// not hold on to the one it started with; every call goes through the cache,
+// which re-mints once the current token nears expiry.
+type installationTokenSource struct {
+	gh             *GitHub
+	appID          string
+	privateKeyPath string
+	installationID string
+}
+
+func (s *installationTokenSource) Credentials(ctx context.Context) (*scm.Credentials, error) {
+	token, err := s.gh.getInstallationToken(ctx, s.appID, s.privateKeyPath, s.installationID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve GitHub App credentials: %w", err)
+	}
+	return &scm.Credentials{Token: token}, nil
 }
 
 func (g *GitHub) getInstallationToken(ctx context.Context, appID, privateKeyPath, installationID string) (string, error) {
@@ -193,10 +220,11 @@ func (g *GitHub) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts)
 		return nil, err
 	}
 
-	token := ""
-	if opts.Credentials != nil {
-		token = opts.Credentials.APIToken()
+	creds, err := scm.Resolve(ctx, opts.Credentials)
+	if err != nil {
+		return nil, err
 	}
+	token := creds.APIToken()
 
 	// Create pull request.
 	prBody := map[string]any{
@@ -359,10 +387,11 @@ func (g *GitHub) getPullRequest(ctx context.Context, opts forge.GetPROpts, accep
 		return nil, err
 	}
 
-	token := ""
-	if opts.Credentials != nil {
-		token = opts.Credentials.APIToken()
+	creds, err := scm.Resolve(ctx, opts.Credentials)
+	if err != nil {
+		return nil, err
 	}
+	token := creds.APIToken()
 
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", g.apiBase, owner, repo, number)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -398,10 +427,11 @@ func (g *GitHub) PostComment(ctx context.Context, opts forge.PostCommentOpts) er
 		return err
 	}
 
-	token := ""
-	if opts.Credentials != nil {
-		token = opts.Credentials.APIToken()
+	creds, err := scm.Resolve(ctx, opts.Credentials)
+	if err != nil {
+		return err
 	}
+	token := creds.APIToken()
 
 	body := map[string]any{"body": opts.Body}
 	bodyJSON, err := json.Marshal(body)

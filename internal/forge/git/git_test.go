@@ -33,35 +33,44 @@ var _ = Describe("Git Forge", func() {
 
 	Describe("ResolveCredentials", func() {
 		It("passes through token", func() {
-			creds, err := g.ResolveCredentials(context.Background(), map[string]string{
+			src, err := g.ResolveCredentials(context.Background(), map[string]string{
 				"token": "my-token",
 			})
+			Expect(err).NotTo(HaveOccurred())
+			creds, err := src.Credentials(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(creds.Token).To(Equal("my-token"))
 		})
 
 		It("passes through SSH key path", func() {
-			creds, err := g.ResolveCredentials(context.Background(), map[string]string{
+			src, err := g.ResolveCredentials(context.Background(), map[string]string{
 				"ssh_key_path": "/path/to/key",
 				"ssh_key_pass": "passphrase",
 			})
+			Expect(err).NotTo(HaveOccurred())
+			creds, err := src.Credentials(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(creds.SSHKey)).To(Equal("/path/to/key"))
 			Expect(creds.SSHKeyPass).To(Equal("passphrase"))
 		})
 
 		It("passes through username/password", func() {
-			creds, err := g.ResolveCredentials(context.Background(), map[string]string{
+			src, err := g.ResolveCredentials(context.Background(), map[string]string{
 				"username": "user",
 				"password": "pass",
 			})
+			Expect(err).NotTo(HaveOccurred())
+			creds, err := src.Credentials(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(creds.Username).To(Equal("user"))
 			Expect(creds.Password).To(Equal("pass"))
 		})
 
 		It("handles empty config", func() {
-			creds, err := g.ResolveCredentials(context.Background(), map[string]string{})
+			src, err := g.ResolveCredentials(context.Background(), map[string]string{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(src).NotTo(BeNil())
+			creds, err := src.Credentials(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(creds).NotTo(BeNil())
 		})

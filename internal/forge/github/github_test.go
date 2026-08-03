@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -68,9 +69,11 @@ var _ = Describe("GitHub Forge", func() {
 	Describe("ResolveCredentials", func() {
 		It("resolves PAT credentials", func() {
 			gh := forgegithub.New()
-			creds, err := gh.ResolveCredentials(context.Background(), map[string]string{
+			src, err := gh.ResolveCredentials(context.Background(), map[string]string{
 				"token": "ghp_test123",
 			})
+			Expect(err).NotTo(HaveOccurred())
+			creds, err := src.Credentials(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(creds.Token).To(Equal("ghp_test123"))
 		})
@@ -118,11 +121,13 @@ var _ = Describe("GitHub Forge", func() {
 				forgegithub.WithHTTPClient(server.Client()),
 			)
 
-			creds, err := gh.ResolveCredentials(context.Background(), map[string]string{
+			src, err := gh.ResolveCredentials(context.Background(), map[string]string{
 				"app_id":           "12345",
 				"private_key_path": keyPath,
 				"installation_id":  "67890",
 			})
+			Expect(err).NotTo(HaveOccurred())
+			creds, err := src.Credentials(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(creds.Token).To(Equal("ghs_test_installation_token"))
 		})
@@ -165,17 +170,69 @@ var _ = Describe("GitHub Forge", func() {
 				"installation_id":  "99999",
 			}
 
-			// First call hits the server.
-			creds1, err := gh.ResolveCredentials(context.Background(), config)
+			// Resolving the source mints the first token.
+			src, err := gh.ResolveCredentials(context.Background(), config)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(callCount).To(Equal(1))
+
+			// Re-reading the source while the token is still valid is free.
+			creds1, err := src.Credentials(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(creds1.Token).To(Equal("ghs_cached_token"))
 			Expect(callCount).To(Equal(1))
 
-			// Second call uses cache.
-			creds2, err := gh.ResolveCredentials(context.Background(), config)
+			creds2, err := src.Credentials(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(creds2.Token).To(Equal("ghs_cached_token"))
 			Expect(callCount).To(Equal(1))
+		})
+
+		It("re-mints an installation token that has expired", func() {
+			privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+			Expect(err).NotTo(HaveOccurred())
+
+			keyPEM := pem.EncodeToMemory(&pem.Block{
+				Type:  "RSA PRIVATE KEY",
+				Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+			})
+
+			tmpDir, err := os.MkdirTemp("", "github-test-*")
+			Expect(err).NotTo(HaveOccurred())
+			defer os.RemoveAll(tmpDir)
+
+			keyPath := filepath.Join(tmpDir, "app.pem")
+			Expect(os.WriteFile(keyPath, keyPEM, 0600)).To(Succeed())
+
+			// Hand out already-expired tokens so the source cannot serve the
+			// cache: this is the state of a job that outran its credentials.
+			callCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				callCount++
+				w.WriteHeader(http.StatusCreated)
+				json.NewEncoder(w).Encode(map[string]any{
+					"token":      fmt.Sprintf("ghs_token_%d", callCount),
+					"expires_at": time.Now().Add(-1 * time.Minute).Format(time.RFC3339),
+				})
+			}))
+			defer server.Close()
+
+			gh := forgegithub.New(
+				forgegithub.WithAPIBase(server.URL),
+				forgegithub.WithHTTPClient(server.Client()),
+			)
+
+			src, err := gh.ResolveCredentials(context.Background(), map[string]string{
+				"app_id":           "12345",
+				"private_key_path": keyPath,
+				"installation_id":  "55555",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(callCount).To(Equal(1))
+
+			creds, err := src.Credentials(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(creds.Token).To(Equal("ghs_token_2"))
+			Expect(callCount).To(Equal(2))
 		})
 	})
 
@@ -209,7 +266,7 @@ var _ = Describe("GitHub Forge", func() {
 				Title:       "Test PR",
 				Body:        "Test body",
 				Labels:      []string{"bot"},
-				Credentials: &scm.Credentials{Token: "test-token"},
+				Credentials: scm.StaticCredentials(&scm.Credentials{Token: "test-token"}),
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(pr.Ref).To(Equal("42"))
@@ -258,7 +315,7 @@ var _ = Describe("GitHub Forge", func() {
 			pr, err := gh.GetPullRequest(context.Background(), forge.GetPROpts{
 				RepoURL:     "https://github.com/owner/repo.git",
 				PRRef:       "42",
-				Credentials: &scm.Credentials{Token: "test-token"},
+				Credentials: scm.StaticCredentials(&scm.Credentials{Token: "test-token"}),
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(capturedAccept).To(Equal("application/vnd.github+json"))
@@ -424,7 +481,7 @@ var _ = Describe("GitHub Forge", func() {
 				RepoURL:     "https://github.com/owner/repo.git",
 				PRRef:       "42",
 				Body:        "Hello from kvarn",
-				Credentials: &scm.Credentials{Token: "test-token"},
+				Credentials: scm.StaticCredentials(&scm.Credentials{Token: "test-token"}),
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(capturedAuth).To(Equal("Bearer test-token"))
@@ -447,7 +504,7 @@ var _ = Describe("GitHub Forge", func() {
 				RepoURL:     "https://github.com/owner/repo.git",
 				PRRef:       "7",
 				Body:        "hi",
-				Credentials: &scm.Credentials{Token: "bad-token"},
+				Credentials: scm.StaticCredentials(&scm.Credentials{Token: "bad-token"}),
 			})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("HTTP 401"))

@@ -506,13 +506,16 @@ type jobSpec struct {
 }
 
 // resolvedForge carries the forge wiring for a project: its config, the
-// implementation, resolved credentials, and the expanded clone URL. impl and
+// implementation, a credential source, and the expanded clone URL. impl and
 // cfg are nil when the project has no forge configured, in which case cloneURL
 // is the raw repo URL and plain git is used.
+//
+// creds is a source rather than a token because a job can outlive the
+// credentials it started with; every operation resolves it afresh.
 type resolvedForge struct {
 	cfg      *forgeconfig.ForgeConfig
 	impl     forge.Forge
-	creds    *scm.Credentials
+	creds    scm.CredentialSource
 	cloneURL string
 }
 
@@ -542,7 +545,7 @@ func (s *Service) resolveForge(ctx context.Context, proj *project.Project) (*res
 		return nil, fmt.Errorf("resolve clone URL: %w", err)
 	}
 
-	var creds *scm.Credentials
+	var creds scm.CredentialSource
 	if cfg.Credential != "" && s.credentialStore != nil {
 		cred, err := s.credentialStore.Get(ctx, cfg.Credential)
 		if err != nil {
@@ -994,16 +997,27 @@ func (s *Service) runJob(spec jobSpec) {
 		log.Info("skipping PR submission: no forge configured")
 	case agentResult == nil:
 		log.Info("skipping PR submission: no agent result")
-	case creds == nil || creds.APIToken() == "":
-		log.Info("skipping PR submission: no token in credentials")
-	case spec.pr != nil:
-		submitErr = s.submitFollowup(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg,
-			spec.pr, cloneURL, cloneDir, creds, userPrompt, worklog.snapshot(),
-			tracker.Snapshot(), costLimits.ReportCostOnPR, log)
 	default:
-		submitErr = s.submitChanges(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg,
-			branch, cloneURL, cloneDir, creds, userPrompt, worklog.snapshot(),
-			tracker.Snapshot(), costLimits.ReportCostOnPR, log)
+		// Opening or updating a pull request needs a forge API token, so
+		// resolve once to decide whether submission is possible at all. The
+		// submit paths below pass the source on rather than this value: by the
+		// time each one pushes or calls the API it re-resolves, which is what
+		// keeps a job longer than the credential's lifetime from failing.
+		submitCreds, credErr := scm.Resolve(ctx, creds)
+		switch {
+		case credErr != nil:
+			submitErr = fmt.Errorf("resolve credentials for submission: %w", credErr)
+		case submitCreds.APIToken() == "":
+			log.Info("skipping PR submission: no token in credentials")
+		case spec.pr != nil:
+			submitErr = s.submitFollowup(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg,
+				spec.pr, cloneURL, cloneDir, creds, userPrompt, worklog.snapshot(),
+				tracker.Snapshot(), costLimits.ReportCostOnPR, log)
+		default:
+			submitErr = s.submitChanges(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg,
+				branch, cloneURL, cloneDir, creds, userPrompt, worklog.snapshot(),
+				tracker.Snapshot(), costLimits.ReportCostOnPR, log)
+		}
 	}
 
 	// Final cost snapshot. The agent has already populated the session with
@@ -1097,7 +1111,7 @@ func (s *Service) submitChanges(
 	branch string,
 	cloneURL string,
 	cloneDir string,
-	creds *scm.Credentials,
+	creds scm.CredentialSource,
 	prompt string,
 	worklog []worklogEntry,
 	costReport cost.Report,
@@ -1228,7 +1242,7 @@ func (s *Service) submitFollowup(
 	pr *prTarget,
 	cloneURL string,
 	cloneDir string,
-	creds *scm.Credentials,
+	creds scm.CredentialSource,
 	feedback string,
 	worklog []worklogEntry,
 	costReport cost.Report,

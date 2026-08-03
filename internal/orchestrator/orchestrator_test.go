@@ -246,12 +246,21 @@ type mockSCM struct {
 	pushCalls     int
 	pushErr       error
 	lastPushOpts  scm.CommitAndPushOpts
+	// Tokens as resolved at the moment of each operation, which is how a real
+	// SCM reads them.
+	lastCloneToken string
+	lastPushToken  string
 }
 
-func (m *mockSCM) Clone(_ context.Context, opts scm.CloneOpts) error {
+func (m *mockSCM) Clone(ctx context.Context, opts scm.CloneOpts) error {
+	creds, err := scm.Resolve(ctx, opts.Credentials)
+	if err != nil {
+		return err
+	}
 	m.mu.Lock()
 	m.cloneCalls++
 	m.lastCloneOpts = opts
+	m.lastCloneToken = creds.APIToken()
 	m.mu.Unlock()
 	if m.cloneErr != nil {
 		return m.cloneErr
@@ -276,11 +285,16 @@ func (m *mockSCM) Clone(_ context.Context, opts scm.CloneOpts) error {
 	return nil
 }
 
-func (m *mockSCM) CommitAndPush(_ context.Context, opts scm.CommitAndPushOpts) error {
+func (m *mockSCM) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) error {
+	creds, err := scm.Resolve(ctx, opts.Credentials)
+	if err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pushCalls++
 	m.lastPushOpts = opts
+	m.lastPushToken = creds.APIToken()
 	return m.pushErr
 }
 
@@ -294,6 +308,10 @@ type mockForge struct {
 	commentCalls    int
 	commentErr      error
 	lastCommentOpts forge.PostCommentOpts
+	// credSource, when set, overrides what ResolveCredentials hands back.
+	credSource scm.CredentialSource
+	// lastPRToken is the token as resolved when the PR was created.
+	lastPRToken string
 
 	mu           sync.Mutex
 	pullRequests map[string]*forge.PullRequestDetails
@@ -312,17 +330,41 @@ func (m *mockForge) ResolveCloneURL(repo string) (string, error) {
 	return repo, nil
 }
 
-func (m *mockForge) ResolveCredentials(_ context.Context, config map[string]string) (*scm.Credentials, error) {
+func (m *mockForge) ResolveCredentials(_ context.Context, config map[string]string) (scm.CredentialSource, error) {
+	if m.credSource != nil {
+		return m.credSource, nil
+	}
 	creds := &scm.Credentials{}
 	if token := config["token"]; token != "" {
 		creds.Token = token
 	}
-	return creds, nil
+	return scm.StaticCredentials(creds), nil
 }
 
-func (m *mockForge) CreatePullRequest(_ context.Context, opts forge.CreatePROpts) (*forge.PullRequest, error) {
+// rotatingCredentials mints a distinct token on every read, standing in for a
+// credential that expires and is re-issued — a GitHub App installation token.
+// A caller that captured its token once instead of re-reading the source shows
+// up as a stale value.
+type rotatingCredentials struct {
+	mu    sync.Mutex
+	reads int
+}
+
+func (r *rotatingCredentials) Credentials(context.Context) (*scm.Credentials, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reads++
+	return &scm.Credentials{Token: fmt.Sprintf("token-%d", r.reads)}, nil
+}
+
+func (m *mockForge) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts) (*forge.PullRequest, error) {
+	creds, err := scm.Resolve(ctx, opts.Credentials)
+	if err != nil {
+		return nil, err
+	}
 	m.prCalls++
 	m.lastPROpts = opts
+	m.lastPRToken = creds.APIToken()
 	if m.prErr != nil {
 		return nil, m.prErr
 	}
@@ -1161,6 +1203,34 @@ var _ = Describe("StartJob submission flow", func() {
 		Expect(commentOpts.Body).To(ContainSubstring("Tool: WriteFile"))
 		Expect(commentOpts.Body).To(ContainSubstring("Tool failed: Bash"))
 		Expect(commentOpts.Body).To(ContainSubstring("test failure: thing broke"))
+	})
+
+	It("re-reads credentials at push time instead of reusing the clone's token", func() {
+		// A job can run longer than its credentials live — a GitHub App
+		// installation token lasts an hour — so the push must authenticate
+		// with whatever the source yields then, not with what the clone used.
+		rotating := &rotatingCredentials{}
+		mockForgeInst.credSource = rotating
+
+		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			Project: "test-project",
+			Prompt:  "Please add a greeting file.",
+		}))
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(func() string {
+			s, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
+				SessionId: resp.Msg.SessionId,
+			}))
+			if err != nil {
+				return ""
+			}
+			return s.Msg.State
+		}).Should(Equal("completed"))
+
+		Expect(mockScm.lastCloneToken).NotTo(BeEmpty())
+		Expect(mockScm.lastPushToken).NotTo(Equal(mockScm.lastCloneToken))
+		Expect(mockForgeInst.lastPRToken).NotTo(Equal(mockScm.lastCloneToken))
 	})
 
 	It("fails the session when the push fails", func() {
