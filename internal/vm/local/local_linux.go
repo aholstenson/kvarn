@@ -169,7 +169,10 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 		}
 	}()
 
-	// Copy qcow2 disk to a temp file for this VM instance.
+	// Give this VM a qcow2 overlay over the shared base image rather than its
+	// own copy: the base image is read-only for the VM's whole life, and the
+	// disk is discarded on teardown, so there is nothing to gain from
+	// duplicating it. Boot no longer waits on a full-image copy.
 	tmpDiskFile, err := os.CreateTemp("", "kvarn-disk-*.qcow2")
 	if err != nil {
 		return nil, nil, fmt.Errorf("create temp disk file: %w", err)
@@ -177,17 +180,12 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	tmpDisk = tmpDiskFile.Name()
 	tmpDiskFile.Close()
 
-	if err := copyFile(base.DiskImagePath, tmpDisk); err != nil {
-		return nil, nil, fmt.Errorf("copy disk image: %w", err)
-	}
-
-	// Resize qcow2 disk to requested size.
 	diskSize := opts.DiskSizeBytes
 	if diskSize == 0 {
 		diskSize = project.DefaultDiskSize
 	}
-	if err := disk.ResizeQcow2(tmpDisk, diskSize); err != nil {
-		return nil, nil, fmt.Errorf("resize disk: %w", err)
+	if err := disk.CreateOverlayQcow2(tmpDisk, base.DiskImagePath, diskSize); err != nil {
+		return nil, nil, fmt.Errorf("create disk overlay: %w", err)
 	}
 
 	// Allocate unique CID and vsock port for this VM.
