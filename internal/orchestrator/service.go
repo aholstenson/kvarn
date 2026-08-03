@@ -571,6 +571,13 @@ func (s *Service) runJob(spec jobSpec) {
 		rootCtx = reqid.WithRequestID(rootCtx, spec.requestID)
 	}
 	ctx := rootCtx
+	// Writes that decide the session's final state have to outlive the job's
+	// context. A cost-cap trip cancels rootCtx and shutdown cancels its parent,
+	// so a Fail/Completed write made on ctx would never reach SQLite and the
+	// session would sit non-terminal until the next restart's reconciliation
+	// flipped it. Dropping only the cancellation keeps the request ID attached
+	// for logging inside the session manager.
+	termCtx := context.WithoutCancel(rootCtx)
 	log := reqid.LoggerFrom(ctx).With("session_id", sessionID, "project", proj.Name, "mode", mode.ModeName())
 
 	// The branch to clone and work on: a continuation run picks up the pull
@@ -587,7 +594,7 @@ func (s *Service) runJob(spec jobSpec) {
 		// Inspect the persisted state rather than threading a flag through every
 		// failure return; session.Fail has already moved it to StateFailed by
 		// the time this defer runs.
-		if final, err := s.sessionMgr.Get(context.Background(), sessionID); err == nil {
+		if final, err := s.sessionMgr.Get(termCtx, sessionID); err == nil {
 			switch final.State {
 			case session.StateCompleted:
 				outcome = "success"
@@ -644,7 +651,7 @@ func (s *Service) runJob(spec jobSpec) {
 	fr, err := s.resolveForge(ctx, proj)
 	if err != nil {
 		log.Error("failed to resolve forge", "forge", proj.Forge, "error", err)
-		s.sessionMgr.Fail(ctx, sessionID, err)
+		s.sessionMgr.Fail(termCtx, sessionID, err)
 		return
 	}
 	forgeCfg, forgeImpl, creds, cloneURL := fr.cfg, fr.impl, fr.creds, fr.cloneURL
@@ -653,7 +660,7 @@ func (s *Service) runJob(spec jobSpec) {
 	cloneDir, err := os.MkdirTemp("", "kvarn-clone-*")
 	if err != nil {
 		log.Error("failed to create temp dir", "error", err)
-		s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("create temp dir: %w", err))
+		s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("create temp dir: %w", err))
 		return
 	}
 	defer os.RemoveAll(cloneDir)
@@ -683,7 +690,7 @@ func (s *Service) runJob(spec jobSpec) {
 
 	if err := scmImpl.Clone(ctx, cloneOpts); err != nil {
 		log.Error("clone failed", "error", err)
-		s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("clone repository: %w", err))
+		s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("clone repository: %w", err))
 		return
 	}
 	log.Info("clone complete")
@@ -692,7 +699,7 @@ func (s *Service) runJob(spec jobSpec) {
 	cfg, err := projconfig.Load(cloneDir)
 	if err != nil {
 		log.Error("failed to load project config", "error", err)
-		s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("load project config: %w", err))
+		s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("load project config: %w", err))
 		return
 	}
 
@@ -730,12 +737,12 @@ func (s *Service) runJob(spec jobSpec) {
 	if err != nil {
 		if errors.Is(err, scheduler.ErrTooLarge) {
 			log.Error("job exceeds scheduler capacity", "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("scheduler: job %d vCPU / %s memory / %s disk exceeds host capacity",
+			s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("scheduler: job %d vCPU / %s memory / %s disk exceeds host capacity",
 				cpuCount, formatBytes(memBytes), formatBytes(uint64(diskBytes))))
 			return
 		}
 		log.Error("admission failed", "error", err)
-		s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("admission: %w", err))
+		s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("admission: %w", err))
 		return
 	}
 	defer lease.Release()
@@ -758,7 +765,7 @@ func (s *Service) runJob(spec jobSpec) {
 	}
 	if err != nil {
 		log.Error("failed to resolve secrets", "error", err)
-		s.sessionMgr.Fail(ctx, sessionID, err)
+		s.sessionMgr.Fail(termCtx, sessionID, err)
 		return
 	}
 
@@ -790,7 +797,7 @@ func (s *Service) runJob(spec jobSpec) {
 	})
 	if err != nil {
 		log.Error("sandbox start failed", "error", err)
-		s.sessionMgr.Fail(ctx, sessionID, err)
+		s.sessionMgr.Fail(termCtx, sessionID, err)
 		return
 	}
 	defer sess.Close()
@@ -804,7 +811,7 @@ func (s *Service) runJob(spec jobSpec) {
 		onOutput := s.makeOutputCallback(ctx, sessionID)
 		if _, err := sess.RunSetup(ctx, cfg, onStepDone, onOutput); err != nil {
 			log.Error("setup failed", "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("setup: %w", err))
+			s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("setup: %w", err))
 			return
 		}
 		log.Info("setup complete")
@@ -874,9 +881,9 @@ func (s *Service) runJob(spec jobSpec) {
 			log.Error("agent start failed", "error", err)
 			cause := context.Cause(rootCtx)
 			if errors.Is(cause, cost.ErrBudgetExceeded) {
-				s.sessionMgr.Fail(context.Background(), sessionID, fmt.Errorf("agent: %w", cause))
+				s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("agent: %w", cause))
 			} else {
-				s.sessionMgr.Fail(context.Background(), sessionID, fmt.Errorf("agent: %w", err))
+				s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("agent: %w", err))
 			}
 			return
 		}
@@ -900,14 +907,14 @@ func (s *Service) runJob(spec jobSpec) {
 			_, err = conv.Run(ctx, followup)
 			// Persist partial cost regardless of success: spend up to a
 			// failure is still interesting to users.
-			s.sessionMgr.UpdateCost(context.Background(), sessionID, tracker.Snapshot())
+			s.sessionMgr.UpdateCost(termCtx, sessionID, tracker.Snapshot())
 			if err != nil {
 				log.Error("agent failed", "error", err)
 				cause := context.Cause(rootCtx)
 				if errors.Is(cause, cost.ErrBudgetExceeded) {
-					s.sessionMgr.Fail(context.Background(), sessionID, fmt.Errorf("agent: %w", cause))
+					s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("agent: %w", cause))
 				} else {
-					s.sessionMgr.Fail(context.Background(), sessionID, fmt.Errorf("agent: %w", err))
+					s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("agent: %w", err))
 				}
 				return
 			}
@@ -923,7 +930,7 @@ func (s *Service) runJob(spec jobSpec) {
 		changedFiles, err := sess.ChangedFiles(ctx)
 		if err != nil {
 			log.Error("failed to get changed files", "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("changed files: %w", err))
+			s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("changed files: %w", err))
 			return
 		}
 
@@ -932,7 +939,7 @@ func (s *Service) runJob(spec jobSpec) {
 		valResult, err = sess.RunValidation(ctx, cfg, changedFiles, onStepDone, onOutput)
 		if err != nil {
 			log.Error("validation failed", "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("validation: %w", err))
+			s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("validation: %w", err))
 			return
 		}
 
@@ -943,13 +950,13 @@ func (s *Service) runJob(spec jobSpec) {
 
 		if conv == nil || attempt >= costLimits.MaxValidationRetries {
 			log.Error("required validation steps failed", "attempts", attempt+1)
-			s.sessionMgr.Fail(ctx, sessionID,
+			s.sessionMgr.Fail(termCtx, sessionID,
 				fmt.Errorf("required validation steps failed after %d attempts", attempt+1))
 			return
 		}
 		if tracker.OverBudget() {
 			log.Error("required validation failed; cost budget exhausted")
-			s.sessionMgr.Fail(ctx, sessionID,
+			s.sessionMgr.Fail(termCtx, sessionID,
 				fmt.Errorf("required validation steps failed; cost budget exhausted: %w",
 					cost.ErrBudgetExceeded))
 			return
@@ -1026,8 +1033,8 @@ func (s *Service) runJob(spec jobSpec) {
 	// the outcome is decided so a run that spent money and then failed to
 	// submit still reports what it spent.
 	finalReport := tracker.Snapshot()
-	s.sessionMgr.UpdateCost(ctx, sessionID, finalReport)
-	s.sessionMgr.EmitEvent(ctx, sessionID, session.CostEvent{
+	s.sessionMgr.UpdateCost(termCtx, sessionID, finalReport)
+	s.sessionMgr.EmitEvent(termCtx, sessionID, session.CostEvent{
 		SessionID: sessionID,
 		Kind:      session.CostUpdateFinal,
 		Report:    finalReport,
@@ -1039,12 +1046,12 @@ func (s *Service) runJob(spec jobSpec) {
 	// listing sessions.
 	if submitErr != nil {
 		log.Error("failed to submit changes", "error", submitErr)
-		s.sessionMgr.Fail(ctx, sessionID, submitErr)
+		s.sessionMgr.Fail(termCtx, sessionID, submitErr)
 		return
 	}
 
 	log.Info("job completed successfully")
-	s.sessionMgr.UpdateState(ctx, sessionID, session.StateCompleted, "Completed")
+	s.sessionMgr.UpdateState(termCtx, sessionID, session.StateCompleted, "Completed")
 }
 
 // formatBytes renders a byte count using GiB/MiB units, matching the way kvarn.yml
@@ -1209,8 +1216,11 @@ func (s *Service) submitChanges(
 	log.Info("pull request created", "url", pr.URL, "ref", pr.Ref)
 	// Persist the PR identity on the session (and broadcast a
 	// PullRequestEvent) so GetSession returns it after the run, not just live
-	// watchers. The ref is what a later feedback run is looked up by.
-	s.sessionMgr.SetPullRequest(ctx, sessionID, pr.URL, pr.Ref, prBranch)
+	// watchers. The ref is what a later feedback run is looked up by. The
+	// pull request already exists on the forge at this point, so this write
+	// runs uncancellable: losing the ref to a shutdown would leave the run
+	// with no record of what it opened.
+	s.sessionMgr.SetPullRequest(context.WithoutCancel(ctx), sessionID, pr.URL, pr.Ref, prBranch)
 
 	// Post task + work log as a PR comment so it stays out of any
 	// squash-merge commit message.
