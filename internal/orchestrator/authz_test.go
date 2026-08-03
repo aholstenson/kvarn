@@ -86,10 +86,10 @@ var _ = Describe("OrchestratorService authorization", func() {
 		scopedToken = addKey(apiKeyStore, "scoped", "allowed-project")
 
 		sessionMgr = session.NewManager(session.NewMemStore())
-		s1, err := sessionMgr.Create(ctx, "allowed-project", "prompt", "auto")
+		s1, err := sessionMgr.Create(ctx, session.CreateParams{ProjectName: "allowed-project", Prompt: "prompt", Mode: "auto"})
 		Expect(err).NotTo(HaveOccurred())
 		allowedSession = s1.ID
-		s2, err := sessionMgr.Create(ctx, "other-project", "prompt", "auto")
+		s2, err := sessionMgr.Create(ctx, session.CreateParams{ProjectName: "other-project", Prompt: "prompt", Mode: "auto"})
 		Expect(err).NotTo(HaveOccurred())
 		otherSession = s2.ID
 
@@ -208,9 +208,9 @@ var _ = Describe("OrchestratorService with auth disabled", func() {
 	BeforeEach(func() {
 		ctx := context.Background()
 		sessionMgr := session.NewManager(session.NewMemStore())
-		_, err := sessionMgr.Create(ctx, "p1", "prompt", "auto")
+		_, err := sessionMgr.Create(ctx, session.CreateParams{ProjectName: "p1", Prompt: "prompt", Mode: "auto"})
 		Expect(err).NotTo(HaveOccurred())
-		_, err = sessionMgr.Create(ctx, "p2", "prompt", "auto")
+		_, err = sessionMgr.Create(ctx, session.CreateParams{ProjectName: "p2", Prompt: "prompt", Mode: "auto"})
 		Expect(err).NotTo(HaveOccurred())
 
 		svc := orchestrator.NewServiceWithOpts(orchestrator.ServiceOpts{

@@ -53,7 +53,7 @@ var _ = Describe("OrchestratorService persistent sessions", func() {
 
 		BeforeEach(func() {
 			mgr := session.NewManager(session.NewMemStore())
-			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+			sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
 			Expect(err).NotTo(HaveOccurred())
 			sessionID = sess.ID
 

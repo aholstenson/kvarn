@@ -32,6 +32,12 @@ var _ = Describe("ModeByName", func() {
 		Expect(m).To(Equal(coding.ModeFix))
 	})
 
+	It("returns ModeFeedback for 'feedback'", func() {
+		m, err := coding.ModeByName("feedback")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(m).To(Equal(coding.ModeFeedback))
+	})
+
 	It("returns ModeReview for 'review'", func() {
 		m, err := coding.ModeByName("review")
 		Expect(err).NotTo(HaveOccurred())
@@ -73,6 +79,10 @@ var _ = Describe("Mode.WritesChanges", func() {
 
 	It("is true for fix", func() {
 		Expect(coding.ModeFix.WritesChanges()).To(BeTrue())
+	})
+
+	It("is true for feedback", func() {
+		Expect(coding.ModeFeedback.WritesChanges()).To(BeTrue())
 	})
 
 	It("is false for review", func() {

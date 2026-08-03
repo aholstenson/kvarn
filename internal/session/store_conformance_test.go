@@ -73,6 +73,66 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 			Expect(got.CreatedAt.Equal(base)).To(BeTrue())
 		})
 
+		It("round-trips the pull request fields", func() {
+			s := makeSession("s1", "proj", session.StateRunning, base)
+			s.PRRef = "42"
+			s.HeadBranch = "kvarn/add-a-helper"
+			s.BaseBranch = "main"
+			s.ParentSessionID = "parent-1"
+			Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+			got, err := store.GetSession(ctx, "s1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.PRRef).To(Equal("42"))
+			Expect(got.HeadBranch).To(Equal("kvarn/add-a-helper"))
+			Expect(got.BaseBranch).To(Equal("main"))
+			Expect(got.ParentSessionID).To(Equal("parent-1"))
+
+			// A fresh job learns its PR at submission time, so the update path
+			// has to persist these too.
+			s.PRRef = "43"
+			s.HeadBranch = "kvarn/renamed"
+			Expect(store.UpdateSession(ctx, s)).To(Succeed())
+			got, err = store.GetSession(ctx, "s1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.PRRef).To(Equal("43"))
+			Expect(got.HeadBranch).To(Equal("kvarn/renamed"))
+		})
+
+		It("filters by PR ref, alone and combined with active-only", func() {
+			onPR := makeSession("on-pr", "proj", session.StateCompleted, base.Add(1*time.Minute))
+			onPR.PRRef = "42"
+			running := makeSession("running", "proj", session.StateRunning, base.Add(2*time.Minute))
+			running.PRRef = "42"
+			otherPR := makeSession("other-pr", "proj", session.StateRunning, base.Add(3*time.Minute))
+			otherPR.PRRef = "43"
+			noPR := makeSession("no-pr", "proj", session.StateRunning, base.Add(4*time.Minute))
+			for _, s := range []*session.Session{onPR, running, otherPR, noPR} {
+				Expect(store.CreateSession(ctx, s)).To(Succeed())
+			}
+
+			got, err := store.ListSessions(ctx, session.SessionFilter{Project: "proj", PRRef: "42"})
+			Expect(err).NotTo(HaveOccurred())
+			ids := []string{}
+			for _, s := range got {
+				ids = append(ids, s.ID)
+			}
+			Expect(ids).To(Equal([]string{"running", "on-pr"})) // newest first
+
+			active, err := store.ListSessions(ctx, session.SessionFilter{
+				Project: "proj", PRRef: "42", ActiveOnly: true,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(active).To(HaveLen(1))
+			Expect(active[0].ID).To(Equal("running"))
+
+			// An empty PRRef filter matches every session, including those
+			// with no pull request.
+			all, err := store.ListSessions(ctx, session.SessionFilter{Project: "proj"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(all).To(HaveLen(4))
+		})
+
 		It("returns not-found for an unknown session", func() {
 			_, err := store.GetSession(ctx, "missing")
 			Expect(err).To(MatchError(ContainSubstring("not found")))

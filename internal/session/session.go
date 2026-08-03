@@ -43,6 +43,17 @@ type Session struct {
 	UpdatedAt      time.Time
 	Error          string
 	PullRequestURL string
+	// PRRef identifies the pull request this session works on, in the forge's
+	// own format. Set at creation for a feedback run and at submission for a
+	// fresh job; empty when no PR was opened.
+	PRRef string
+	// HeadBranch is the branch the session's commits land on, BaseBranch the
+	// branch the PR targets.
+	HeadBranch string
+	BaseBranch string
+	// ParentSessionID records lineage for a feedback run. The parent may
+	// already have been pruned by retention; nothing depends on it existing.
+	ParentSessionID string
 	// Cost is the LLM spend snapshot for the run. Updated on warning, on
 	// over-budget cancellation, and once at the end of the run.
 	Cost cost.Report
@@ -176,12 +187,13 @@ type ConsoleOutputEvent struct {
 
 func (ConsoleOutputEvent) isSessionEvent() {}
 
-// PullRequestEvent carries information about a PR created for a session.
+// PullRequestEvent carries information about the PR a session works on.
 type PullRequestEvent struct {
 	SessionID string
 	URL       string
-	Number    int
-	Branch    string
+	// Ref is the forge's own identifier for the PR; opaque to kvarn.
+	Ref    string
+	Branch string
 }
 
 func (PullRequestEvent) isSessionEvent() {}
@@ -217,8 +229,21 @@ type WatchEvent struct {
 // Manager provides operations for managing sessions. It owns the live pub/sub
 // hub and delegates all persistence to a Store, layering replayable history and
 // reconnect-from-cursor streaming on top.
+// CreateParams describes a session to create. ProjectName, Prompt and Mode are
+// always set; the PR fields are populated for a feedback run, which knows its
+// pull request up front, and left empty for a fresh job.
+type CreateParams struct {
+	ProjectName     string
+	Prompt          string
+	Mode            string
+	PRRef           string
+	HeadBranch      string
+	BaseBranch      string
+	ParentSessionID string
+}
+
 type Manager interface {
-	Create(ctx context.Context, projectName string, prompt string, mode string) (*Session, error)
+	Create(ctx context.Context, params CreateParams) (*Session, error)
 	Get(ctx context.Context, id string) (*Session, error)
 	List(ctx context.Context, filter SessionFilter) ([]*Session, error)
 	UpdateState(ctx context.Context, id string, state State, message string) error
@@ -226,9 +251,9 @@ type Manager interface {
 	// see it on the next state change; mid-run snapshots are also broadcast
 	// via an explicit CostEvent through EmitEvent.
 	UpdateCost(ctx context.Context, id string, report cost.Report) error
-	// SetPullRequest persists the PR URL on the session and broadcasts a
-	// PullRequestEvent.
-	SetPullRequest(ctx context.Context, id, url string, number int, branch string) error
+	// SetPullRequest persists the PR URL, ref and head branch on the session
+	// and broadcasts a PullRequestEvent.
+	SetPullRequest(ctx context.Context, id, url, ref, branch string) error
 	Fail(ctx context.Context, id string, err error) error
 	// EmitEvent persists the event when its kind is durable and broadcasts it to
 	// watchers; ephemeral kinds are broadcast live-only with Seq 0.

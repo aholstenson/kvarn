@@ -15,6 +15,21 @@ message StartJobResponse {
   string session_id = 1;
 }
 
+// SubmitFeedbackRequest continues work on an existing pull request: the agent
+// runs against the PR's head branch and pushes a follow-up commit to it.
+message SubmitFeedbackRequest {
+  string project = 1;
+  // Opaque to kvarn; interpreted by the project's forge.
+  string pr_ref = 2;
+  string feedback = 3;
+  // Optional; defaults to "feedback".
+  string mode = 4;
+}
+
+message SubmitFeedbackResponse {
+  string session_id = 1;
+}
+
 message GetSessionRequest {
   string session_id = 1;
 }
@@ -29,6 +44,15 @@ message GetSessionResponse {
   string pull_request_url = 7;
   string mode = 8;
   CostReport cost = 9;
+  // Pull request the session works on: the forge-opaque ref, the branch the
+  // commits land on, and the branch it targets. Populated once a fresh job
+  // opens its PR, and from the start for a feedback run.
+  string pr_ref = 10;
+  string head_branch = 11;
+  string base_branch = 12;
+  // Session this one continues from, when it was started as a feedback run.
+  // Empty when there was no parent or the parent has been pruned.
+  string parent_session_id = 13;
 }
 
 // CostReport carries accumulated LLM spend for a job: totals across all
@@ -199,12 +223,18 @@ message CacheProgress {
 
 message PullRequestCreated {
   string url = 1;
-  int32 number = 2;
+  // Tag 2 held an int32 `number`. The identifier is now the forge-opaque
+  // `ref`; reusing the tag would misparse persisted history.
+  reserved 2;
+  reserved "number";
   string branch = 3;
+  // Opaque to kvarn; interpreted by the forge that produced it.
+  string ref = 4;
 }
 
 service OrchestratorService {
   rpc StartJob(StartJobRequest) returns (StartJobResponse);
+  rpc SubmitFeedback(SubmitFeedbackRequest) returns (SubmitFeedbackResponse);
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc WatchSession(WatchSessionRequest) returns (stream SessionUpdate);

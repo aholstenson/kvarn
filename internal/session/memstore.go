@@ -95,6 +95,9 @@ func (m *memStore) ListSessions(_ context.Context, filter SessionFilter) ([]*Ses
 		if filter.Project != "" && r.ProjectName != filter.Project {
 			continue
 		}
+		if filter.PRRef != "" && r.PRRef != filter.PRRef {
+			continue
+		}
 		if filter.ActiveOnly && State(r.State).IsTerminal() {
 			continue
 		}

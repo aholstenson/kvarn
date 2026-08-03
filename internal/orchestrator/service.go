@@ -128,39 +128,69 @@ func formatWorklogComment(prompt string, entries []worklogEntry, includeCost boo
 	var sb strings.Builder
 	sb.WriteString("## Task\n\n")
 	sb.WriteString(strings.TrimSpace(prompt))
-	if len(entries) > 0 {
-		sb.WriteString("\n\n<details>\n<summary>Work log</summary>\n\n")
-		for _, e := range entries {
-			switch e.kind {
-			case worklogText:
-				sb.WriteString("- ")
-				sb.WriteString(firstLine(e.text))
-				sb.WriteString("\n")
-			case worklogToolUse:
-				sb.WriteString("- Tool: ")
-				sb.WriteString(e.toolID)
-				if e.args != "" {
-					sb.WriteString(" ")
-					sb.WriteString(e.args)
-				}
-				sb.WriteString("\n")
-			case worklogToolError:
-				sb.WriteString("- Tool failed: ")
-				sb.WriteString(e.toolID)
-				if e.text != "" {
-					sb.WriteString(" — ")
-					sb.WriteString(e.text)
-				}
-				sb.WriteString("\n")
-			}
-		}
-		sb.WriteString("\n</details>")
-	}
-	if includeCost && (report.InputTokens > 0 || report.OutputTokens > 0 || report.TotalUSD > 0) {
-		sb.WriteString("\n\n")
-		sb.WriteString(formatCostSection(report))
-	}
+	writeWorklog(&sb, entries)
+	writeCostSection(&sb, includeCost, report)
 	return sb.String()
+}
+
+// formatFollowupComment renders the comment posted after a feedback run: the
+// feedback that was addressed, the agent's own account of what it changed, and
+// the same work log / cost sections a fresh run posts.
+func formatFollowupComment(feedback, summary string, entries []worklogEntry, includeCost bool, report cost.Report) string {
+	var sb strings.Builder
+	sb.WriteString("## Feedback addressed\n\n")
+	sb.WriteString(strings.TrimSpace(feedback))
+	if summary = strings.TrimSpace(summary); summary != "" {
+		sb.WriteString("\n\n## Changes\n\n")
+		sb.WriteString(summary)
+	}
+	writeWorklog(&sb, entries)
+	writeCostSection(&sb, includeCost, report)
+	return sb.String()
+}
+
+// writeWorklog appends the collapsible work-log section, or nothing when there
+// is no log to show.
+func writeWorklog(sb *strings.Builder, entries []worklogEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	sb.WriteString("\n\n<details>\n<summary>Work log</summary>\n\n")
+	for _, e := range entries {
+		switch e.kind {
+		case worklogText:
+			sb.WriteString("- ")
+			sb.WriteString(firstLine(e.text))
+			sb.WriteString("\n")
+		case worklogToolUse:
+			sb.WriteString("- Tool: ")
+			sb.WriteString(e.toolID)
+			if e.args != "" {
+				sb.WriteString(" ")
+				sb.WriteString(e.args)
+			}
+			sb.WriteString("\n")
+		case worklogToolError:
+			sb.WriteString("- Tool failed: ")
+			sb.WriteString(e.toolID)
+			if e.text != "" {
+				sb.WriteString(" — ")
+				sb.WriteString(e.text)
+			}
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("\n</details>")
+}
+
+// writeCostSection appends the "## Cost" block when cost reporting is enabled
+// and any spend was recorded.
+func writeCostSection(sb *strings.Builder, includeCost bool, report cost.Report) {
+	if !includeCost || (report.InputTokens == 0 && report.OutputTokens == 0 && report.TotalUSD == 0) {
+		return
+	}
+	sb.WriteString("\n\n")
+	sb.WriteString(formatCostSection(report))
 }
 
 // formatCostSection renders the per-job LLM spend as a "## Cost" markdown
@@ -244,6 +274,11 @@ type Service struct {
 	jobsWG         sync.WaitGroup
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
+
+	// feedbackMu serializes the per-PR single-flight check with the session
+	// creation that follows it, so two concurrent SubmitFeedback calls for the
+	// same pull request cannot both find it idle.
+	feedbackMu sync.Mutex
 }
 
 type ServiceOpts struct {
@@ -409,14 +444,19 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 
 	log.Info("resolved project", "repo", proj.RepoURL, "forge", proj.Forge)
 
-	sess, err := s.sessionMgr.Create(ctx, msg.Project, msg.Prompt, mode.ModeName())
-	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create session: %w", err))
-	}
-
 	branch := msg.Branch
 	if branch == "" {
 		branch = proj.DefaultBranch
+	}
+
+	sess, err := s.sessionMgr.Create(ctx, session.CreateParams{
+		ProjectName: msg.Project,
+		Prompt:      msg.Prompt,
+		Mode:        mode.ModeName(),
+		BaseBranch:  branch,
+	})
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create session: %w", err))
 	}
 
 	log.Info("session created", "session_id", sess.ID, "branch", branch)
@@ -424,22 +464,119 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 	reqID, _ := reqid.FromContext(ctx)
 	s.instruments.RecordJobStart(ctx, msg.Project, mode.ModeName())
 	s.jobsWG.Add(1)
-	go s.runJob(reqID, sess.ID, proj, branch, msg.Prompt, mode)
+	go s.runJob(jobSpec{
+		requestID:   reqID,
+		sessionID:   sess.ID,
+		proj:        proj,
+		mode:        mode,
+		agentPrompt: msg.Prompt,
+		baseBranch:  branch,
+	})
 
 	return connect.NewResponse(&v1.StartJobResponse{
 		SessionId: sess.ID,
 	}), nil
 }
 
-func (s *Service) runJob(requestID, sessionID string, proj *project.Project, branch string, prompt string, mode *coding.Mode) {
+// prTarget identifies the pull request a continuation run pushes back to.
+// HeadSHA is the tip observed when the run started; submission aborts if the
+// branch has moved since.
+type prTarget struct {
+	ref        string
+	headBranch string
+	headSHA    string
+	url        string
+}
+
+// jobSpec is everything runJob needs for one run. A nil pr means the fresh-job
+// behavior: clone the base branch and open a new pull request. A non-nil pr
+// means continuing on that PR's head branch.
+type jobSpec struct {
+	requestID   string
+	sessionID   string
+	proj        *project.Project
+	mode        *coding.Mode
+	agentPrompt string
+	baseBranch  string
+	// userPrompt is what the requester actually asked for, used for the PR
+	// comment. It differs from agentPrompt for a feedback run, where the agent
+	// receives an assembled context pack.
+	userPrompt string
+	pr         *prTarget
+}
+
+// resolvedForge carries the forge wiring for a project: its config, the
+// implementation, resolved credentials, and the expanded clone URL. impl and
+// cfg are nil when the project has no forge configured, in which case cloneURL
+// is the raw repo URL and plain git is used.
+type resolvedForge struct {
+	cfg      *forgeconfig.ForgeConfig
+	impl     forge.Forge
+	creds    *scm.Credentials
+	cloneURL string
+}
+
+// resolveForge loads the project's forge config, looks up the implementation,
+// expands the clone URL, and resolves credentials.
+func (s *Service) resolveForge(ctx context.Context, proj *project.Project) (*resolvedForge, error) {
+	if proj.Forge == "" || s.forgeConfigStore == nil {
+		// No forge configured — use plain git with the repo URL as-is.
+		return &resolvedForge{cloneURL: proj.RepoURL}, nil
+	}
+
+	cfg, err := s.forgeConfigStore.Get(ctx, proj.Forge)
+	if err != nil {
+		return nil, fmt.Errorf("load forge config %q: %w", proj.Forge, err)
+	}
+
+	var impl forge.Forge
+	if s.forgeTypes != nil {
+		impl = s.forgeTypes[cfg.Type]
+	}
+	if impl == nil {
+		return nil, fmt.Errorf("unknown forge type %q", cfg.Type)
+	}
+
+	cloneURL, err := impl.ResolveCloneURL(proj.RepoURL)
+	if err != nil {
+		return nil, fmt.Errorf("resolve clone URL: %w", err)
+	}
+
+	var creds *scm.Credentials
+	if cfg.Credential != "" && s.credentialStore != nil {
+		cred, err := s.credentialStore.Get(ctx, cfg.Credential)
+		if err != nil {
+			return nil, fmt.Errorf("load credential %q: %w", cfg.Credential, err)
+		}
+		creds, err = impl.ResolveCredentials(ctx, cred.Config)
+		if err != nil {
+			return nil, fmt.Errorf("resolve credentials: %w", err)
+		}
+	}
+
+	return &resolvedForge{cfg: cfg, impl: impl, creds: creds, cloneURL: cloneURL}, nil
+}
+
+func (s *Service) runJob(spec jobSpec) {
 	defer s.jobsWG.Done()
+	sessionID := spec.sessionID
+	proj := spec.proj
+	mode := spec.mode
 	rootCtx, cancelJob := context.WithCancelCause(s.shutdownCtx)
 	defer cancelJob(nil)
-	if requestID != "" {
-		rootCtx = reqid.WithRequestID(rootCtx, requestID)
+	if spec.requestID != "" {
+		rootCtx = reqid.WithRequestID(rootCtx, spec.requestID)
 	}
 	ctx := rootCtx
 	log := reqid.LoggerFrom(ctx).With("session_id", sessionID, "project", proj.Name, "mode", mode.ModeName())
+
+	// The branch to clone and work on: a continuation run picks up the pull
+	// request's head branch, a fresh run starts from the base branch.
+	branch := spec.baseBranch
+	if spec.pr != nil {
+		branch = spec.pr.headBranch
+		log = log.With("pr_ref", spec.pr.ref)
+	}
 
 	jobStart := time.Now()
 	defer func() {
@@ -501,58 +638,13 @@ func (s *Service) runJob(requestID, sessionID string, proj *project.Project, bra
 		},
 	})
 
-	// Resolve forge config, forge impl, and credentials.
-	var forgeCfg *forgeconfig.ForgeConfig
-	var forgeImpl forge.Forge
-	var creds *scm.Credentials
-	var cloneURL string
-
-	if proj.Forge != "" && s.forgeConfigStore != nil {
-		var err error
-		forgeCfg, err = s.forgeConfigStore.Get(ctx, proj.Forge)
-		if err != nil {
-			log.Error("failed to load forge config", "forge", proj.Forge, "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("load forge config %q: %w", proj.Forge, err))
-			return
-		}
-
-		if s.forgeTypes != nil {
-			forgeImpl = s.forgeTypes[forgeCfg.Type]
-		}
-		if forgeImpl == nil {
-			log.Error("unknown forge type", "type", forgeCfg.Type)
-			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("unknown forge type %q", forgeCfg.Type))
-			return
-		}
-
-		// Resolve clone URL via forge.
-		cloneURL, err = forgeImpl.ResolveCloneURL(proj.RepoURL)
-		if err != nil {
-			log.Error("failed to resolve clone URL", "repo", proj.RepoURL, "error", err)
-			s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("resolve clone URL: %w", err))
-			return
-		}
-
-		// Resolve credentials.
-		if forgeCfg.Credential != "" && s.credentialStore != nil {
-			cred, err := s.credentialStore.Get(ctx, forgeCfg.Credential)
-			if err != nil {
-				log.Error("failed to load credentials", "credential", forgeCfg.Credential, "error", err)
-				s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("load credential %q: %w", forgeCfg.Credential, err))
-				return
-			}
-
-			creds, err = forgeImpl.ResolveCredentials(ctx, cred.Config)
-			if err != nil {
-				log.Error("failed to resolve credentials", "error", err)
-				s.sessionMgr.Fail(ctx, sessionID, fmt.Errorf("resolve credentials: %w", err))
-				return
-			}
-		}
-	} else {
-		// No forge configured — use plain git with the repo URL as-is.
-		cloneURL = proj.RepoURL
+	fr, err := s.resolveForge(ctx, proj)
+	if err != nil {
+		log.Error("failed to resolve forge", "forge", proj.Forge, "error", err)
+		s.sessionMgr.Fail(ctx, sessionID, err)
+		return
 	}
+	forgeCfg, forgeImpl, creds, cloneURL := fr.cfg, fr.impl, fr.creds, fr.cloneURL
 
 	// Clone repo first so we can read kvarn.yml before booting the VM.
 	cloneDir, err := os.MkdirTemp("", "kvarn-clone-*")
@@ -727,7 +819,7 @@ func (s *Service) runJob(requestID, sessionID string, proj *project.Project, bra
 		Branch:      branch,
 		WorkingDir:  sess.GetWorkingDir(),
 		SessionID:   sess.GetShellSessionID(),
-		Prompt:      prompt,
+		Prompt:      spec.agentPrompt,
 		Mode:        mode,
 		Runner:      sess.GetRunner(),
 		RepoContext: rc,
@@ -887,8 +979,13 @@ func (s *Service) runJob(requestID, sessionID string, proj *project.Project, bra
 		}
 	}
 
-	// Submit changes as PR if forge is available, agent produced a result,
-	// and there are changes.
+	// Submit changes if a forge is available, the agent produced a result, and
+	// there are changes: a fresh run opens a PR, a continuation run pushes a
+	// follow-up commit onto the one it was started for.
+	userPrompt := spec.userPrompt
+	if userPrompt == "" {
+		userPrompt = spec.agentPrompt
+	}
 	if !mode.WritesChanges() {
 		log.Info("skipping PR submission: read-only mode")
 	} else if forgeImpl == nil {
@@ -897,8 +994,16 @@ func (s *Service) runJob(requestID, sessionID string, proj *project.Project, bra
 		log.Info("skipping PR submission: no agent result")
 	} else if creds == nil || creds.APIToken() == "" {
 		log.Info("skipping PR submission: no token in credentials")
+	} else if spec.pr != nil {
+		if err := s.submitFollowup(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg,
+			spec.pr, cloneURL, cloneDir, creds, userPrompt, worklog.snapshot(),
+			tracker.Snapshot(), costLimits.ReportCostOnPR, log); err != nil {
+			log.Error("failed to submit follow-up", "error", err)
+			s.sessionMgr.Fail(ctx, sessionID, err)
+			return
+		}
 	} else {
-		s.submitChanges(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg, branch, cloneURL, cloneDir, creds, prompt, worklog.snapshot(), tracker.Snapshot(), costLimits.ReportCostOnPR, log)
+		s.submitChanges(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg, branch, cloneURL, cloneDir, creds, userPrompt, worklog.snapshot(), tracker.Snapshot(), costLimits.ReportCostOnPR, log)
 	}
 
 	// Final cost snapshot. The agent has already populated the session with
@@ -1078,22 +1183,127 @@ func (s *Service) submitChanges(
 		return
 	}
 
-	log.Info("pull request created", "url", pr.URL, "number", pr.Number)
-	// Persist the PR URL on the session (and broadcast a PullRequestEvent) so
-	// GetSession returns it after the run, not just live watchers.
-	s.sessionMgr.SetPullRequest(ctx, sessionID, pr.URL, pr.Number, prBranch)
+	log.Info("pull request created", "url", pr.URL, "ref", pr.Ref)
+	// Persist the PR identity on the session (and broadcast a
+	// PullRequestEvent) so GetSession returns it after the run, not just live
+	// watchers. The ref is what a later feedback run is looked up by.
+	s.sessionMgr.SetPullRequest(ctx, sessionID, pr.URL, pr.Ref, prBranch)
 
 	// Post task + work log as a PR comment so it stays out of any
 	// squash-merge commit message.
 	commentBody := formatWorklogComment(prompt, worklog, reportCostOnPR, costReport)
 	if err := forgeImpl.PostComment(ctx, forge.PostCommentOpts{
 		RepoURL:     cloneURL,
-		Number:      pr.Number,
+		PRRef:       pr.Ref,
 		Body:        commentBody,
 		Credentials: creds,
 	}); err != nil {
 		log.Warn("failed to post task/work-log comment", "error", err)
 	}
+}
+
+// submitFollowup extracts changes from the VM and pushes them as a follow-up
+// commit onto the pull request's existing head branch. No new PR is opened and
+// the PR's title and body are left alone; what was addressed goes into a
+// comment instead.
+func (s *Service) submitFollowup(
+	ctx context.Context,
+	sessionID string,
+	sess Sandbox,
+	forgeImpl forge.Forge,
+	agentResult *agent.Result,
+	proj *project.Project,
+	forgeCfg *forgeconfig.ForgeConfig,
+	pr *prTarget,
+	cloneURL string,
+	cloneDir string,
+	creds *scm.Credentials,
+	feedback string,
+	worklog []worklogEntry,
+	costReport cost.Report,
+	reportCostOnPR bool,
+	log *slog.Logger,
+) error {
+	// The VM cloned the PR head, so the changed set is the follow-up delta.
+	changedFiles, err := sess.ChangedFiles(ctx)
+	if err != nil {
+		return fmt.Errorf("check changed files for submission: %w", err)
+	}
+	if len(changedFiles) == 0 {
+		log.Info("no changes to submit")
+		return nil
+	}
+
+	s.sessionMgr.UpdateState(ctx, sessionID, session.StateSubmitting, "Submitting changes")
+
+	// Re-check the head before doing any work: the run started from a snapshot
+	// of the branch, and pushing on top of someone else's newer commit would
+	// silently revert it.
+	current, err := forgeImpl.GetPullRequest(ctx, forge.GetPROpts{
+		RepoURL:     cloneURL,
+		PRRef:       pr.ref,
+		Credentials: creds,
+	})
+	if err != nil {
+		return fmt.Errorf("re-read pull request %s: %w", pr.ref, err)
+	}
+	if current.HeadSHA != pr.headSHA {
+		return fmt.Errorf("pull request %s moved during the run (head %s -> %s); not pushing",
+			pr.ref, pr.headSHA, current.HeadSHA)
+	}
+
+	if err := sess.ExtractChanges(ctx, cloneDir); err != nil {
+		return fmt.Errorf("extract changes from VM: %w", err)
+	}
+
+	title := agentResult.Title
+	if title == "" {
+		title = "Address review feedback"
+	}
+	commitMsg := title
+	if agentResult.Description != "" {
+		commitMsg = title + "\n\n" + agentResult.Description
+	}
+
+	var forgeDefaults forgeconfig.Defaults
+	if s.forgeDefaults != nil {
+		if d, err := s.forgeDefaults.Defaults(ctx); err != nil {
+			log.Warn("failed to load forge defaults; using built-ins", "error", err)
+		} else {
+			forgeDefaults = d
+		}
+	}
+	behavior := forgeCfg.ResolveBehavior(forgeDefaults, forgeconfig.Overrides{
+		BranchPrefix:      proj.BranchPrefix,
+		CommitAuthorName:  proj.CommitAuthorName,
+		CommitAuthorEmail: proj.CommitAuthorEmail,
+		Labels:            proj.Labels,
+	})
+
+	// Pushing the PR's own branch name is a fast-forward of one new commit.
+	if err := forgeImpl.SCM().CommitAndPush(ctx, scm.CommitAndPushOpts{
+		RepoDir:     cloneDir,
+		Branch:      pr.headBranch,
+		Message:     commitMsg,
+		AuthorName:  behavior.CommitAuthorName,
+		AuthorEmail: behavior.CommitAuthorEmail,
+		Credentials: creds,
+	}); err != nil {
+		return fmt.Errorf("commit and push to %s: %w", pr.headBranch, err)
+	}
+
+	log.Info("follow-up commit pushed", "branch", pr.headBranch, "url", pr.url)
+
+	commentBody := formatFollowupComment(feedback, agentResult.Description, worklog, reportCostOnPR, costReport)
+	if err := forgeImpl.PostComment(ctx, forge.PostCommentOpts{
+		RepoURL:     cloneURL,
+		PRRef:       pr.ref,
+		Body:        commentBody,
+		Credentials: creds,
+	}); err != nil {
+		log.Warn("failed to post follow-up comment", "error", err)
+	}
+	return nil
 }
 
 // makeEventAdapter translates sandbox Events to session state updates.
@@ -1203,17 +1413,27 @@ func (s *Service) GetSession(ctx context.Context, req *connect.Request[v1.GetSes
 		return nil, err
 	}
 
-	return connect.NewResponse(&v1.GetSessionResponse{
-		SessionId:      sess.ID,
-		Project:        sess.ProjectName,
-		State:          string(sess.State),
-		Message:        sess.Message,
-		Error:          sess.Error,
-		Prompt:         sess.Prompt,
-		PullRequestUrl: sess.PullRequestURL,
-		Mode:           sess.Mode,
-		Cost:           costReportToProto(sess.Cost),
-	}), nil
+	return connect.NewResponse(sessionToProto(sess)), nil
+}
+
+// sessionToProto renders a session as the wire message shared by GetSession
+// and ListSessions.
+func sessionToProto(sess *session.Session) *v1.GetSessionResponse {
+	return &v1.GetSessionResponse{
+		SessionId:       sess.ID,
+		Project:         sess.ProjectName,
+		State:           string(sess.State),
+		Message:         sess.Message,
+		Error:           sess.Error,
+		Prompt:          sess.Prompt,
+		PullRequestUrl:  sess.PullRequestURL,
+		Mode:            sess.Mode,
+		Cost:            costReportToProto(sess.Cost),
+		PrRef:           sess.PRRef,
+		HeadBranch:      sess.HeadBranch,
+		BaseBranch:      sess.BaseBranch,
+		ParentSessionId: sess.ParentSessionID,
+	}
 }
 
 // Server-side bounds for ListSessions paging.
@@ -1292,17 +1512,7 @@ func (s *Service) ListSessions(ctx context.Context, req *connect.Request[v1.List
 
 	resp := make([]*v1.GetSessionResponse, 0, len(included))
 	for _, sess := range included {
-		resp = append(resp, &v1.GetSessionResponse{
-			SessionId:      sess.ID,
-			Project:        sess.ProjectName,
-			State:          string(sess.State),
-			Message:        sess.Message,
-			Error:          sess.Error,
-			Prompt:         sess.Prompt,
-			PullRequestUrl: sess.PullRequestURL,
-			Mode:           sess.Mode,
-			Cost:           costReportToProto(sess.Cost),
-		})
+		resp = append(resp, sessionToProto(sess))
 	}
 
 	nextCursor := ""
@@ -1558,7 +1768,7 @@ func sessionEventToUpdate(seq int64, event session.Event) *v1.SessionUpdate {
 			Event: &v1.SessionUpdate_PullRequestCreated{
 				PullRequestCreated: &v1.PullRequestCreated{
 					Url:    e.URL,
-					Number: int32(e.Number),
+					Ref:    e.Ref,
 					Branch: e.Branch,
 				},
 			},

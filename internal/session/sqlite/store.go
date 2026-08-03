@@ -78,10 +78,12 @@ func (s *Store) CreateSession(ctx context.Context, sess *session.Session) error 
 	}
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO sessions
-		   (id, project_name, prompt, mode, state, message, error, pull_request_url, cost_json, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		   (id, project_name, prompt, mode, state, message, error, pull_request_url,
+		    pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.ID, row.ProjectName, row.Prompt, row.Mode, row.State, row.Message,
-		row.Error, row.PullRequestURL, row.CostJSON, row.CreatedAt, row.UpdatedAt,
+		row.Error, row.PullRequestURL, row.PRRef, row.HeadBranch, row.BaseBranch,
+		row.ParentSessionID, row.CostJSON, row.CreatedAt, row.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
@@ -89,12 +91,14 @@ func (s *Store) CreateSession(ctx context.Context, sess *session.Session) error 
 	return nil
 }
 
-const sessionColumns = `id, project_name, prompt, mode, state, message, error, pull_request_url, cost_json, created_at, updated_at`
+const sessionColumns = `id, project_name, prompt, mode, state, message, error, pull_request_url, ` +
+	`pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at`
 
 func scanSession(scan func(dest ...any) error) (*session.Session, error) {
 	var r session.Row
 	if err := scan(&r.ID, &r.ProjectName, &r.Prompt, &r.Mode, &r.State, &r.Message,
-		&r.Error, &r.PullRequestURL, &r.CostJSON, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		&r.Error, &r.PullRequestURL, &r.PRRef, &r.HeadBranch, &r.BaseBranch,
+		&r.ParentSessionID, &r.CostJSON, &r.CreatedAt, &r.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return session.RowToSession(r)
@@ -119,9 +123,11 @@ func (s *Store) UpdateSession(ctx context.Context, sess *session.Session) error 
 	}
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE sessions
-		    SET state = ?, message = ?, error = ?, pull_request_url = ?, cost_json = ?, updated_at = ?
+		    SET state = ?, message = ?, error = ?, pull_request_url = ?,
+		        pr_ref = ?, head_branch = ?, base_branch = ?, cost_json = ?, updated_at = ?
 		  WHERE id = ?`,
-		row.State, row.Message, row.Error, row.PullRequestURL, row.CostJSON, row.UpdatedAt, row.ID,
+		row.State, row.Message, row.Error, row.PullRequestURL, row.PRRef,
+		row.HeadBranch, row.BaseBranch, row.CostJSON, row.UpdatedAt, row.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update session: %w", err)
@@ -138,6 +144,10 @@ func (s *Store) ListSessions(ctx context.Context, filter session.SessionFilter) 
 	if filter.Project != "" {
 		where = append(where, "project_name = ?")
 		args = append(args, filter.Project)
+	}
+	if filter.PRRef != "" {
+		where = append(where, "pr_ref = ?")
+		args = append(args, filter.PRRef)
 	}
 	if filter.ActiveOnly {
 		where = append(where, "state NOT IN (?, ?)")

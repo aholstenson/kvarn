@@ -54,6 +54,71 @@ var _ = Describe("sqlite.Store", func() {
 		Expect(version).To(BeNumerically(">=", 1))
 	})
 
+	It("applies the PR-fields migration over an existing database and keeps prior rows readable", func() {
+		// Build a database at schema version 1 by hand — the state an
+		// orchestrator that predates the PR fields left behind.
+		Expect(os.MkdirAll(dir, 0o700)).To(Succeed())
+		db, err := sql.Open("sqlite", path)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = db.Exec(`
+			CREATE TABLE sessions (
+			    id               TEXT PRIMARY KEY,
+			    project_name     TEXT NOT NULL,
+			    prompt           TEXT NOT NULL,
+			    mode             TEXT NOT NULL,
+			    state            TEXT NOT NULL,
+			    message          TEXT NOT NULL DEFAULT '',
+			    error            TEXT NOT NULL DEFAULT '',
+			    pull_request_url TEXT NOT NULL DEFAULT '',
+			    cost_json        TEXT NOT NULL DEFAULT '{}',
+			    created_at       INTEGER NOT NULL,
+			    updated_at       INTEGER NOT NULL
+			);
+			CREATE TABLE session_events (
+			    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			    seq         INTEGER NOT NULL,
+			    kind        TEXT NOT NULL,
+			    payload     BLOB NOT NULL,
+			    recorded_at INTEGER NOT NULL,
+			    PRIMARY KEY (session_id, seq)
+			);
+			PRAGMA user_version = 1;`)
+		Expect(err).NotTo(HaveOccurred())
+		now := session.ToMicros(time.Now())
+		_, err = db.Exec(
+			`INSERT INTO sessions (id, project_name, prompt, mode, state, pull_request_url, created_at, updated_at)
+			 VALUES ('old-1', 'proj', 'do it', 'auto', 'completed', 'https://example.com/pr/9', ?, ?)`,
+			now, now)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(db.Close()).To(Succeed())
+
+		store, err := sqlitestore.New(path)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(store.Close)
+
+		got, err := store.GetSession(ctx, "old-1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.Prompt).To(Equal("do it"))
+		Expect(got.PullRequestURL).To(Equal("https://example.com/pr/9"))
+		// The new columns default to empty rather than NULL.
+		Expect(got.PRRef).To(BeEmpty())
+		Expect(got.HeadBranch).To(BeEmpty())
+		Expect(got.BaseBranch).To(BeEmpty())
+		Expect(got.ParentSessionID).To(BeEmpty())
+
+		// The migrated row is writable through the new UPDATE.
+		got.PRRef = "9"
+		got.HeadBranch = "kvarn/thing"
+		Expect(store.UpdateSession(ctx, got)).To(Succeed())
+		reread, err := store.GetSession(ctx, "old-1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reread.PRRef).To(Equal("9"))
+
+		byPR, err := store.ListSessions(ctx, session.SessionFilter{Project: "proj", PRRef: "9"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(byPR).To(HaveLen(1))
+	})
+
 	It("persists sessions and events across reopen (restart)", func() {
 		store, err := sqlitestore.New(path)
 		Expect(err).NotTo(HaveOccurred())

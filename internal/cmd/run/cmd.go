@@ -57,7 +57,7 @@ type Cmd struct {
 	SecretsFile   string `help:"Override path to secrets store (default: ~/.config/kvarn/secrets.toml)." name:"secrets-file"`
 	AgentsFile    string `help:"Override path to agents config (default: ~/.config/kvarn/agents.toml)." name:"agents-file"`
 	Model         string `help:"LLM model alias for the coding agent." default:"coding-agent"`
-	Mode          string `help:"Agent mode: auto, implement, fix, review, research." default:"auto"`
+	Mode          string `help:"Agent mode: auto, implement, fix, feedback, review, research." default:"auto"`
 
 	MaxValidationRetries int `help:"Number of additional agent passes after a required validation failure. 0 disables retries." name:"max-validation-retries" default:"0"`
 }

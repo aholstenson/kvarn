@@ -67,20 +67,24 @@ func generateID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func (m *manager) Create(ctx context.Context, projectName, prompt, mode string) (*Session, error) {
+func (m *manager) Create(ctx context.Context, params CreateParams) (*Session, error) {
 	id, err := generateID()
 	if err != nil {
 		return nil, fmt.Errorf("generate session id: %w", err)
 	}
 	now := time.Now()
 	s := &Session{
-		ID:          id,
-		ProjectName: projectName,
-		Prompt:      prompt,
-		Mode:        mode,
-		State:       StatePending,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:              id,
+		ProjectName:     params.ProjectName,
+		Prompt:          params.Prompt,
+		Mode:            params.Mode,
+		State:           StatePending,
+		PRRef:           params.PRRef,
+		HeadBranch:      params.HeadBranch,
+		BaseBranch:      params.BaseBranch,
+		ParentSessionID: params.ParentSessionID,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 	if err := m.store.CreateSession(ctx, s); err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
@@ -134,12 +138,14 @@ func (m *manager) UpdateCost(ctx context.Context, id string, report cost.Report)
 	return m.store.UpdateSession(ctx, s)
 }
 
-func (m *manager) SetPullRequest(ctx context.Context, id, url string, number int, branch string) error {
+func (m *manager) SetPullRequest(ctx context.Context, id, url, ref, branch string) error {
 	s, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return err
 	}
 	s.PullRequestURL = url
+	s.PRRef = ref
+	s.HeadBranch = branch
 	s.UpdatedAt = time.Now()
 	if err := m.store.UpdateSession(ctx, s); err != nil {
 		return err
@@ -147,7 +153,7 @@ func (m *manager) SetPullRequest(ctx context.Context, id, url string, number int
 	return m.persistAndBroadcast(ctx, id, PullRequestEvent{
 		SessionID: id,
 		URL:       url,
-		Number:    number,
+		Ref:       ref,
 		Branch:    branch,
 	})
 }

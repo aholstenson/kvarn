@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -253,13 +254,146 @@ func (g *GitHub) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts)
 	}
 
 	return &forge.PullRequest{
-		URL:    prResp.HTMLURL,
-		Number: prResp.Number,
+		URL: prResp.HTMLURL,
+		Ref: strconv.Itoa(prResp.Number),
 	}, nil
+}
+
+// diffCap bounds the diff handed back to callers. A PR diff feeds an agent
+// prompt, so an unbounded one would blow the context window; the cap mirrors
+// the session event-payload cap.
+const diffCap = 256 * 1024
+
+// diffTruncationMarker marks a diff cut short by diffCap.
+const diffTruncationMarker = "\n…[diff truncated]\n"
+
+// prNumber converts a forge-opaque PR ref into the numeric path segment the
+// GitHub API expects. This is the one place that knows GitHub refs are numbers.
+func prNumber(ref string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(ref))
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid GitHub pull request ref %q: expected a positive number", ref)
+	}
+	return n, nil
+}
+
+func (g *GitHub) GetPullRequest(ctx context.Context, opts forge.GetPROpts) (*forge.PullRequestDetails, error) {
+	body, err := g.getPullRequest(ctx, opts, "application/vnd.github+json")
+	if err != nil {
+		return nil, err
+	}
+
+	var prResp struct {
+		Number  int    `json:"number"`
+		State   string `json:"state"`
+		Merged  bool   `json:"merged"`
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		HTMLURL string `json:"html_url"`
+		Head    struct {
+			Ref  string `json:"ref"`
+			SHA  string `json:"sha"`
+			Repo *struct {
+				FullName string `json:"full_name"`
+			} `json:"repo"`
+		} `json:"head"`
+		Base struct {
+			Ref  string `json:"ref"`
+			Repo *struct {
+				FullName string `json:"full_name"`
+			} `json:"repo"`
+		} `json:"base"`
+	}
+	if err := json.Unmarshal(body, &prResp); err != nil {
+		return nil, fmt.Errorf("parse pull request response: %w", err)
+	}
+
+	// GitHub reports a merged PR as state "closed" plus merged=true; surface
+	// the distinction so callers can tell "merged" from "closed unmerged".
+	state := prResp.State
+	if prResp.Merged {
+		state = "merged"
+	}
+
+	details := &forge.PullRequestDetails{
+		Ref:        strconv.Itoa(prResp.Number),
+		State:      state,
+		HeadBranch: prResp.Head.Ref,
+		HeadSHA:    prResp.Head.SHA,
+		BaseBranch: prResp.Base.Ref,
+		Title:      prResp.Title,
+		Body:       prResp.Body,
+		URL:        prResp.HTMLURL,
+	}
+	// head.repo is null when the fork it came from has been deleted.
+	if prResp.Head.Repo != nil {
+		details.HeadRepo = prResp.Head.Repo.FullName
+	}
+	if prResp.Base.Repo != nil {
+		details.BaseRepo = prResp.Base.Repo.FullName
+	}
+	return details, nil
+}
+
+func (g *GitHub) GetPullRequestDiff(ctx context.Context, opts forge.GetPROpts) (string, error) {
+	body, err := g.getPullRequest(ctx, opts, "application/vnd.github.v3.diff")
+	if err != nil {
+		return "", err
+	}
+	if len(body) > diffCap {
+		return string(body[:diffCap]) + diffTruncationMarker, nil
+	}
+	return string(body), nil
+}
+
+// getPullRequest performs GET /repos/{owner}/{repo}/pulls/{number} with the
+// given Accept header and returns the raw response body. The JSON and diff
+// representations differ only in that header.
+func (g *GitHub) getPullRequest(ctx context.Context, opts forge.GetPROpts, accept string) ([]byte, error) {
+	owner, repo, err := ParseRepoURL(opts.RepoURL)
+	if err != nil {
+		return nil, err
+	}
+	number, err := prNumber(opts.PRRef)
+	if err != nil {
+		return nil, err
+	}
+
+	token := ""
+	if opts.Credentials != nil {
+		token = opts.Credentials.APIToken()
+	}
+
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", g.apiBase, owner, repo, number)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create get PR request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", accept)
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send get PR request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read get PR response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get pull request %s: HTTP %d: %s", opts.PRRef, resp.StatusCode, string(respBody))
+	}
+	return respBody, nil
 }
 
 func (g *GitHub) PostComment(ctx context.Context, opts forge.PostCommentOpts) error {
 	owner, repo, err := ParseRepoURL(opts.RepoURL)
+	if err != nil {
+		return err
+	}
+	number, err := prNumber(opts.PRRef)
 	if err != nil {
 		return err
 	}
@@ -275,7 +409,7 @@ func (g *GitHub) PostComment(ctx context.Context, opts forge.PostCommentOpts) er
 		return fmt.Errorf("marshal comment body: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", g.apiBase, owner, repo, opts.Number)
+	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", g.apiBase, owner, repo, number)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyJSON))
 	if err != nil {
 		return fmt.Errorf("create comment request: %w", err)

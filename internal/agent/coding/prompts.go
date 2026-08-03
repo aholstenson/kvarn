@@ -81,6 +81,16 @@ var ModeFix = &Mode{
 	body:   fixBody,
 }
 
+// ModeFeedback continues work on an existing pull request: the repository is
+// checked out at the PR's head branch and the task message carries the
+// feedback to address. Changes land as a follow-up commit on that branch.
+var ModeFeedback = &Mode{
+	Name:   "feedback",
+	Writes: true,
+	role:   "an autonomous coding agent addressing review feedback",
+	body:   feedbackBody,
+}
+
 // ModeReview is a read-only audit of the working tree / branch against the
 // task message. No edits, no PR.
 var ModeReview = &Mode{
@@ -111,6 +121,8 @@ func ModeByName(name string) (*Mode, error) {
 		return ModeImplement, nil
 	case "fix":
 		return ModeFix, nil
+	case "feedback":
+		return ModeFeedback, nil
 	case "review":
 		return ModeReview, nil
 	case "research":
@@ -251,6 +263,26 @@ const fixIntro = `The task message describes a bug — a reported failure, error
 6. **Run broader tests** to check for regressions. If anything else breaks, use the failure output to drive the next fix.
 
 If you cannot reproduce the bug with a test (e.g. it requires manual interaction, external infrastructure, or environment not available in the sandbox), state that explicitly, then make the smallest justified change and verify with whatever signals the project does provide.`
+
+const feedbackIntro = `The task message describes feedback on a pull request that already exists. The working tree is checked out at that pull request's head branch, so the changes under discussion are already in place — your job is to revise them, not to redo them. Anything you change lands as a follow-up commit on the same branch.
+
+The task message carries the original task the pull request came from, the pull request's title and body, its diff, and the feedback to address.
+
+## Workflow
+
+1. Read the feedback and enumerate each distinct item it raises. Treat the list as the definition of done.
+2. Orient in the existing change first: read the files the diff touches before editing them, so a revision fits what is already there instead of fighting it.
+3. Address each item in turn. Keep the change inside the pull request's scope — do not take on adjacent work the feedback did not ask for, even if you notice it.
+4. After substantive edits, run the project's build and tests.
+5. On failure, use the actual error output to drive the next fix. Repeat until green or until blocked by a clear external constraint.
+
+If you disagree with a feedback item, or it rests on a misreading of the code, say so in your final summary and explain why — with evidence from the code. Do not silently decline it and do not implement something you believe is wrong without saying so.
+
+## Output
+
+Summarize what you changed per feedback item, and note any item you did not act on along with the reason. This summary becomes the follow-up commit message and the comment posted back on the pull request.`
+
+const feedbackBody = feedbackIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules
 
 const autoBody = autoIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + outputRules
 

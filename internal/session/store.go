@@ -18,6 +18,7 @@ type PersistedEvent struct {
 // session with no limit.
 type SessionFilter struct {
 	Project    string // "" = any
+	PRRef      string // "" = any; exact match on the session's pull request ref
 	ActiveOnly bool   // non-terminal only
 	Limit      int    // 0 = no limit
 	// AfterCreatedAt / AfterID form a cursor for keyset pagination, ordered by
@@ -33,7 +34,8 @@ type Store interface {
 	CreateSession(ctx context.Context, s *Session) error
 	GetSession(ctx context.Context, id string) (*Session, error)
 	// UpdateSession persists the mutable fields of s (state, message, error,
-	// pull_request_url, cost, updated_at). It never touches the event log.
+	// pull_request_url, pr_ref, head_branch, cost, updated_at). It never
+	// touches the event log.
 	UpdateSession(ctx context.Context, s *Session) error
 	ListSessions(ctx context.Context, filter SessionFilter) ([]*Session, error)
 

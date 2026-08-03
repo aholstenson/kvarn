@@ -82,6 +82,16 @@ task image:clean         # remove dist/
 - **Slow watchers** are disconnected on lag rather than silently dropping a durable event (which would create an undetectable gap). The client reconnects via `Watch(from_sequence=lastSeen)` and replays the gap from the store, the source of truth.
 - **Startup reconciliation**: non-terminal sessions are flipped to `failed` on boot (their VMs are gone), appending a `state_change` event. **Retention**: terminal sessions older than `[sessions].retention` (default 720h; `0` = keep forever) are pruned on startup and hourly; events cascade.
 
+### Feedback runs
+
+- `SubmitFeedback(project, pr_ref, feedback)` continues work on an **existing** pull request: it clones that PR's head branch, runs the agent with the feedback as its task, and pushes a follow-up commit to the same branch, then posts a comment. No second PR is opened and the PR title/body are left alone. `StartJob` keeps its "clone base, open a new PR" meaning; the two never share an entry point. CLI: `kvarn feedback <project> <pr-ref> <text>`.
+- A feedback run is a **new session** (terminal states stay terminal). Lineage is recorded via `parent_session_id`, resolved by looking up the oldest session on the same `pr_ref`; nothing depends on that session still existing, since retention may have pruned it.
+- **`pr_ref` is opaque to kvarn** — each forge interprets its own format, and the GitHub forge is the only place that knows a ref is a number. Sessions persist `pr_ref`, `head_branch`, `base_branch` and `parent_session_id`; the `SessionFilter.PRRef` filter serves both the single-flight check and the parent lookup.
+- **One run per PR at a time**: a `SubmitFeedback` while another is in flight for the same PR is rejected with `FailedPrecondition` naming the running session. Startup reconciliation fails non-terminal sessions, so a crash cannot leave the lock stuck.
+- **Fork PRs are rejected** (`InvalidArgument`): pushing to a head branch in another repo needs the maintainer-edit flag and is impossible with an org-scoped App installation token. The real constraint on which forges this can serve is that the PR must have a mutable head branch to push to — which excludes Gerrit and mail-based flows regardless of how they name things.
+- Every rejection (no forge, PR not open, fork, in-flight, unreadable ref) happens **before a session is created**, so a refused request leaves no trace. Before pushing, the PR head is re-read and the run fails rather than pushing if it moved underneath.
+- The `feedback` mode's task message is a context pack: `## Original task` (omitted when the parent was pruned), `## Current pull request`, `## Diff` (best-effort, capped at 256 KiB), `## Feedback to address`. The session's stored `Prompt` stays the raw feedback so `GetSession` shows what was actually asked. Cost caps and validation retries come from `[jobs.feedback]` like any other mode.
+
 ## Conventions
 
 - **RPC**: ConnectRPC with buf v2 for code generation

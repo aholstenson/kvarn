@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -211,8 +212,192 @@ var _ = Describe("GitHub Forge", func() {
 				Credentials: &scm.Credentials{Token: "test-token"},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(pr.Number).To(Equal(42))
+			Expect(pr.Ref).To(Equal("42"))
 			Expect(pr.URL).To(Equal("https://github.com/owner/repo/pull/42"))
+		})
+	})
+
+	Describe("GetPullRequest", func() {
+		// prPayload builds a pulls/{n} response body with the given head and
+		// base repositories, so tests can vary just the fork-relevant fields.
+		prPayload := func(headRepo, baseRepo string, merged bool) map[string]any {
+			return map[string]any{
+				"number":   42,
+				"state":    "open",
+				"merged":   merged,
+				"title":    "Add a helper",
+				"body":     "Adds a small helper.",
+				"html_url": "https://github.com/owner/repo/pull/42",
+				"head": map[string]any{
+					"ref":  "kvarn/add-a-helper",
+					"sha":  "abc123",
+					"repo": map[string]any{"full_name": headRepo},
+				},
+				"base": map[string]any{
+					"ref":  "main",
+					"repo": map[string]any{"full_name": baseRepo},
+				},
+			}
+		}
+
+		It("reads an open PR on the same repository", func() {
+			var capturedAccept string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				Expect(r.URL.Path).To(Equal("/repos/owner/repo/pulls/42"))
+				Expect(r.Method).To(Equal(http.MethodGet))
+				capturedAccept = r.Header.Get("Accept")
+				json.NewEncoder(w).Encode(prPayload("owner/repo", "owner/repo", false))
+			}))
+			defer server.Close()
+
+			gh := forgegithub.New(
+				forgegithub.WithAPIBase(server.URL),
+				forgegithub.WithHTTPClient(server.Client()),
+			)
+
+			pr, err := gh.GetPullRequest(context.Background(), forge.GetPROpts{
+				RepoURL:     "https://github.com/owner/repo.git",
+				PRRef:       "42",
+				Credentials: &scm.Credentials{Token: "test-token"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capturedAccept).To(Equal("application/vnd.github+json"))
+			Expect(pr.Ref).To(Equal("42"))
+			Expect(pr.State).To(Equal("open"))
+			Expect(pr.HeadBranch).To(Equal("kvarn/add-a-helper"))
+			Expect(pr.HeadSHA).To(Equal("abc123"))
+			Expect(pr.HeadRepo).To(Equal("owner/repo"))
+			Expect(pr.BaseBranch).To(Equal("main"))
+			Expect(pr.BaseRepo).To(Equal("owner/repo"))
+			Expect(pr.Title).To(Equal("Add a helper"))
+			Expect(pr.URL).To(Equal("https://github.com/owner/repo/pull/42"))
+		})
+
+		It("reports differing head and base repositories for a fork PR", func() {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				json.NewEncoder(w).Encode(prPayload("contributor/repo", "owner/repo", false))
+			}))
+			defer server.Close()
+
+			gh := forgegithub.New(
+				forgegithub.WithAPIBase(server.URL),
+				forgegithub.WithHTTPClient(server.Client()),
+			)
+
+			pr, err := gh.GetPullRequest(context.Background(), forge.GetPROpts{
+				RepoURL: "https://github.com/owner/repo.git",
+				PRRef:   "42",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pr.HeadRepo).To(Equal("contributor/repo"))
+			Expect(pr.BaseRepo).To(Equal("owner/repo"))
+		})
+
+		It("reports a merged PR as merged rather than closed", func() {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				payload := prPayload("owner/repo", "owner/repo", true)
+				payload["state"] = "closed"
+				json.NewEncoder(w).Encode(payload)
+			}))
+			defer server.Close()
+
+			gh := forgegithub.New(
+				forgegithub.WithAPIBase(server.URL),
+				forgegithub.WithHTTPClient(server.Client()),
+			)
+
+			pr, err := gh.GetPullRequest(context.Background(), forge.GetPROpts{
+				RepoURL: "https://github.com/owner/repo.git",
+				PRRef:   "42",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pr.State).To(Equal("merged"))
+		})
+
+		It("returns a clear error for a non-numeric ref", func() {
+			gh := forgegithub.New()
+			_, err := gh.GetPullRequest(context.Background(), forge.GetPROpts{
+				RepoURL: "https://github.com/owner/repo.git",
+				PRRef:   "not-a-number",
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("invalid GitHub pull request ref"))
+		})
+
+		It("returns an error on a non-200 response", func() {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte(`{"message":"Not Found"}`))
+			}))
+			defer server.Close()
+
+			gh := forgegithub.New(
+				forgegithub.WithAPIBase(server.URL),
+				forgegithub.WithHTTPClient(server.Client()),
+			)
+
+			_, err := gh.GetPullRequest(context.Background(), forge.GetPROpts{
+				RepoURL: "https://github.com/owner/repo.git",
+				PRRef:   "99",
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("HTTP 404"))
+		})
+	})
+
+	Describe("GetPullRequestDiff", func() {
+		It("requests the diff media type and returns the body", func() {
+			var capturedAccept string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				Expect(r.URL.Path).To(Equal("/repos/owner/repo/pulls/42"))
+				capturedAccept = r.Header.Get("Accept")
+				w.Write([]byte("diff --git a/x b/x\n+hello\n"))
+			}))
+			defer server.Close()
+
+			gh := forgegithub.New(
+				forgegithub.WithAPIBase(server.URL),
+				forgegithub.WithHTTPClient(server.Client()),
+			)
+
+			diff, err := gh.GetPullRequestDiff(context.Background(), forge.GetPROpts{
+				RepoURL: "https://github.com/owner/repo.git",
+				PRRef:   "42",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capturedAccept).To(Equal("application/vnd.github.v3.diff"))
+			Expect(diff).To(Equal("diff --git a/x b/x\n+hello\n"))
+		})
+
+		It("truncates an oversized diff with a marker", func() {
+			huge := strings.Repeat("+line\n", 100000) // well past the 256 KiB cap
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Write([]byte(huge))
+			}))
+			defer server.Close()
+
+			gh := forgegithub.New(
+				forgegithub.WithAPIBase(server.URL),
+				forgegithub.WithHTTPClient(server.Client()),
+			)
+
+			diff, err := gh.GetPullRequestDiff(context.Background(), forge.GetPROpts{
+				RepoURL: "https://github.com/owner/repo.git",
+				PRRef:   "42",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(diff)).To(BeNumerically("<", len(huge)))
+			Expect(diff).To(HaveSuffix("[diff truncated]\n"))
+		})
+
+		It("returns a clear error for a non-numeric ref", func() {
+			gh := forgegithub.New()
+			_, err := gh.GetPullRequestDiff(context.Background(), forge.GetPROpts{
+				RepoURL: "https://github.com/owner/repo.git",
+				PRRef:   "abc",
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("invalid GitHub pull request ref"))
 		})
 	})
 
@@ -237,7 +422,7 @@ var _ = Describe("GitHub Forge", func() {
 
 			err := gh.PostComment(context.Background(), forge.PostCommentOpts{
 				RepoURL:     "https://github.com/owner/repo.git",
-				Number:      42,
+				PRRef:       "42",
 				Body:        "Hello from kvarn",
 				Credentials: &scm.Credentials{Token: "test-token"},
 			})
@@ -260,7 +445,7 @@ var _ = Describe("GitHub Forge", func() {
 
 			err := gh.PostComment(context.Background(), forge.PostCommentOpts{
 				RepoURL:     "https://github.com/owner/repo.git",
-				Number:      7,
+				PRRef:       "7",
 				Body:        "hi",
 				Credentials: &scm.Credentials{Token: "bad-token"},
 			})

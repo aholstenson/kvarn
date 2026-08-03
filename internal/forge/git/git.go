@@ -55,6 +55,14 @@ func (g *Git) CreatePullRequest(_ context.Context, _ forge.CreatePROpts) (*forge
 	return nil, errors.New("pull request creation is not supported by the git forge")
 }
 
+func (g *Git) GetPullRequest(_ context.Context, _ forge.GetPROpts) (*forge.PullRequestDetails, error) {
+	return nil, errors.New("reading pull requests is not supported by the git forge")
+}
+
+func (g *Git) GetPullRequestDiff(_ context.Context, _ forge.GetPROpts) (string, error) {
+	return "", errors.New("reading pull request diffs is not supported by the git forge")
+}
+
 func (g *Git) PostComment(_ context.Context, _ forge.PostCommentOpts) error {
 	return errors.New("posting comments is not supported by the git forge")
 }

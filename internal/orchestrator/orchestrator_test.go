@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -239,10 +240,18 @@ type mockSCM struct {
 	cloneCalls int
 	cloneErr   error
 	files      map[string][]byte
+
+	mu            sync.Mutex
+	lastCloneOpts scm.CloneOpts
+	pushCalls     int
+	lastPushOpts  scm.CommitAndPushOpts
 }
 
 func (m *mockSCM) Clone(_ context.Context, opts scm.CloneOpts) error {
+	m.mu.Lock()
 	m.cloneCalls++
+	m.lastCloneOpts = opts
+	m.mu.Unlock()
 	if m.cloneErr != nil {
 		return m.cloneErr
 	}
@@ -266,11 +275,16 @@ func (m *mockSCM) Clone(_ context.Context, opts scm.CloneOpts) error {
 	return nil
 }
 
-func (m *mockSCM) CommitAndPush(_ context.Context, _ scm.CommitAndPushOpts) error {
+func (m *mockSCM) CommitAndPush(_ context.Context, opts scm.CommitAndPushOpts) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pushCalls++
+	m.lastPushOpts = opts
 	return nil
 }
 
-// mockForge wraps a mockSCM and records PR creation and comment calls.
+// mockForge wraps a mockSCM and records PR creation and comment calls. The
+// pullRequests map backs GetPullRequest, keyed by ref.
 type mockForge struct {
 	scmImpl         scm.SCM
 	prCalls         int
@@ -279,6 +293,16 @@ type mockForge struct {
 	commentCalls    int
 	commentErr      error
 	lastCommentOpts forge.PostCommentOpts
+
+	mu           sync.Mutex
+	pullRequests map[string]*forge.PullRequestDetails
+	getPRErr     error
+	diff         string
+	diffErr      error
+	getPRCalls   int
+	// movedHeadSHA, when set, is reported from the second GetPullRequest call
+	// onward — the shape of someone pushing to the branch mid-run.
+	movedHeadSHA string
 }
 
 func (m *mockForge) SCM() scm.SCM { return m.scmImpl }
@@ -302,9 +326,34 @@ func (m *mockForge) CreatePullRequest(_ context.Context, opts forge.CreatePROpts
 		return nil, m.prErr
 	}
 	return &forge.PullRequest{
-		URL:    "https://github.com/test/repo/pull/1",
-		Number: 1,
+		URL: "https://github.com/test/repo/pull/1",
+		Ref: "1",
 	}, nil
+}
+
+func (m *mockForge) GetPullRequest(_ context.Context, opts forge.GetPROpts) (*forge.PullRequestDetails, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.getPRCalls++
+	if m.getPRErr != nil {
+		return nil, m.getPRErr
+	}
+	pr, ok := m.pullRequests[opts.PRRef]
+	if !ok {
+		return nil, fmt.Errorf("pull request %q not found", opts.PRRef)
+	}
+	cp := *pr
+	if m.movedHeadSHA != "" && m.getPRCalls > 1 {
+		cp.HeadSHA = m.movedHeadSHA
+	}
+	return &cp, nil
+}
+
+func (m *mockForge) GetPullRequestDiff(_ context.Context, _ forge.GetPROpts) (string, error) {
+	if m.diffErr != nil {
+		return "", m.diffErr
+	}
+	return m.diff, nil
 }
 
 func (m *mockForge) PostComment(_ context.Context, opts forge.PostCommentOpts) error {
@@ -1104,7 +1153,7 @@ var _ = Describe("StartJob submission flow", func() {
 
 		Expect(mockForgeInst.commentCalls).To(Equal(1))
 		commentOpts := mockForgeInst.lastCommentOpts
-		Expect(commentOpts.Number).To(Equal(1))
+		Expect(commentOpts.PRRef).To(Equal("1"))
 		Expect(commentOpts.Body).To(ContainSubstring("## Task"))
 		Expect(commentOpts.Body).To(ContainSubstring("Please add a greeting file."))
 		Expect(commentOpts.Body).To(ContainSubstring("Work log"))

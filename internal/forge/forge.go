@@ -23,6 +23,13 @@ type Forge interface {
 	// CreatePullRequest opens a PR on the platform.
 	CreatePullRequest(ctx context.Context, opts CreatePROpts) (*PullRequest, error)
 
+	// GetPullRequest looks up an existing PR by its forge-specific ref.
+	GetPullRequest(ctx context.Context, opts GetPROpts) (*PullRequestDetails, error)
+
+	// GetPullRequestDiff returns the PR's diff in unified format. Large diffs
+	// may be truncated by the implementation.
+	GetPullRequestDiff(ctx context.Context, opts GetPROpts) (string, error)
+
 	// PostComment posts a comment on an existing PR or issue.
 	PostComment(ctx context.Context, opts PostCommentOpts) error
 }
@@ -38,16 +45,42 @@ type CreatePROpts struct {
 	Credentials *scm.Credentials
 }
 
+// GetPROpts identifies a pull request to read. PRRef is opaque to kvarn — each
+// forge interprets its own format (GitHub: the decimal PR number).
+type GetPROpts struct {
+	RepoURL     string
+	PRRef       string
+	Credentials *scm.Credentials
+}
+
 // PostCommentOpts configures posting a comment on a PR or issue.
 type PostCommentOpts struct {
 	RepoURL     string
-	Number      int
+	PRRef       string
 	Body        string
 	Credentials *scm.Credentials
 }
 
 // PullRequest holds information about a created PR.
 type PullRequest struct {
-	URL    string
-	Number int
+	URL string
+	// Ref identifies the PR to later Forge calls. Opaque to kvarn.
+	Ref string
+}
+
+// PullRequestDetails describes an existing pull request. HeadRepo and BaseRepo
+// let callers detect a fork PR, whose head branch lives in another repository
+// and therefore cannot be pushed to.
+type PullRequestDetails struct {
+	Ref string
+	// State is "open", "closed", or "merged".
+	State      string
+	HeadBranch string
+	HeadSHA    string
+	HeadRepo   string
+	BaseBranch string
+	BaseRepo   string
+	Title      string
+	Body       string
+	URL        string
 }

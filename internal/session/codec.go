@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 	"unicode/utf8"
 
@@ -42,17 +43,21 @@ func FromMicros(us int64) time.Time { return time.UnixMicro(us).UTC() }
 // stores round-trip sessions through SessionToRow/RowToSession so the cost-JSON
 // encoding is exercised identically everywhere.
 type Row struct {
-	ID             string
-	ProjectName    string
-	Prompt         string
-	Mode           string
-	State          string
-	Message        string
-	Error          string
-	PullRequestURL string
-	CostJSON       string
-	CreatedAt      int64 // unix micros UTC
-	UpdatedAt      int64 // unix micros UTC
+	ID              string
+	ProjectName     string
+	Prompt          string
+	Mode            string
+	State           string
+	Message         string
+	Error           string
+	PullRequestURL  string
+	PRRef           string
+	HeadBranch      string
+	BaseBranch      string
+	ParentSessionID string
+	CostJSON        string
+	CreatedAt       int64 // unix micros UTC
+	UpdatedAt       int64 // unix micros UTC
 }
 
 // SessionToRow converts a Session into its persisted Row form, marshalling the
@@ -65,17 +70,21 @@ func SessionToRow(s *Session) (Row, error) {
 		costJSON = string(b)
 	}
 	return Row{
-		ID:             s.ID,
-		ProjectName:    s.ProjectName,
-		Prompt:         s.Prompt,
-		Mode:           s.Mode,
-		State:          string(s.State),
-		Message:        s.Message,
-		Error:          s.Error,
-		PullRequestURL: s.PullRequestURL,
-		CostJSON:       costJSON,
-		CreatedAt:      ToMicros(s.CreatedAt),
-		UpdatedAt:      ToMicros(s.UpdatedAt),
+		ID:              s.ID,
+		ProjectName:     s.ProjectName,
+		Prompt:          s.Prompt,
+		Mode:            s.Mode,
+		State:           string(s.State),
+		Message:         s.Message,
+		Error:           s.Error,
+		PullRequestURL:  s.PullRequestURL,
+		PRRef:           s.PRRef,
+		HeadBranch:      s.HeadBranch,
+		BaseBranch:      s.BaseBranch,
+		ParentSessionID: s.ParentSessionID,
+		CostJSON:        costJSON,
+		CreatedAt:       ToMicros(s.CreatedAt),
+		UpdatedAt:       ToMicros(s.UpdatedAt),
 	}, nil
 }
 
@@ -89,17 +98,21 @@ func RowToSession(r Row) (*Session, error) {
 		}
 	}
 	return &Session{
-		ID:             r.ID,
-		ProjectName:    r.ProjectName,
-		Prompt:         r.Prompt,
-		Mode:           r.Mode,
-		State:          State(r.State),
-		Message:        r.Message,
-		Error:          r.Error,
-		PullRequestURL: r.PullRequestURL,
-		Cost:           report,
-		CreatedAt:      FromMicros(r.CreatedAt),
-		UpdatedAt:      FromMicros(r.UpdatedAt),
+		ID:              r.ID,
+		ProjectName:     r.ProjectName,
+		Prompt:          r.Prompt,
+		Mode:            r.Mode,
+		State:           State(r.State),
+		Message:         r.Message,
+		Error:           r.Error,
+		PullRequestURL:  r.PullRequestURL,
+		PRRef:           r.PRRef,
+		HeadBranch:      r.HeadBranch,
+		BaseBranch:      r.BaseBranch,
+		ParentSessionID: r.ParentSessionID,
+		Cost:            report,
+		CreatedAt:       FromMicros(r.CreatedAt),
+		UpdatedAt:       FromMicros(r.UpdatedAt),
 	}, nil
 }
 
@@ -166,8 +179,32 @@ type costPayload struct {
 type pullRequestPayload struct {
 	SessionID string `json:"session_id"`
 	URL       string `json:"url"`
-	Number    int    `json:"number"`
+	Ref       string `json:"ref"`
 	Branch    string `json:"branch"`
+}
+
+// UnmarshalJSON accepts both the current string `ref` and the numeric `number`
+// written before the PR identifier became forge-opaque, so history recorded by
+// an older build stays replayable. Encoding always emits `ref`.
+func (p *pullRequestPayload) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		SessionID string `json:"session_id"`
+		URL       string `json:"url"`
+		Ref       string `json:"ref"`
+		Number    *int   `json:"number"`
+		Branch    string `json:"branch"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	p.SessionID = raw.SessionID
+	p.URL = raw.URL
+	p.Branch = raw.Branch
+	p.Ref = raw.Ref
+	if p.Ref == "" && raw.Number != nil {
+		p.Ref = strconv.Itoa(*raw.Number)
+	}
+	return nil
 }
 
 type vmInfoPayload struct {
@@ -263,7 +300,7 @@ func encodeEvent(e Event) (kind string, payload []byte, durable bool, err error)
 		p := pullRequestPayload{
 			SessionID: ev.SessionID,
 			URL:       ev.URL,
-			Number:    ev.Number,
+			Ref:       ev.Ref,
 			Branch:    ev.Branch,
 		}
 		b, err := json.Marshal(p)
@@ -345,7 +382,7 @@ func decodeEvent(kind string, payload []byte) (Event, error) {
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return nil, err
 		}
-		return PullRequestEvent{SessionID: p.SessionID, URL: p.URL, Number: p.Number, Branch: p.Branch}, nil
+		return PullRequestEvent{SessionID: p.SessionID, URL: p.URL, Ref: p.Ref, Branch: p.Branch}, nil
 	case kindVMInfo:
 		var p vmInfoPayload
 		if err := json.Unmarshal(payload, &p); err != nil {

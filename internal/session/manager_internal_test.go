@@ -19,7 +19,7 @@ var _ = Describe("manager subscriber lifecycle", func() {
 	It("removes the subscriber on ctx cancel, leaving no leak", func() {
 		mgr := NewManager(newMemStore())
 		ctx := context.Background()
-		sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+		sess, err := mgr.Create(ctx, CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
 		Expect(err).NotTo(HaveOccurred())
 
 		watchCtx, cancel := context.WithCancel(ctx)

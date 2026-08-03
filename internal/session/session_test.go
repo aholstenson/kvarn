@@ -53,7 +53,7 @@ var _ = Describe("Manager", func() {
 	})
 
 	It("creates a session with pending state", func() {
-		sess, err := mgr.Create(ctx, "my-project", "do something", "auto")
+		sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "my-project", Prompt: "do something", Mode: "auto"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(sess.ID).NotTo(BeEmpty())
 		Expect(sess.ProjectName).To(Equal("my-project"))
@@ -61,9 +61,9 @@ var _ = Describe("Manager", func() {
 	})
 
 	It("gets and lists sessions", func() {
-		a, err := mgr.Create(ctx, "a", "p1", "auto")
+		a, err := mgr.Create(ctx, session.CreateParams{ProjectName: "a", Prompt: "p1", Mode: "auto"})
 		Expect(err).NotTo(HaveOccurred())
-		_, err = mgr.Create(ctx, "b", "p2", "auto")
+		_, err = mgr.Create(ctx, session.CreateParams{ProjectName: "b", Prompt: "p2", Mode: "auto"})
 		Expect(err).NotTo(HaveOccurred())
 
 		got, err := mgr.Get(ctx, a.ID)
@@ -76,7 +76,7 @@ var _ = Describe("Manager", func() {
 	})
 
 	It("updates state and fails sessions", func() {
-		sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+		sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(mgr.UpdateState(ctx, sess.ID, session.StateCloning, "Cloning")).To(Succeed())
@@ -92,14 +92,16 @@ var _ = Describe("Manager", func() {
 		Expect(got.Error).To(Equal("boom"))
 	})
 
-	It("persists the pull request URL via SetPullRequest", func() {
-		sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+	It("persists the pull request identity via SetPullRequest", func() {
+		sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(mgr.SetPullRequest(ctx, sess.ID, "https://example.com/pr/7", 7, "feature/x")).To(Succeed())
+		Expect(mgr.SetPullRequest(ctx, sess.ID, "https://example.com/pr/7", "7", "feature/x")).To(Succeed())
 		got, err := mgr.Get(ctx, sess.ID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got.PullRequestURL).To(Equal("https://example.com/pr/7"))
+		Expect(got.PRRef).To(Equal("7"))
+		Expect(got.HeadBranch).To(Equal("feature/x"))
 	})
 
 	It("returns error for unknown session", func() {
@@ -111,7 +113,7 @@ var _ = Describe("Manager", func() {
 
 	Describe("Watch", func() {
 		It("replays history from seq 0 then streams live with no gap or dup", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+			sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
 			Expect(err).NotTo(HaveOccurred())
 
 			// Pre-Watch durable history.
@@ -138,7 +140,7 @@ var _ = Describe("Manager", func() {
 		})
 
 		It("resumes from a cursor, skipping events <= fromSeq", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+			sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(mgr.UpdateState(ctx, sess.ID, session.StateCloning, "1")).To(Succeed())
 			Expect(mgr.UpdateState(ctx, sess.ID, session.StateRunning, "2")).To(Succeed())
@@ -153,7 +155,7 @@ var _ = Describe("Manager", func() {
 		})
 
 		It("returns history then closes for an already-terminal session", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+			sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(mgr.UpdateState(ctx, sess.ID, session.StateCompleted, "done")).To(Succeed())
 
@@ -167,7 +169,7 @@ var _ = Describe("Manager", func() {
 		})
 
 		It("delivers ephemeral events live with seq 0 and never replays them", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+			sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
 			Expect(err).NotTo(HaveOccurred())
 
 			ch, err := mgr.Watch(ctx, sess.ID, 0)
@@ -188,7 +190,7 @@ var _ = Describe("Manager", func() {
 		})
 
 		It("disconnects a lagging subscriber and recovers the gap on re-Watch", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+			sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
 			Expect(err).NotTo(HaveOccurred())
 
 			ch, err := mgr.Watch(ctx, sess.ID, 0)
@@ -227,7 +229,7 @@ var _ = Describe("Manager", func() {
 		})
 
 		It("delivers strictly increasing contiguous seqs when watching during an append burst", func() {
-			sess, err := mgr.Create(ctx, "proj", "prompt", "auto")
+			sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
 			Expect(err).NotTo(HaveOccurred())
 
 			ch, err := mgr.Watch(ctx, sess.ID, 0)
