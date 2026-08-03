@@ -167,6 +167,26 @@ var _ = Describe("OrchestratorService authorization", func() {
 		})
 	})
 
+	Describe("CancelJob", func() {
+		It("denies a session outside the key's scope", func() {
+			oc := client.NewOrchestrator(addr, scopedToken)
+			_, err := oc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
+				SessionId: otherSession,
+			}))
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
+		})
+
+		It("reaches the in-scope session", func() {
+			// No job is running behind these fixture sessions, so authorization
+			// passing is what the FailedPrecondition here proves.
+			oc := client.NewOrchestrator(addr, scopedToken)
+			_, err := oc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
+				SessionId: allowedSession,
+			}))
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodeFailedPrecondition))
+		})
+	})
+
 	Describe("WatchSession", func() {
 		It("denies a session outside the key's scope", func() {
 			oc := client.NewOrchestrator(addr, scopedToken)

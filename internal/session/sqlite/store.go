@@ -26,6 +26,20 @@ type Store struct {
 	db *sql.DB
 }
 
+// terminalStates renders the final states as a placeholder list plus its
+// arguments, for the `state IN (...)` / `state NOT IN (...)` predicates. It is
+// derived from session.TerminalStates so the queries follow that set.
+func terminalStates() (string, []any) {
+	states := session.TerminalStates()
+	placeholders := make([]string, len(states))
+	args := make([]any, len(states))
+	for i, st := range states {
+		placeholders[i] = "?"
+		args[i] = string(st)
+	}
+	return strings.Join(placeholders, ", "), args
+}
+
 var _ session.Store = (*Store)(nil)
 
 // New opens (creating if necessary) the sessions database at path and applies
@@ -150,8 +164,9 @@ func (s *Store) ListSessions(ctx context.Context, filter session.SessionFilter) 
 		args = append(args, filter.PRRef)
 	}
 	if filter.ActiveOnly {
-		where = append(where, "state NOT IN (?, ?)")
-		args = append(args, string(session.StateCompleted), string(session.StateFailed))
+		placeholders, stateArgs := terminalStates()
+		where = append(where, "state NOT IN ("+placeholders+")")
+		args = append(args, stateArgs...)
 	}
 	if filter.AfterID != "" {
 		// Keyset cursor in (created_at DESC, id DESC) order.
@@ -265,9 +280,10 @@ func (s *Store) ReconcileNonTerminal(ctx context.Context, reason string) ([]stri
 		}
 		defer tx.Rollback()
 
+		placeholders, stateArgs := terminalStates()
 		rows, err := tx.QueryContext(ctx,
-			`SELECT `+sessionColumns+` FROM sessions WHERE state NOT IN (?, ?) ORDER BY id`,
-			string(session.StateCompleted), string(session.StateFailed))
+			`SELECT `+sessionColumns+` FROM sessions WHERE state NOT IN (`+placeholders+`) ORDER BY id`,
+			stateArgs...)
 		if err != nil {
 			return err
 		}
@@ -322,10 +338,12 @@ func (s *Store) ReconcileNonTerminal(ctx context.Context, reason string) ([]stri
 
 func (s *Store) PruneTerminalBefore(ctx context.Context, cutoff time.Time) (int, error) {
 	var n int64
+	placeholders, args := terminalStates()
+	args = append(args, session.ToMicros(cutoff))
 	err := retryBusy(func() error {
 		res, err := s.db.ExecContext(ctx,
-			`DELETE FROM sessions WHERE state IN (?, ?) AND created_at < ?`,
-			string(session.StateCompleted), string(session.StateFailed), session.ToMicros(cutoff))
+			`DELETE FROM sessions WHERE state IN (`+placeholders+`) AND created_at < ?`,
+			args...)
 		if err != nil {
 			return err
 		}

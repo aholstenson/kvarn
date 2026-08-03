@@ -30,6 +30,20 @@ message SubmitFeedbackResponse {
   string session_id = 1;
 }
 
+// CancelJobRequest stops a run that is still in flight. Cancelling a session
+// that has already reached a terminal state is an error, so a caller can tell
+// whether the request actually stopped anything.
+message CancelJobRequest {
+  string session_id = 1;
+  // Optional; recorded on the session as the cancellation message.
+  string reason = 2;
+}
+
+message CancelJobResponse {
+  // State the session was in when the cancellation was requested.
+  string previous_state = 1;
+}
+
 message GetSessionRequest {
   string session_id = 1;
 }
@@ -235,6 +249,7 @@ message PullRequestCreated {
 service OrchestratorService {
   rpc StartJob(StartJobRequest) returns (StartJobResponse);
   rpc SubmitFeedback(SubmitFeedbackRequest) returns (SubmitFeedbackResponse);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc WatchSession(WatchSessionRequest) returns (stream SessionUpdate);

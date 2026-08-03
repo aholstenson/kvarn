@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/aholstenson/kvarn/internal/agent/cost"
@@ -24,11 +25,24 @@ const (
 	StateSubmitting             State = "submitting"
 	StateCompleted              State = "completed"
 	StateFailed                 State = "failed"
+	// StateCancelled marks a run stopped on request. It is kept apart from
+	// StateFailed so a deliberate stop does not read as a broken job.
+	StateCancelled State = "cancelled"
 )
+
+// terminalStates is the single source of truth for which states are final:
+// IsTerminal answers from it, and stores that need the set in a query build it
+// from TerminalStates, so a state added here cannot be missed in one of them.
+var terminalStates = []State{StateCompleted, StateFailed, StateCancelled}
 
 // IsTerminal returns true if the state is a final state.
 func (s State) IsTerminal() bool {
-	return s == StateCompleted || s == StateFailed
+	return slices.Contains(terminalStates, s)
+}
+
+// TerminalStates returns the final states, for stores that filter on them.
+func TerminalStates() []State {
+	return slices.Clone(terminalStates)
 }
 
 // Session tracks the lifecycle of a job execution.

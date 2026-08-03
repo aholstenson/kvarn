@@ -83,6 +83,14 @@ task image:clean         # remove dist/
 - **Slow watchers** are disconnected on lag rather than silently dropping a durable event (which would create an undetectable gap). The client reconnects via `Watch(from_sequence=lastSeen)` and replays the gap from the store, the source of truth.
 - **Terminal writes are uncancellable**: a job's outcome (`failed`/`completed`, the final cost snapshot, a created PR's ref) is written on a `context.WithoutCancel` copy of the job context. A cost-cap trip or a shutdown cancels the job context, and a terminal write made on it would never reach SQLite — leaving the session non-terminal until the next boot's reconciliation.
 - **Startup reconciliation**: non-terminal sessions are flipped to `failed` on boot (their VMs are gone), appending a `state_change` event. **Retention**: terminal sessions older than `[sessions].retention` (default 720h; `0` = keep forever) are pruned on startup and hourly; events cascade.
+- **Terminal states** are `completed`, `failed` and `cancelled`. `session.TerminalStates()` is the single source of truth — the SQLite `state IN (…)` predicates behind active-only listing, reconciliation and retention build their placeholders from it, so a state added there cannot be missed in one of them.
+
+### Cancellation
+
+- `CancelJob(session_id, reason)` stops an in-flight run (CLI: `kvarn cancel <session-id>`). It cancels the job's context and returns; the run unwinds on its own and its deferred `Sandbox.Close` tears the VM down, so the caller is not made to wait for a VM to stop.
+- The service keeps a `session ID → context.CancelCauseFunc` map. The entry is registered by `beginJob` **before** the job goroutine is spawned — creating the context inside `runJob` would leave a window where a caller holding a session ID could not yet cancel it — and removed after the run has written its terminal state, so a cancel racing the end of a job either finds the job or sees the terminal state.
+- The **cancel cause** is what tells the outcomes apart. Every failure path in `runJob` goes through `failRun`, which records `cancelled` when the cause is `errJobCancelled` and `failed` otherwise. A shutdown (plain `context.Canceled`) and a tripped cost cap (`cost.ErrBudgetExceeded`) therefore stay failures, and the cancellation is reported the same way wherever it lands — the scheduler queue, a clone, the agent, validation. A cancel that arrives after submission succeeded loses the race and the run is reported `completed`: the pull request exists.
+- A cancelled session is **not an error**: the reason lands in `message` and `error` stays empty.
 
 ### Feedback runs
 

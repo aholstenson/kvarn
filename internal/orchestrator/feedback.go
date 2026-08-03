@@ -150,7 +150,8 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.Su
 	reqID, _ := reqid.FromContext(ctx)
 	s.instruments.RecordJobStart(ctx, proj.Name, mode.ModeName())
 	s.jobsWG.Add(1)
-	go s.runJob(jobSpec{
+	rootCtx, cancelJob := s.beginJob(sess.ID)
+	go s.runJob(rootCtx, cancelJob, jobSpec{
 		requestID:   reqID,
 		sessionID:   sess.ID,
 		proj:        proj,

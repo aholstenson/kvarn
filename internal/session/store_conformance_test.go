@@ -256,6 +256,25 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 			Expect(doneEvs).To(BeEmpty())
 		})
 
+		It("treats a cancelled session as terminal", func() {
+			cancelled := makeSession("cancelled", "p", session.StateCancelled, base.Add(-48*time.Hour))
+			Expect(store.CreateSession(ctx, cancelled)).To(Succeed())
+
+			active, err := store.ListSessions(ctx, session.SessionFilter{ActiveOnly: true})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(active).To(BeEmpty())
+
+			// Startup reconciliation leaves it alone rather than flipping it to
+			// failed, and retention prunes it like any other finished session.
+			ids, err := store.ReconcileNonTerminal(ctx, "orchestrator restarted")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ids).To(BeEmpty())
+
+			n, err := store.PruneTerminalBefore(ctx, base.Add(-24*time.Hour))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(1))
+		})
+
 		It("yields a gapless seq range under concurrent AppendEvent", func() {
 			s := makeSession("s", "p", session.StateRunning, base)
 			Expect(store.CreateSession(ctx, s)).To(Succeed())

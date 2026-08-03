@@ -98,6 +98,14 @@ kvarn startjob --addr http://localhost:8080 my-project "Fix the failing tests"
 
 It looks up the project, clones the repository, loads its `kvarn.yml`, runs setup, invokes the agent, validates the result, pushes a branch, and opens a PR when the forge supports it.
 
+A run that turned out to be a mistake can be stopped without waiting for its cost cap:
+
+```sh
+kvarn cancel <session-id> --reason "wrong branch"
+```
+
+The run unwinds wherever it is — queued, cloning, mid-agent — tears its VM down, and the session ends up `cancelled` rather than `failed`.
+
 ### Local development
 
 `run` and `test` work against your current working tree without the orchestrator, projects, or a forge — useful while iterating on a project's `kvarn.yml` or trying the agent before wiring everything up.

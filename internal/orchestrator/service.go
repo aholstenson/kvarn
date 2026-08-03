@@ -275,6 +275,13 @@ type Service struct {
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
 
+	// running maps a session ID to the cancel func of its job context, which is
+	// what CancelJob stops the run with. An entry exists from before the job
+	// goroutine is spawned until after it has written the session's terminal
+	// state, so a cancel arriving at any point in between finds the job.
+	runningMu sync.Mutex
+	running   map[string]context.CancelCauseFunc
+
 	// feedbackMu serializes the per-PR single-flight check with the session
 	// creation that follows it, so two concurrent SubmitFeedback calls for the
 	// same pull request cannot both find it idle.
@@ -320,6 +327,7 @@ func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
 		meter:          otelnoop.NewMeterProvider().Meter("kvarn"),
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
+		running:        make(map[string]context.CancelCauseFunc),
 	}
 }
 
@@ -367,6 +375,7 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		instruments:      opts.Instruments,
 		shutdownCtx:      shutdownCtx,
 		shutdownCancel:   shutdownCancel,
+		running:          make(map[string]context.CancelCauseFunc),
 	}
 }
 
@@ -464,7 +473,8 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 	reqID, _ := reqid.FromContext(ctx)
 	s.instruments.RecordJobStart(ctx, msg.Project, mode.ModeName())
 	s.jobsWG.Add(1)
-	go s.runJob(jobSpec{
+	rootCtx, cancelJob := s.beginJob(sess.ID)
+	go s.runJob(rootCtx, cancelJob, jobSpec{
 		requestID:   reqID,
 		sessionID:   sess.ID,
 		proj:        proj,
@@ -560,12 +570,16 @@ func (s *Service) resolveForge(ctx context.Context, proj *project.Project) (*res
 	return &resolvedForge{cfg: cfg, impl: impl, creds: creds, cloneURL: cloneURL}, nil
 }
 
-func (s *Service) runJob(spec jobSpec) {
+// runJob executes one run. rootCtx and cancelJob come from beginJob, which
+// registered the run for cancellation before this goroutine started; cancelJob
+// is also handed to the cost tracker so a tripped budget stops the run the same
+// way an operator does.
+func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseFunc, spec jobSpec) {
 	defer s.jobsWG.Done()
 	sessionID := spec.sessionID
 	proj := spec.proj
 	mode := spec.mode
-	rootCtx, cancelJob := context.WithCancelCause(s.shutdownCtx)
+	defer s.endJob(sessionID)
 	defer cancelJob(nil)
 	if spec.requestID != "" {
 		rootCtx = reqid.WithRequestID(rootCtx, spec.requestID)
@@ -600,7 +614,11 @@ func (s *Service) runJob(spec jobSpec) {
 				outcome = "success"
 			case session.StateFailed:
 				outcome = "failed"
+			case session.StateCancelled:
+				outcome = "cancelled"
 			default:
+				// Non-terminal here means the goroutine returned without
+				// recording an outcome, which shutdown does to in-flight jobs.
 				outcome = "cancelled"
 			}
 		}
@@ -651,7 +669,7 @@ func (s *Service) runJob(spec jobSpec) {
 	fr, err := s.resolveForge(ctx, proj)
 	if err != nil {
 		log.Error("failed to resolve forge", "forge", proj.Forge, "error", err)
-		s.sessionMgr.Fail(termCtx, sessionID, err)
+		s.failRun(termCtx, rootCtx, sessionID, err)
 		return
 	}
 	forgeCfg, forgeImpl, creds, cloneURL := fr.cfg, fr.impl, fr.creds, fr.cloneURL
@@ -660,7 +678,7 @@ func (s *Service) runJob(spec jobSpec) {
 	cloneDir, err := os.MkdirTemp("", "kvarn-clone-*")
 	if err != nil {
 		log.Error("failed to create temp dir", "error", err)
-		s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("create temp dir: %w", err))
+		s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("create temp dir: %w", err))
 		return
 	}
 	defer os.RemoveAll(cloneDir)
@@ -690,7 +708,7 @@ func (s *Service) runJob(spec jobSpec) {
 
 	if err := scmImpl.Clone(ctx, cloneOpts); err != nil {
 		log.Error("clone failed", "error", err)
-		s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("clone repository: %w", err))
+		s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("clone repository: %w", err))
 		return
 	}
 	log.Info("clone complete")
@@ -699,7 +717,7 @@ func (s *Service) runJob(spec jobSpec) {
 	cfg, err := projconfig.Load(cloneDir)
 	if err != nil {
 		log.Error("failed to load project config", "error", err)
-		s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("load project config: %w", err))
+		s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("load project config: %w", err))
 		return
 	}
 
@@ -737,12 +755,12 @@ func (s *Service) runJob(spec jobSpec) {
 	if err != nil {
 		if errors.Is(err, scheduler.ErrTooLarge) {
 			log.Error("job exceeds scheduler capacity", "error", err)
-			s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("scheduler: job %d vCPU / %s memory / %s disk exceeds host capacity",
+			s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("scheduler: job %d vCPU / %s memory / %s disk exceeds host capacity",
 				cpuCount, formatBytes(memBytes), formatBytes(uint64(diskBytes))))
 			return
 		}
 		log.Error("admission failed", "error", err)
-		s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("admission: %w", err))
+		s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("admission: %w", err))
 		return
 	}
 	defer lease.Release()
@@ -765,7 +783,7 @@ func (s *Service) runJob(spec jobSpec) {
 	}
 	if err != nil {
 		log.Error("failed to resolve secrets", "error", err)
-		s.sessionMgr.Fail(termCtx, sessionID, err)
+		s.failRun(termCtx, rootCtx, sessionID, err)
 		return
 	}
 
@@ -797,7 +815,7 @@ func (s *Service) runJob(spec jobSpec) {
 	})
 	if err != nil {
 		log.Error("sandbox start failed", "error", err)
-		s.sessionMgr.Fail(termCtx, sessionID, err)
+		s.failRun(termCtx, rootCtx, sessionID, err)
 		return
 	}
 	defer sess.Close()
@@ -811,7 +829,7 @@ func (s *Service) runJob(spec jobSpec) {
 		onOutput := s.makeOutputCallback(ctx, sessionID)
 		if _, err := sess.RunSetup(ctx, cfg, onStepDone, onOutput); err != nil {
 			log.Error("setup failed", "error", err)
-			s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("setup: %w", err))
+			s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("setup: %w", err))
 			return
 		}
 		log.Info("setup complete")
@@ -881,9 +899,9 @@ func (s *Service) runJob(spec jobSpec) {
 			log.Error("agent start failed", "error", err)
 			cause := context.Cause(rootCtx)
 			if errors.Is(cause, cost.ErrBudgetExceeded) {
-				s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("agent: %w", cause))
+				s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("agent: %w", cause))
 			} else {
-				s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("agent: %w", err))
+				s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("agent: %w", err))
 			}
 			return
 		}
@@ -912,9 +930,9 @@ func (s *Service) runJob(spec jobSpec) {
 				log.Error("agent failed", "error", err)
 				cause := context.Cause(rootCtx)
 				if errors.Is(cause, cost.ErrBudgetExceeded) {
-					s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("agent: %w", cause))
+					s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("agent: %w", cause))
 				} else {
-					s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("agent: %w", err))
+					s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("agent: %w", err))
 				}
 				return
 			}
@@ -930,7 +948,7 @@ func (s *Service) runJob(spec jobSpec) {
 		changedFiles, err := sess.ChangedFiles(ctx)
 		if err != nil {
 			log.Error("failed to get changed files", "error", err)
-			s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("changed files: %w", err))
+			s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("changed files: %w", err))
 			return
 		}
 
@@ -939,7 +957,7 @@ func (s *Service) runJob(spec jobSpec) {
 		valResult, err = sess.RunValidation(ctx, cfg, changedFiles, onStepDone, onOutput)
 		if err != nil {
 			log.Error("validation failed", "error", err)
-			s.sessionMgr.Fail(termCtx, sessionID, fmt.Errorf("validation: %w", err))
+			s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("validation: %w", err))
 			return
 		}
 
@@ -1046,7 +1064,7 @@ func (s *Service) runJob(spec jobSpec) {
 	// listing sessions.
 	if submitErr != nil {
 		log.Error("failed to submit changes", "error", submitErr)
-		s.sessionMgr.Fail(termCtx, sessionID, submitErr)
+		s.failRun(termCtx, rootCtx, sessionID, submitErr)
 		return
 	}
 
