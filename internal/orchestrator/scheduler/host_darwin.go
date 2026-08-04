@@ -3,21 +3,21 @@
 package scheduler
 
 import (
-	"encoding/binary"
 	"fmt"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
-// hostMemoryBytes returns total physical memory in bytes via sysctl hw.memsize,
-// which kernel ABI promises is a uint64 little-endian value.
+// hostMemoryBytes returns total physical memory in bytes via sysctl hw.memsize.
+//
+// The value must be read with the uint64 accessor rather than syscall.Sysctl:
+// that one returns the raw bytes as a Go string and strips a trailing NUL, which
+// for a little-endian integer is an ordinary zero high byte — every plausible
+// memory size has one, so the 8-byte value would always arrive truncated.
 func hostMemoryBytes() (uint64, error) {
-	raw, err := syscall.Sysctl("hw.memsize")
+	v, err := unix.SysctlUint64("hw.memsize")
 	if err != nil {
 		return 0, fmt.Errorf("sysctl hw.memsize: %w", err)
 	}
-	// syscall.Sysctl strips a trailing NUL; the value is 8 raw bytes.
-	if len(raw) < 8 {
-		return 0, fmt.Errorf("sysctl hw.memsize: short read (%d bytes)", len(raw))
-	}
-	return binary.LittleEndian.Uint64([]byte(raw)[:8]), nil
+	return v, nil
 }
