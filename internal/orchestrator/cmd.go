@@ -59,6 +59,7 @@ type Cmd struct {
 	SchedCPUOvercommit  float64 `help:"CPU overcommit multiplier (>=1.0). 0 = file / built-in default." env:"KVARN_SCHED_CPU_OVERCOMMIT" default:"0"`
 	SchedDiskOvercommit float64 `help:"Disk overcommit multiplier (>=1.0); VM disks are thin. 0 = file / built-in default." env:"KVARN_SCHED_DISK_OVERCOMMIT" default:"0"`
 	SchedDiskFloor      string  `help:"Real free space the VM disk filesystem must keep (e.g. 20G); admission pauses below it. 0 disables. Empty = file / 10% of the pool." env:"KVARN_SCHED_DISK_FLOOR" default:""`
+	SchedBackfillGrace  string  `help:"How long a queued job may be skipped by ones that fit before it holds the line (e.g. 1m). 0 = strict FIFO. Empty = file / built-in default." env:"KVARN_SCHED_BACKFILL_GRACE" default:""`
 	SchedMaxVMLifetime  string  `help:"Host-wide per-VM wall-time failsafe (e.g. 4h). Empty = file / built-in default." env:"KVARN_SCHED_MAX_VM_LIFETIME" default:""`
 
 	OtelMetricsEnabled   bool   `help:"Enable OpenTelemetry metrics export." env:"KVARN_OTEL_METRICS_ENABLED"`
@@ -83,6 +84,13 @@ const defaultDiskOvercommit = 3.0
 // host instead of being an absolute size, so the same default is sane on a
 // laptop and on a build server.
 const defaultDiskFloorFraction = 0.10
+
+// defaultBackfillGrace is the built-in window in which a queued job may be
+// passed over by later ones that fit. It is short relative to a job's own
+// runtime — a clone, a VM boot and an agent run — so letting a burst of small
+// jobs through costs a large job little, while a job stuck behind an
+// indefinite stream of small ones is the failure this bounds.
+const defaultBackfillGrace = time.Minute
 
 // defaultMaxVMLifetime is the built-in failsafe applied when no operator
 // override is configured. 24h is well above any expected job runtime but
@@ -646,6 +654,15 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 		return nil, fmt.Errorf("admission pool has a zero dimension: %+v", total)
 	}
 
+	grace, err := resolveDuration(c.SchedBackfillGrace, fileCfg.BackfillGrace,
+		"--sched-backfill-grace", "scheduler.backfill_grace", defaultBackfillGrace)
+	if err != nil {
+		return nil, err
+	}
+	if grace < 0 {
+		return nil, fmt.Errorf("backfill_grace must be non-negative")
+	}
+
 	slog.Info("scheduler pool",
 		"cpu_millis", total.CPUMillis,
 		"mem_bytes", total.MemBytes,
@@ -654,6 +671,7 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 		"disk_overcommit", diskOvercommit,
 		"disk_floor_bytes", diskFloor,
 		"disk_path", diskPath,
+		"backfill_grace", grace.String(),
 	)
 
 	return scheduler.New(scheduler.Options{
@@ -662,32 +680,43 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 		DiskOvercommit: diskOvercommit,
 		DiskPath:       diskPath,
 		DiskFloorBytes: diskFloor,
-		// Capped is wired unconditionally: with no limits configured anywhere
-		// it hides nobody and the order is exactly FIFO's, so there is no
-		// configuration under which skipping it would behave differently.
-		Policy: scheduler.Capped{Inner: scheduler.FIFO{}},
+		// Both wrappers are wired unconditionally. With no limits configured
+		// Capped hides nobody, and with a zero grace Backfill is exactly FIFO,
+		// so there is no configuration under which skipping either would
+		// behave differently.
+		Policy: scheduler.Capped{Inner: scheduler.Backfill{Grace: grace}},
 	}), nil
+}
+
+// resolveDuration applies CLI > file > built-in precedence to a duration field.
+// An explicit "0" is honored as zero; only an empty string falls through to the
+// default.
+func resolveDuration(flagVal, fileVal, flagName, fileField string, def time.Duration) (time.Duration, error) {
+	raw, source := flagVal, flagName
+	if raw == "" {
+		raw, source = fileVal, fileField
+	}
+	if raw == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", source, err)
+	}
+	return d, nil
 }
 
 // resolveMaxVMLifetime applies CLI > file > built-in precedence to the
 // per-VM wall-time failsafe. Returns 0 only if the operator explicitly sets
 // the lifetime to "0" — the empty string falls through to the default.
 func (c *Cmd) resolveMaxVMLifetime(fileCfg orchcfg.Scheduler) (time.Duration, error) {
-	raw := c.SchedMaxVMLifetime
-	source := "--sched-max-vm-lifetime"
-	if raw == "" {
-		raw = fileCfg.MaxVMLifetime
-		source = "scheduler.max_vm_lifetime"
-	}
-	if raw == "" {
-		return defaultMaxVMLifetime, nil
-	}
-	d, err := time.ParseDuration(raw)
+	d, err := resolveDuration(c.SchedMaxVMLifetime, fileCfg.MaxVMLifetime,
+		"--sched-max-vm-lifetime", "scheduler.max_vm_lifetime", defaultMaxVMLifetime)
 	if err != nil {
-		return 0, fmt.Errorf("%s: %w", source, err)
+		return 0, err
 	}
 	if d < 0 {
-		return 0, fmt.Errorf("%s: must be non-negative", source)
+		return 0, fmt.Errorf("max_vm_lifetime must be non-negative")
 	}
 	return d, nil
 }

@@ -38,6 +38,9 @@ type Options struct {
 	DiskFloorBytes uint64
 	// Policy chooses which queued request is admitted next. Nil means FIFO.
 	Policy Policy
+	// Now overrides the clock used to stamp and compare queue wait times.
+	// Nil means time.Now.
+	Now func() time.Time
 }
 
 // Scheduler admits Requests against a fixed Capacity pool, queueing those that
@@ -50,6 +53,7 @@ type Scheduler struct {
 	running   map[Tenant]Usage
 	queue     []*waiter
 	policy    Policy
+	now       func() time.Time
 	cpuOC     float64
 	diskOC    float64
 	unbounded bool
@@ -77,10 +81,15 @@ func New(opts Options) *Scheduler {
 	if p == nil {
 		p = FIFO{}
 	}
+	clock := opts.Now
+	if clock == nil {
+		clock = time.Now
+	}
 	return &Scheduler{
 		total:     opts.Total,
 		running:   make(map[Tenant]Usage),
 		policy:    p,
+		now:       clock,
 		cpuOC:     opts.CPUOvercommit,
 		diskOC:    opts.DiskOvercommit,
 		diskPath:  opts.DiskPath,
@@ -129,7 +138,7 @@ func (s *Scheduler) Acquire(ctx context.Context, req Request) (Lease, error) {
 	// enforces — a tenant's concurrency cap, a reservation held for the head —
 	// and would apply exactly when the pool is empty enough for those to
 	// matter. The extra allocation is nothing next to booting a VM.
-	w := &waiter{req: req, done: make(chan struct{}), enqueuedAt: time.Now()}
+	w := &waiter{req: req, done: make(chan struct{}), enqueuedAt: s.now()}
 	s.queue = append(s.queue, w)
 	notes := s.tryAdmitLocked()
 	if w.granted {
@@ -264,6 +273,7 @@ func (s *Scheduler) tryAdmitLocked() []notification {
 		view[i] = Waiting{Request: w.req, EnqueuedAt: w.enqueuedAt}
 	}
 
+	now := s.now()
 	admitted := 0
 	for len(s.queue) > 0 {
 		i := s.policy.Next(State{
@@ -271,6 +281,7 @@ func (s *Scheduler) tryAdmitLocked() []notification {
 			Total:   s.total,
 			Queue:   view,
 			Running: s.running,
+			Now:     now,
 		})
 		if i < 0 || i >= len(s.queue) {
 			break

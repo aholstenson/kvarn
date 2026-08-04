@@ -66,6 +66,11 @@ func (l Limits) exceeded(req Request) string {
 // meant to contain one project into a host-wide stall. A hidden waiter cannot
 // be starved either, since what makes it eligible again is its own tenant's
 // jobs finishing, and it keeps its place in line among eligible waiters.
+//
+// Hiding also keeps a capped waiter from holding the line under Backfill. No
+// capacity release can admit it — only its own tenant finishing a job can — so
+// letting it reserve would stall every other tenant on an event that has
+// nothing to do with capacity.
 type Capped struct {
 	Inner Policy
 }

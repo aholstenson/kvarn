@@ -97,6 +97,11 @@ type Scheduler struct {
 	// MaxVMLifetime is a host-wide failsafe upper bound on per-VM wall time
 	// (e.g. "4h", "1d"). Empty falls through to the built-in default.
 	MaxVMLifetime string `toml:"max_vm_lifetime,omitempty"`
+	// BackfillGrace is how long a queued job may be skipped by ones behind it
+	// that fit, before it holds the line and nothing new is admitted ahead of
+	// it (e.g. "1m"). "0" is strict FIFO: a job that does not fit stalls every
+	// job behind it. Empty falls through to the built-in default.
+	BackfillGrace string `toml:"backfill_grace,omitempty"`
 	// PerProject and PerKey cap what any one project or API key may hold at
 	// once, and are the defaults a project or key overrides in its own file.
 	// Unset means uncapped, which is the right default for a single-tenant

@@ -40,6 +40,11 @@ type State struct {
 	Total   Capacity
 	Queue   []Waiting
 	Running map[Tenant]Usage
+	// Now is when this decision is being made, from the same clock that
+	// stamped every Waiting.EnqueuedAt. A policy that weighs how long a
+	// request has waited must read it from here rather than calling
+	// time.Now, so that the two are always comparable.
+	Now time.Time
 }
 
 // Policy decides which queued request is admitted next. Separating that
