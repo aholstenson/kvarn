@@ -760,9 +760,18 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		MemBytes:  memBytes,
 		DiskBytes: uint64(diskBytes),
 		OnWait: func(e scheduler.WaitEvent) {
+			need := fmt.Sprintf("need %d vCPU / %s memory / %s disk",
+				cpuCount, formatBytes(memBytes), formatBytes(uint64(diskBytes)))
+			if e.HostDiskLow {
+				// Free capacity is not the reason here and reporting it would
+				// send whoever reads this looking in the wrong place.
+				s.sessionMgr.UpdateState(ctx, sessionID, session.StateQueued,
+					fmt.Sprintf("Position %d in queue; host disk below reserve, admission paused (%s)",
+						e.Position, need))
+				return
+			}
 			s.sessionMgr.UpdateState(ctx, sessionID, session.StateQueued,
-				fmt.Sprintf("Position %d in queue; need %d vCPU / %s memory / %s disk",
-					e.Position, cpuCount, formatBytes(memBytes), formatBytes(uint64(diskBytes))))
+				fmt.Sprintf("Position %d in queue; %s", e.Position, need))
 		},
 	}
 	lease, err := s.scheduler.Acquire(ctx, admitReq)

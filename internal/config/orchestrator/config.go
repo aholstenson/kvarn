@@ -86,6 +86,14 @@ type Scheduler struct {
 	Memory        string   `toml:"memory,omitempty"`
 	Disk          string   `toml:"disk,omitempty"`
 	CPUOvercommit *float64 `toml:"cpu_overcommit,omitempty"`
+	// DiskOvercommit multiplies the disk pool, because a job is charged its
+	// VM's virtual disk size while the image on the host stays thin. Set it to
+	// 1.0 to charge the full request.
+	DiskOvercommit *float64 `toml:"disk_overcommit,omitempty"`
+	// DiskFloor is how much real free space the VM disk filesystem must keep
+	// (e.g. "20G"). Admission pauses below it, which is what makes disk
+	// overcommit safe. "0" disables the guard; empty takes the default.
+	DiskFloor string `toml:"disk_floor,omitempty"`
 	// MaxVMLifetime is a host-wide failsafe upper bound on per-VM wall time
 	// (e.g. "4h", "1d"). Empty falls through to the built-in default.
 	MaxVMLifetime string `toml:"max_vm_lifetime,omitempty"`

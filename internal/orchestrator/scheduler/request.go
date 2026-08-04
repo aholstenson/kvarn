@@ -34,6 +34,12 @@ type WaitEvent struct {
 	Position int
 	Need     Request
 	Free     Capacity
+	// HostDiskLow reports that the host disk guard has admission paused. It
+	// distinguishes the two reasons a job sits in the queue, which look
+	// identical from the outside but need different operator action: Free
+	// genuinely too small, versus Free looking ample while the filesystem
+	// underneath the pool is nearly full.
+	HostDiskLow bool
 }
 
 // Lease is the handle returned by Acquire. Release credits the scheduler with
@@ -49,8 +55,8 @@ type noopLease struct {
 	granted Capacity
 }
 
-func (l *noopLease) Release()           {}
-func (l *noopLease) Granted() Capacity  { return l.granted }
+func (l *noopLease) Release()          {}
+func (l *noopLease) Granted() Capacity { return l.granted }
 
 // realLease is the bounded scheduler's lease. release is invoked at most once
 // thanks to sync.Once, so accidental double-release never double-credits.

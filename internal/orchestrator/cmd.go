@@ -16,8 +16,8 @@ import (
 	credtoml "github.com/aholstenson/kvarn/internal/config/credential/tomlstore"
 	forgetoml "github.com/aholstenson/kvarn/internal/config/forge/tomlstore"
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
-	orchcfg "github.com/aholstenson/kvarn/internal/config/orchestrator"
 	modeltoml "github.com/aholstenson/kvarn/internal/config/model/tomlstore"
+	orchcfg "github.com/aholstenson/kvarn/internal/config/orchestrator"
 	projtoml "github.com/aholstenson/kvarn/internal/config/project/tomlstore"
 	secrettoml "github.com/aholstenson/kvarn/internal/config/secret/tomlstore"
 	"github.com/aholstenson/kvarn/internal/forge"
@@ -40,24 +40,26 @@ import (
 )
 
 type Cmd struct {
-	Addr            string `help:"Address to listen on." default:":8080"`
-	DiskImagePath   string `help:"Path to VM disk image. Auto-detected if not set."`
-	ProjectsFile    string `help:"Path to projects TOML file." default:""`
-	CredentialsFile string `help:"Path to credentials TOML file." default:""`
-	SecretsFile     string `help:"Path to per-project secrets TOML file." default:""`
-	ForgesFile      string `help:"Path to forges TOML file." default:""`
-	AgentsFile      string `help:"Path to agents config TOML file." default:""`
-	APIKeysFile     string `help:"Path to API keys TOML file." default:""`
-	SessionsDB      string `help:"Path to the persistent sessions SQLite database. Defaults to ~/.config/kvarn/sessions.db." default:""`
-	NoAuth            bool   `help:"Disable API-key auth (local dev only)." env:"KVARN_NO_AUTH"`
-	Model             string `help:"LLM model alias for the coding agent." default:"coding-agent"`
-	OrchestratorFile  string `help:"Path to orchestrator TOML file (host-level settings, e.g. scheduler pool)." default:""`
+	Addr             string `help:"Address to listen on." default:":8080"`
+	DiskImagePath    string `help:"Path to VM disk image. Auto-detected if not set."`
+	ProjectsFile     string `help:"Path to projects TOML file." default:""`
+	CredentialsFile  string `help:"Path to credentials TOML file." default:""`
+	SecretsFile      string `help:"Path to per-project secrets TOML file." default:""`
+	ForgesFile       string `help:"Path to forges TOML file." default:""`
+	AgentsFile       string `help:"Path to agents config TOML file." default:""`
+	APIKeysFile      string `help:"Path to API keys TOML file." default:""`
+	SessionsDB       string `help:"Path to the persistent sessions SQLite database. Defaults to ~/.config/kvarn/sessions.db." default:""`
+	NoAuth           bool   `help:"Disable API-key auth (local dev only)." env:"KVARN_NO_AUTH"`
+	Model            string `help:"LLM model alias for the coding agent." default:"coding-agent"`
+	OrchestratorFile string `help:"Path to orchestrator TOML file (host-level settings, e.g. scheduler pool)." default:""`
 
-	SchedCPUs          uint    `help:"Total vCPUs in the admission pool. 0 = file / runtime.NumCPU()." env:"KVARN_SCHED_CPUS" default:"0"`
-	SchedMemory        string  `help:"Total admission-pool memory (e.g. 32G). Empty = file / 75% of host total." env:"KVARN_SCHED_MEMORY" default:""`
-	SchedDisk          string  `help:"Total admission-pool disk (e.g. 200G). Empty = file / 75% of free space on the image cache filesystem." env:"KVARN_SCHED_DISK" default:""`
-	SchedCPUOvercommit float64 `help:"CPU overcommit multiplier (>=1.0). 0 = file / built-in default." env:"KVARN_SCHED_CPU_OVERCOMMIT" default:"0"`
-	SchedMaxVMLifetime string  `help:"Host-wide per-VM wall-time failsafe (e.g. 4h). Empty = file / built-in default." env:"KVARN_SCHED_MAX_VM_LIFETIME" default:""`
+	SchedCPUs           uint    `help:"Total vCPUs in the admission pool. 0 = file / runtime.NumCPU()." env:"KVARN_SCHED_CPUS" default:"0"`
+	SchedMemory         string  `help:"Total admission-pool memory (e.g. 32G). Empty = file / 75% of host total." env:"KVARN_SCHED_MEMORY" default:""`
+	SchedDisk           string  `help:"Total admission-pool disk (e.g. 200G). Empty = file / 75% of free space on the image cache filesystem." env:"KVARN_SCHED_DISK" default:""`
+	SchedCPUOvercommit  float64 `help:"CPU overcommit multiplier (>=1.0). 0 = file / built-in default." env:"KVARN_SCHED_CPU_OVERCOMMIT" default:"0"`
+	SchedDiskOvercommit float64 `help:"Disk overcommit multiplier (>=1.0); VM disks are thin. 0 = file / built-in default." env:"KVARN_SCHED_DISK_OVERCOMMIT" default:"0"`
+	SchedDiskFloor      string  `help:"Real free space the VM disk filesystem must keep (e.g. 20G); admission pauses below it. 0 disables. Empty = file / 10% of the pool." env:"KVARN_SCHED_DISK_FLOOR" default:""`
+	SchedMaxVMLifetime  string  `help:"Host-wide per-VM wall-time failsafe (e.g. 4h). Empty = file / built-in default." env:"KVARN_SCHED_MAX_VM_LIFETIME" default:""`
 
 	OtelMetricsEnabled   bool   `help:"Enable OpenTelemetry metrics export." env:"KVARN_OTEL_METRICS_ENABLED"`
 	OtelExporterEndpoint string `help:"OTLP metrics endpoint (host:port). Empty = honor OTEL_EXPORTER_OTLP_ENDPOINT." env:"KVARN_OTEL_EXPORTER_OTLP_ENDPOINT"`
@@ -67,6 +69,20 @@ type Cmd struct {
 // defaultCPUOvercommit is the built-in CPU overcommit multiplier used when
 // neither the CLI flag nor the orchestrator.toml file set one.
 const defaultCPUOvercommit = 1.5
+
+// defaultDiskOvercommit is the built-in disk overcommit multiplier. A job is
+// charged its VM's virtual disk (16 GiB by default) while the backing image is
+// thin and a typical job writes a few gigabytes into it, so charging the full
+// request idles most of the pool and stalls jobs behind a number nothing on the
+// host is actually using. 3.0 stays well inside that gap, and the disk floor
+// guard — not this multiplier — is what keeps the host from filling.
+const defaultDiskOvercommit = 3.0
+
+// defaultDiskFloorFraction is the share of the pre-overcommit disk pool kept
+// free as the guard's floor when the operator sets none. It scales with the
+// host instead of being an absolute size, so the same default is sane on a
+// laptop and on a build server.
+const defaultDiskFloorFraction = 0.10
 
 // defaultMaxVMLifetime is the built-in failsafe applied when no operator
 // override is configured. 24h is well above any expected job runtime but
@@ -293,6 +309,10 @@ func (c *Cmd) Run() error {
 		return fmt.Errorf("sessions: %w", err)
 	}
 	startSessionRetention(ctx, sessionStore, retention)
+
+	// Disk overcommit is only safe while something watches the real
+	// filesystem, so the guard runs for the orchestrator's whole life.
+	go sched.WatchHostDisk(ctx, 0)
 
 	sessionMgr := session.NewManager(sessionStore)
 	instruments, err := metrics.NewInstruments(meter,
@@ -572,17 +592,44 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 		return nil, err
 	}
 
-	diskBytes, err := resolveSize(c.SchedDisk, fileCfg.Disk, "--sched-disk", "scheduler.disk",
+	diskOvercommit := c.SchedDiskOvercommit
+	if diskOvercommit == 0 && fileCfg.DiskOvercommit != nil {
+		diskOvercommit = *fileCfg.DiskOvercommit
+	}
+	if diskOvercommit == 0 {
+		diskOvercommit = defaultDiskOvercommit
+	}
+	if diskOvercommit < 1.0 {
+		return nil, fmt.Errorf("disk_overcommit must be >= 1.0, got %g", diskOvercommit)
+	}
+
+	// The disk pool and the guard both concern one filesystem — the one VM
+	// disks are allocated on — so the path is resolved even when the operator
+	// sizes the pool by hand and the host fallback below never runs.
+	diskPath, err := scheduler.DefaultImageCacheDir()
+	if err != nil {
+		return nil, err
+	}
+
+	rawDisk, err := resolveSize(c.SchedDisk, fileCfg.Disk, "--sched-disk", "scheduler.disk",
 		func() (uint64, error) {
-			cacheDir, err := scheduler.DefaultImageCacheDir()
-			if err != nil {
-				return 0, err
-			}
-			free, err := scheduler.HostFreeDiskBytes(cacheDir)
+			free, err := scheduler.HostFreeDiskBytes(diskPath)
 			if err != nil {
 				return 0, fmt.Errorf("detect free disk: %w", err)
 			}
 			return scheduler.FractionOf(free), nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	diskBytes := uint64(float64(rawDisk) * diskOvercommit)
+
+	// The floor is a fraction of the pool before overcommit, so raising the
+	// multiplier does not quietly raise the reserve along with it.
+	diskFloor, err := resolveSize(c.SchedDiskFloor, fileCfg.DiskFloor,
+		"--sched-disk-floor", "scheduler.disk_floor",
+		func() (uint64, error) {
+			return uint64(float64(rawDisk) * defaultDiskFloorFraction), nil
 		})
 	if err != nil {
 		return nil, err
@@ -598,9 +645,18 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 		"mem_bytes", total.MemBytes,
 		"disk_bytes", total.DiskBytes,
 		"cpu_overcommit", overcommit,
+		"disk_overcommit", diskOvercommit,
+		"disk_floor_bytes", diskFloor,
+		"disk_path", diskPath,
 	)
 
-	return scheduler.New(scheduler.Options{Total: total, CPUOvercommit: overcommit}), nil
+	return scheduler.New(scheduler.Options{
+		Total:          total,
+		CPUOvercommit:  overcommit,
+		DiskOvercommit: diskOvercommit,
+		DiskPath:       diskPath,
+		DiskFloorBytes: diskFloor,
+	}), nil
 }
 
 // resolveMaxVMLifetime applies CLI > file > built-in precedence to the

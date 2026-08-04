@@ -1,6 +1,14 @@
 // Package scheduler caps concurrent jobs by a (cpu, memory, disk) capacity pool
-// and queues requests that don't fit. CPU is overcommittable (multiplier
-// pre-applied to Total); memory and disk are strict.
+// and queues requests that don't fit. Memory is strict; CPU and disk are
+// overcommittable (multipliers pre-applied to Total).
+//
+// Disk is overcommitted because a job is charged the *virtual* size of its VM
+// disk while the image itself is thin — a qcow2 overlay on Linux, a sparse raw
+// file on macOS — so a 16 GiB request typically costs a fraction of that on the
+// host. Charging the full request would idle most of the pool. Prediction is
+// not possible here (a job's real growth depends on what it builds), so the
+// overcommit is backed by measurement instead: WatchHostDisk feeds real free
+// space in, and admission stops entirely while it is below DiskFloorBytes.
 package scheduler
 
 import (
@@ -13,11 +21,19 @@ import (
 // scheduler's total capacity in any dimension. The request is never queued.
 var ErrTooLarge = errors.New("scheduler: request exceeds total capacity")
 
-// Options configures a new Scheduler. Total has CPU overcommit already applied;
-// CPUOvercommit is retained for reporting.
+// Options configures a new Scheduler. Total has CPU and disk overcommit already
+// applied; the multipliers are retained for reporting.
 type Options struct {
-	Total         Capacity
-	CPUOvercommit float64
+	Total          Capacity
+	CPUOvercommit  float64
+	DiskOvercommit float64
+	// DiskPath is the filesystem WatchHostDisk measures — the one VM disks are
+	// allocated on. Empty disables the guard.
+	DiskPath string
+	// DiskFloorBytes is how much real free space that filesystem must keep.
+	// While measured free space is below it no request is admitted, whatever
+	// the accounting pool says. Zero disables the guard.
+	DiskFloorBytes uint64
 }
 
 // Scheduler admits Requests against a fixed Capacity pool, queueing those that
@@ -30,7 +46,16 @@ type Scheduler struct {
 	used      Capacity
 	queue     []*waiter
 	cpuOC     float64
+	diskOC    float64
 	unbounded bool
+
+	// Host disk guard. diskAvail is only meaningful once the watchdog has
+	// reported; until then the guard is open, so a slow first sample delays
+	// no one.
+	diskPath     string
+	diskFloor    uint64
+	diskAvail    uint64
+	diskMeasured bool
 }
 
 type waiter struct {
@@ -39,12 +64,15 @@ type waiter struct {
 	granted bool
 }
 
-// New constructs a bounded scheduler. The Total in opts has CPU overcommit
-// already applied by the caller.
+// New constructs a bounded scheduler. The Total in opts has CPU and disk
+// overcommit already applied by the caller.
 func New(opts Options) *Scheduler {
 	return &Scheduler{
-		total: opts.Total,
-		cpuOC: opts.CPUOvercommit,
+		total:     opts.Total,
+		cpuOC:     opts.CPUOvercommit,
+		diskOC:    opts.DiskOvercommit,
+		diskPath:  opts.DiskPath,
+		diskFloor: opts.DiskFloorBytes,
 	}
 }
 
@@ -76,7 +104,7 @@ func (s *Scheduler) Acquire(ctx context.Context, req Request) (Lease, error) {
 	}
 
 	// Fast path: no one waiting and the request fits right now.
-	if len(s.queue) == 0 && s.freeLocked().fits(req) {
+	if len(s.queue) == 0 && s.diskGateOpenLocked() && s.freeLocked().fits(req) {
 		s.used.CPUMillis += req.CPUMillis
 		s.used.MemBytes += req.MemBytes
 		s.used.DiskBytes += req.DiskBytes
@@ -157,6 +185,9 @@ func (s *Scheduler) release(granted Capacity) {
 // position-change notifications for the remaining waiters. Strict FIFO is
 // enforced here: if the head doesn't fit we stop, even if later waiters would.
 func (s *Scheduler) tryAdmitLocked() []notification {
+	if !s.diskGateOpenLocked() {
+		return nil
+	}
 	admitted := 0
 	for len(s.queue) > 0 {
 		head := s.queue[0]
@@ -189,6 +220,7 @@ func (s *Scheduler) collectNotificationsLocked() []notification {
 		return nil
 	}
 	free := s.freeLocked()
+	diskLow := !s.diskGateOpenLocked()
 	out := make([]notification, 0, len(s.queue))
 	for i, w := range s.queue {
 		if w.req.OnWait == nil {
@@ -197,9 +229,10 @@ func (s *Scheduler) collectNotificationsLocked() []notification {
 		out = append(out, notification{
 			fn: w.req.OnWait,
 			evt: WaitEvent{
-				Position: i + 1,
-				Need:     w.req,
-				Free:     free,
+				Position:    i + 1,
+				Need:        w.req,
+				Free:        free,
+				HostDiskLow: diskLow,
 			},
 		})
 	}
