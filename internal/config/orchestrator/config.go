@@ -20,6 +20,34 @@ type Config struct {
 	Cache      Cache      `toml:"cache"`
 	ImageCache ImageCache `toml:"image-cache"`
 	Sessions   Sessions   `toml:"sessions"`
+	Repos      Repos      `toml:"repos"`
+}
+
+// Repos mirrors the [repos] table: the host-side bare mirror kept per project
+// so that concurrent jobs on one repository share a single fetch. Empty fields
+// fall through to the built-in defaults applied by the CLI layer.
+//
+// The mirrors live on the same filesystem the scheduler sizes its VM disk pool
+// from, so an unbounded set of them quietly shrinks how much can be admitted;
+// global_bytes is what caps that.
+type Repos struct {
+	// Enabled turns mirroring off; jobs then clone straight from the forge.
+	Enabled *bool `toml:"enabled,omitempty"`
+	// Dir overrides the mirror root (default ~/.cache/kvarn/repos).
+	Dir string `toml:"dir,omitempty"`
+	// Prefetch warms mirrors in the background so the first job on a project
+	// does not pay for the initial clone.
+	Prefetch *bool `toml:"prefetch,omitempty"`
+	// PrefetchInterval is how often the background warm runs (e.g. "5m").
+	PrefetchInterval string `toml:"prefetch_interval,omitempty"`
+	// MirrorDepth bounds the history mirrors keep. 0 is full history.
+	MirrorDepth *int `toml:"mirror_depth,omitempty"`
+	// BranchRetention is how long an unused branch ref is kept (e.g. "720h").
+	// "0" never prunes.
+	BranchRetention string `toml:"branch_retention,omitempty"`
+	// GlobalBytes caps the whole mirror store; least-recently-used projects are
+	// evicted first. Empty means no cap.
+	GlobalBytes string `toml:"global_bytes,omitempty"`
 }
 
 // Sessions mirrors the [sessions] table: retention policy for the persistent

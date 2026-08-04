@@ -6,11 +6,11 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
-	gogit "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/object"
 	"gopkg.in/yaml.v3"
 )
 
@@ -111,46 +111,28 @@ func loadInstructions(dir string) (string, error) {
 }
 
 // loadRecentCommits reads the last n commit subject lines from the repository.
+// The subjects are only used to show the agent what this project's commit
+// messages tend to look like, so a repository without history (or without git)
+// is a missing nicety rather than a failure — Load logs and continues.
 func loadRecentCommits(dir string, n int) ([]string, error) {
-	repo, err := gogit.PlainOpen(dir)
-	if err != nil {
-		return nil, fmt.Errorf("open repo: %w", err)
-	}
-
-	head, err := repo.Head()
-	if err != nil {
-		return nil, fmt.Errorf("resolve HEAD: %w", err)
-	}
-
-	iter, err := repo.Log(&gogit.LogOptions{
-		From: head.Hash(),
-	})
-	if err != nil {
+	cmd := exec.Command("git", "-C", dir,
+		"log", "-n", strconv.Itoa(n), "--format=%s", "--end-of-options", "HEAD")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("git log: %w: %s", err, msg)
+		}
 		return nil, fmt.Errorf("git log: %w", err)
 	}
-	defer iter.Close()
 
 	var subjects []string
-	err = iter.ForEach(func(c *object.Commit) error {
-		if len(subjects) >= n {
-			return fmt.Errorf("done")
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			subjects = append(subjects, line)
 		}
-		// Take the first line of the commit message as the subject.
-		msg := c.Message
-		if idx := strings.IndexByte(msg, '\n'); idx >= 0 {
-			msg = msg[:idx]
-		}
-		msg = strings.TrimSpace(msg)
-		if msg != "" {
-			subjects = append(subjects, msg)
-		}
-		return nil
-	})
-	// The "done" error is our early-exit signal.
-	if err != nil && err.Error() != "done" {
-		return nil, fmt.Errorf("iterate commits: %w", err)
 	}
-
 	return subjects, nil
 }
 

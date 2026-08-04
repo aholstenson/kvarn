@@ -1,15 +1,13 @@
 package git
 
 import (
+	_ "embed"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
-
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
+	"strings"
 )
 
 // pinnedHostFingerprints maps hostname → accepted SHA256 SSH host key
@@ -17,7 +15,11 @@ import (
 // from each provider's official docs and verified against their published
 // values.
 //
-// Update when a provider rotates its host keys.
+// This table is the human-verifiable authority; embeddedHostKeys carries the
+// same keys in the full form OpenSSH needs. hostkey_test.go asserts the two
+// agree, so a wrong or tampered key blob cannot pass review.
+//
+// Update both when a provider rotates its host keys.
 var pinnedHostFingerprints = map[string][]string{
 	// https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
 	"github.com": {
@@ -39,48 +41,50 @@ var pinnedHostFingerprints = map[string][]string{
 	},
 }
 
-// newHostKeyCallback returns an ssh.HostKeyCallback that verifies the presented
-// host key against pinnedHostFingerprints. For hosts not in the pinned list it
-// falls back to the user's ~/.ssh/known_hosts file if one exists.
-func newHostKeyCallback() ssh.HostKeyCallback {
-	var fallback ssh.HostKeyCallback
+// embeddedHostKeys holds the pinned keys as known_hosts lines. Fingerprints
+// alone cannot be pinned through OpenSSH: known_hosts matches on the full
+// public key, so the key material has to travel with kvarn.
+//
+//go:embed hostkeys.txt
+var embeddedHostKeys string
+
+// writeKnownHosts assembles the known_hosts file one ssh invocation will use
+// and writes it into dir, returning its path.
+//
+// It is the pinned keys first and then the user's own ~/.ssh/known_hosts, which
+// reproduces the pinning semantics kvarn has always had: a pinned host verifies
+// against kvarn's copy of its key, any other host verifies against whatever the
+// operator has already trusted, and an unknown host is refused rather than
+// accepted on first sight.
+func writeKnownHosts(dir string) (string, error) {
+	var b strings.Builder
+	b.WriteString(embeddedHostKeys)
+	if !strings.HasSuffix(embeddedHostKeys, "\n") {
+		b.WriteString("\n")
+	}
+
 	if path := defaultKnownHostsPath(); path != "" {
-		cb, err := knownhosts.New(path)
+		data, err := os.ReadFile(path)
 		switch {
 		case err == nil:
-			fallback = cb
+			b.WriteString("\n# --- operator's ~/.ssh/known_hosts ---\n")
+			b.Write(data)
+			if len(data) > 0 && data[len(data)-1] != '\n' {
+				b.WriteString("\n")
+			}
 		case errors.Is(err, os.ErrNotExist):
 			// No known_hosts file — fine, only pinned hosts will verify.
 		default:
-			slog.Warn("could not load known_hosts, only pinned hosts will verify",
-				"path", path, "err", err)
+			slog.Warn("could not read known_hosts, only pinned hosts will verify",
+				"path", path, "error", err)
 		}
 	}
 
-	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		host := hostname
-		if h, _, err := net.SplitHostPort(hostname); err == nil {
-			host = h
-		}
-
-		if pinned, ok := pinnedHostFingerprints[host]; ok {
-			got := ssh.FingerprintSHA256(key)
-			for _, want := range pinned {
-				if got == want {
-					return nil
-				}
-			}
-			return fmt.Errorf("host key for %s does not match any pinned fingerprint (got %s)",
-				host, got)
-		}
-
-		if fallback != nil {
-			return fallback(hostname, remote, key)
-		}
-		return fmt.Errorf("host key for %s is not pinned and no known_hosts file is available (fingerprint %s); "+
-			"add the host to ~/.ssh/known_hosts or pin it in kvarn",
-			host, ssh.FingerprintSHA256(key))
+	out := filepath.Join(dir, "known_hosts")
+	if err := os.WriteFile(out, []byte(b.String()), 0o600); err != nil {
+		return "", fmt.Errorf("write known_hosts: %w", err)
 	}
+	return out, nil
 }
 
 func defaultKnownHostsPath() string {

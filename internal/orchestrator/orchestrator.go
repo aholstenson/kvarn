@@ -23,6 +23,7 @@ const shutdownTimeout = 30 * time.Second
 
 func run(ctx context.Context, addr string, svcOpts ServiceOpts) error {
 	svc := NewServiceWithOpts(svcOpts)
+	svc.StartRepoMaintenance(ctx)
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: h2c.NewHandler(PublicMux(svc), &http2.Server{}),

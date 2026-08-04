@@ -14,21 +14,15 @@ import (
 const maxBatchSize = 4 * 1024 * 1024 // 4MB per UploadFiles call
 
 // BatchTransferer uploads files in batches to avoid exceeding message size limits.
-type BatchTransferer struct {
-	// SkipFile, if non-nil, is called for each file and directory encountered
-	// during the walk. If it returns true for a directory, the entire subtree
-	// is skipped. If it returns true for a file, that file is not transferred.
-	SkipFile func(relPath string, isDir bool) bool
+//
+// It holds no per-transfer state, so one instance is safe to share across
+// concurrent uploads; everything that varies per call lives in Options.
+type BatchTransferer struct{}
 
-	// OnProgress, if non-nil, is called after each batch upload with
-	// cumulative bytes sent and total bytes to transfer.
-	OnProgress func(bytesSent, totalBytes int64)
-}
-
-func (t *BatchTransferer) Upload(ctx context.Context, uploader Uploader, localDir string, remoteDir string) error {
+func (t *BatchTransferer) Upload(ctx context.Context, uploader Uploader, localDir string, remoteDir string, opts Options) error {
 	// Compute total size for progress reporting.
 	var totalBytes int64
-	if t.OnProgress != nil {
+	if opts.OnProgress != nil {
 		filepath.WalkDir(localDir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -37,7 +31,7 @@ func (t *BatchTransferer) Upload(ctx context.Context, uploader Uploader, localDi
 			if err != nil {
 				return nil
 			}
-			if t.SkipFile != nil && t.SkipFile(relPath, d.IsDir()) {
+			if opts.SkipFile != nil && opts.SkipFile(relPath, d.IsDir()) {
 				if d.IsDir() {
 					return fs.SkipDir
 				}
@@ -69,7 +63,7 @@ func (t *BatchTransferer) Upload(ctx context.Context, uploader Uploader, localDi
 			return fmt.Errorf("rel path: %w", err)
 		}
 
-		if t.SkipFile != nil && t.SkipFile(relPath, d.IsDir()) {
+		if opts.SkipFile != nil && opts.SkipFile(relPath, d.IsDir()) {
 			if d.IsDir() {
 				slog.Debug("skipping directory", "path", relPath)
 				return fs.SkipDir
@@ -115,8 +109,8 @@ func (t *BatchTransferer) Upload(ctx context.Context, uploader Uploader, localDi
 				return err
 			}
 			bytesSent += int64(batchSize)
-			if t.OnProgress != nil {
-				t.OnProgress(bytesSent, totalBytes)
+			if opts.OnProgress != nil {
+				opts.OnProgress(bytesSent, totalBytes)
 			}
 			batch = nil
 			batchSize = 0
@@ -142,8 +136,8 @@ func (t *BatchTransferer) Upload(ctx context.Context, uploader Uploader, localDi
 			return err
 		}
 		bytesSent += int64(batchSize)
-		if t.OnProgress != nil {
-			t.OnProgress(bytesSent, totalBytes)
+		if opts.OnProgress != nil {
+			opts.OnProgress(bytesSent, totalBytes)
 		}
 	}
 	return nil

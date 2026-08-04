@@ -19,18 +19,12 @@ const transferTmpDir = "/var/tmp/kvarn-transfer"
 
 // StreamingTransferer uploads a directory as a zstd-compressed tarball streamed
 // to the guest via StreamToGuest, then extracts it remotely.
-type StreamingTransferer struct {
-	// SkipFile, if non-nil, is called for each file and directory encountered
-	// during the walk. If it returns true for a directory, the entire subtree
-	// is skipped. If it returns true for a file, that file is not transferred.
-	SkipFile func(relPath string, isDir bool) bool
+//
+// It holds no per-transfer state, so one instance is safe to share across
+// concurrent uploads; everything that varies per call lives in Options.
+type StreamingTransferer struct{}
 
-	// OnProgress, if non-nil, is called periodically with cumulative bytes
-	// written to the tar stream and total bytes to transfer.
-	OnProgress func(bytesSent, totalBytes int64)
-}
-
-func (t *StreamingTransferer) Upload(ctx context.Context, uploader Uploader, localDir string, remoteDir string) error {
+func (t *StreamingTransferer) Upload(ctx context.Context, uploader Uploader, localDir string, remoteDir string, opts Options) error {
 	// Compute total size for progress reporting.
 	var totalBytes int64
 	err := filepath.WalkDir(localDir, func(path string, d fs.DirEntry, err error) error {
@@ -41,7 +35,7 @@ func (t *StreamingTransferer) Upload(ctx context.Context, uploader Uploader, loc
 		if err != nil {
 			return nil
 		}
-		if t.SkipFile != nil && t.SkipFile(relPath, d.IsDir()) {
+		if opts.SkipFile != nil && opts.SkipFile(relPath, d.IsDir()) {
 			if d.IsDir() {
 				return fs.SkipDir
 			}
@@ -80,7 +74,7 @@ func (t *StreamingTransferer) Upload(ctx context.Context, uploader Uploader, loc
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		tarErr = t.writeTarball(pw, localDir, &bytesSent, totalBytes)
+		tarErr = t.writeTarball(pw, localDir, &bytesSent, totalBytes, opts)
 		// Close pipe writer — propagates error or EOF to reader side.
 		if tarErr != nil {
 			pw.CloseWithError(tarErr)
@@ -124,7 +118,7 @@ func (t *StreamingTransferer) Upload(ctx context.Context, uploader Uploader, loc
 }
 
 // writeTarball walks localDir and writes a zstd-compressed tar to w.
-func (t *StreamingTransferer) writeTarball(w io.Writer, localDir string, bytesSent *atomic.Int64, totalBytes int64) error {
+func (t *StreamingTransferer) writeTarball(w io.Writer, localDir string, bytesSent *atomic.Int64, totalBytes int64, opts Options) error {
 	zw, err := zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		return fmt.Errorf("create zstd encoder: %w", err)
@@ -144,7 +138,7 @@ func (t *StreamingTransferer) writeTarball(w io.Writer, localDir string, bytesSe
 			return fmt.Errorf("rel path: %w", err)
 		}
 
-		if t.SkipFile != nil && t.SkipFile(relPath, d.IsDir()) {
+		if opts.SkipFile != nil && opts.SkipFile(relPath, d.IsDir()) {
 			if d.IsDir() {
 				slog.Debug("skipping directory", "path", relPath)
 				return fs.SkipDir
@@ -206,7 +200,7 @@ func (t *StreamingTransferer) writeTarball(w io.Writer, localDir string, bytesSe
 			r:          f,
 			bytesSent:  bytesSent,
 			totalBytes: totalBytes,
-			onProgress: t.OnProgress,
+			onProgress: opts.OnProgress,
 		}
 		if _, err := io.Copy(tw, cr); err != nil {
 			return fmt.Errorf("write %s: %w", relPath, err)

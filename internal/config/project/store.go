@@ -45,6 +45,12 @@ type Project struct {
 	// commits; 0 means a full clone (use for projects whose tooling needs
 	// complete history, e.g. version inference from tags).
 	CloneDepth *int
+	// MirrorDepth overrides how much history the host-side mirror keeps for
+	// this project. Nil inherits the [repos] default. It is a separate knob
+	// from CloneDepth: that one bounds what each job and its VM see, this one
+	// bounds what the host caches on their behalf. A mirror shallower than
+	// CloneDepth cannot serve it, so the mirror is deepened to match.
+	MirrorDepth *int
 }
 
 // Store provides CRUD operations for projects. Get and Delete return

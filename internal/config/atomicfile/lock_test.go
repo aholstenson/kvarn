@@ -3,6 +3,7 @@
 package atomicfile_test
 
 import (
+	"context"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,60 @@ var _ = Describe("WithLock", func() {
 			Expect(atomicfile.WithLock(path, func() error { return nil })).To(Succeed())
 			close(done)
 		}()
+		Eventually(done, "1s").Should(BeClosed())
+	})
+})
+
+var _ = Describe("Acquire", func() {
+	It("lets shared holders coexist", func() {
+		path := filepath.Join(GinkgoT().TempDir(), "data.toml")
+
+		first, err := atomicfile.Acquire(context.Background(), path, false)
+		Expect(err).NotTo(HaveOccurred())
+		defer first.Release()
+
+		second, err := atomicfile.Acquire(context.Background(), path, false)
+		Expect(err).NotTo(HaveOccurred())
+		second.Release()
+	})
+
+	It("returns on cancellation instead of blocking in flock", func() {
+		// The property that matters: a job cancelled while queued behind a
+		// long fetch has to be able to unwind.
+		path := filepath.Join(GinkgoT().TempDir(), "data.toml")
+
+		held, err := atomicfile.Acquire(context.Background(), path, true)
+		Expect(err).NotTo(HaveOccurred())
+		defer held.Release()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := atomicfile.Acquire(ctx, path, false)
+			done <- err
+		}()
+		Eventually(done, "1s").Should(Receive(MatchError(context.DeadlineExceeded)))
+	})
+
+	It("admits a waiter once the exclusive holder releases", func() {
+		path := filepath.Join(GinkgoT().TempDir(), "data.toml")
+
+		held, err := atomicfile.Acquire(context.Background(), path, true)
+		Expect(err).NotTo(HaveOccurred())
+
+		done := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			lock, err := atomicfile.Acquire(context.Background(), path, false)
+			Expect(err).NotTo(HaveOccurred())
+			lock.Release()
+			close(done)
+		}()
+
+		Consistently(done, "60ms").ShouldNot(BeClosed())
+		held.Release()
 		Eventually(done, "1s").Should(BeClosed())
 	})
 })

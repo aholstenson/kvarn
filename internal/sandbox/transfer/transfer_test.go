@@ -125,7 +125,7 @@ var _ = Describe("BatchTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("hello"), 0644)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte("world"), 0644)).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		files := mock.allFiles()
@@ -144,7 +144,7 @@ var _ = Describe("BatchTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(subDir, "nested.txt"), []byte("nested"), 0644)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(tmpDir, "root.txt"), []byte("root"), 0644)).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		files := mock.allFiles()
@@ -164,7 +164,7 @@ var _ = Describe("BatchTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0644)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("content"), 0644)).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		files := mock.allFiles()
@@ -175,12 +175,39 @@ var _ = Describe("BatchTransferer", func() {
 		Expect(paths).To(ContainElement(filepath.Join(".git", "HEAD")))
 	})
 
+	It("uploads only the repository under GitDirOnlyFilter", func() {
+		objDir := filepath.Join(tmpDir, ".git", "objects", "ab")
+		Expect(os.MkdirAll(objDir, 0755)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(tmpDir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0644)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(objDir, "cdef"), []byte("object"), 0644)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("worktree"), 0644)).To(Succeed())
+		Expect(os.MkdirAll(filepath.Join(tmpDir, "src"), 0755)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(tmpDir, "src", "main.go"), []byte("package main"), 0644)).To(Succeed())
+		// A worktree path that merely starts with the same letters must not be
+		// mistaken for the repository.
+		Expect(os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.tmp\n"), 0644)).To(Succeed())
+
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{
+			SkipFile: transfer.GitDirOnlyFilter(),
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		paths := []string{}
+		for _, f := range mock.allFiles() {
+			paths = append(paths, f.Path)
+		}
+		Expect(paths).To(ConsistOf(
+			filepath.Join(".git", "HEAD"),
+			filepath.Join(".git", "objects", "ab", "cdef"),
+		))
+	})
+
 	It("preserves file permissions", func() {
 		execPath := filepath.Join(tmpDir, "exec.sh")
 		Expect(os.WriteFile(execPath, []byte("#!/bin/sh"), 0644)).To(Succeed())
 		Expect(os.Chmod(execPath, 0755)).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		files := mock.allFiles()
@@ -191,7 +218,7 @@ var _ = Describe("BatchTransferer", func() {
 	It("sets working dir on upload requests", func() {
 		Expect(os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("x"), 0644)).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/remote/path")
+		err := t.Upload(ctx, mock, tmpDir, "/remote/path", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		mock.mu.Lock()
@@ -201,7 +228,7 @@ var _ = Describe("BatchTransferer", func() {
 	})
 
 	It("handles empty directory", func() {
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		mock.mu.Lock()
@@ -213,7 +240,7 @@ var _ = Describe("BatchTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(tmpDir, "real.txt"), []byte("content"), 0644)).To(Succeed())
 		Expect(os.Symlink("real.txt", filepath.Join(tmpDir, "link.txt"))).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		files := mock.allFiles()
@@ -242,11 +269,11 @@ var _ = Describe("BatchTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("hello"), 0644)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte("world"), 0644)).To(Succeed())
 
-		t.SkipFile = func(relPath string, isDir bool) bool {
-			return relPath == "b.txt"
-		}
-
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{
+			SkipFile: func(relPath string, isDir bool) bool {
+				return relPath == "b.txt"
+			},
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		files := mock.allFiles()
@@ -260,11 +287,11 @@ var _ = Describe("BatchTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(subDir, "nested.txt"), []byte("nested"), 0644)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(tmpDir, "keep.txt"), []byte("keep"), 0644)).To(Succeed())
 
-		t.SkipFile = func(relPath string, isDir bool) bool {
-			return relPath == "skip-me" && isDir
-		}
-
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{
+			SkipFile: func(relPath string, isDir bool) bool {
+				return relPath == "skip-me" && isDir
+			},
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		files := mock.allFiles()
@@ -278,7 +305,7 @@ var _ = Describe("BatchTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(subDir, "file.txt"), []byte("inside"), 0644)).To(Succeed())
 		Expect(os.Symlink("realdir", filepath.Join(tmpDir, "linkdir"))).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		files := mock.allFiles()
@@ -326,7 +353,7 @@ var _ = Describe("StreamingTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("hello"), 0644)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte("world"), 0644)).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		entries := mock.extractTar()
@@ -342,7 +369,7 @@ var _ = Describe("StreamingTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(subDir, "nested.txt"), []byte("nested"), 0644)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(tmpDir, "root.txt"), []byte("root"), 0644)).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		entries := mock.extractTar()
@@ -358,7 +385,7 @@ var _ = Describe("StreamingTransferer", func() {
 		Expect(os.WriteFile(execPath, []byte("#!/bin/sh"), 0644)).To(Succeed())
 		Expect(os.Chmod(execPath, 0755)).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		entries := mock.extractTar()
@@ -370,7 +397,7 @@ var _ = Describe("StreamingTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(tmpDir, "real.txt"), []byte("content"), 0644)).To(Succeed())
 		Expect(os.Symlink("real.txt", filepath.Join(tmpDir, "link.txt"))).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		entries := mock.extractTar()
@@ -384,11 +411,11 @@ var _ = Describe("StreamingTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("hello"), 0644)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte("world"), 0644)).To(Succeed())
 
-		t.SkipFile = func(relPath string, isDir bool) bool {
-			return relPath == "b.txt"
-		}
-
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{
+			SkipFile: func(relPath string, isDir bool) bool {
+				return relPath == "b.txt"
+			},
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		entries := mock.extractTar()
@@ -402,11 +429,11 @@ var _ = Describe("StreamingTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(subDir, "nested.txt"), []byte("nested"), 0644)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(tmpDir, "keep.txt"), []byte("keep"), 0644)).To(Succeed())
 
-		t.SkipFile = func(relPath string, isDir bool) bool {
-			return relPath == "skip-me" && isDir
-		}
-
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{
+			SkipFile: func(relPath string, isDir bool) bool {
+				return relPath == "skip-me" && isDir
+			},
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		entries := mock.extractTar()
@@ -420,11 +447,11 @@ var _ = Describe("StreamingTransferer", func() {
 		Expect(os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte("world!"), 0644)).To(Succeed())
 
 		var progressCalls []int64
-		t.OnProgress = func(sent, total int64) {
-			progressCalls = append(progressCalls, sent)
-		}
-
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{
+			OnProgress: func(sent, total int64) {
+				progressCalls = append(progressCalls, sent)
+			},
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		// Should have been called at least once per file.
@@ -436,7 +463,7 @@ var _ = Describe("StreamingTransferer", func() {
 	It("calls mkdir and extract via Exec", func() {
 		Expect(os.WriteFile(filepath.Join(tmpDir, "f.txt"), []byte("x"), 0644)).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		mock.mu.Lock()
@@ -450,14 +477,14 @@ var _ = Describe("StreamingTransferer", func() {
 	It("streams to the correct destination path", func() {
 		Expect(os.WriteFile(filepath.Join(tmpDir, "f.txt"), []byte("x"), 0644)).To(Succeed())
 
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(mock.streamDest).To(Equal("/var/tmp/kvarn-transfer/source.tar.zst"))
 	})
 
 	It("handles empty directory", func() {
-		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace")
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
 		Expect(err).NotTo(HaveOccurred())
 
 		// Should still create tmp dir and call extract, even if tarball is empty.

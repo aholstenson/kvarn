@@ -161,6 +161,7 @@ var _ = Describe("Git SCM", func() {
 
 			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
 				RepoDir:     cloneDir,
+				RemoteURL:   bareDir,
 				Branch:      "kvarn/test-session",
 				Message:     "test commit",
 				AuthorName:  "kvarn",
@@ -191,6 +192,7 @@ var _ = Describe("Git SCM", func() {
 
 			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
 				RepoDir:     cloneDir,
+				RemoteURL:   bareDir,
 				Branch:      "kvarn/modify-test",
 				Message:     "modify and add files",
 				AuthorName:  "kvarn",
@@ -221,6 +223,7 @@ var _ = Describe("Git SCM", func() {
 
 			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
 				RepoDir:     cloneDir,
+				RemoteURL:   bareDir,
 				Branch:      "kvarn/author-test",
 				Message:     "author test commit",
 				AuthorName:  "kvarn",
@@ -243,6 +246,7 @@ var _ = Describe("Git SCM", func() {
 		It("returns error when no changes to commit", func() {
 			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
 				RepoDir:     cloneDir,
+				RemoteURL:   bareDir,
 				Branch:      "kvarn/empty",
 				Message:     "empty commit",
 				AuthorName:  "kvarn",
@@ -254,8 +258,9 @@ var _ = Describe("Git SCM", func() {
 
 		It("returns error for missing repo dir", func() {
 			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
-				Branch:  "kvarn/test",
-				Message: "test",
+				RemoteURL: bareDir,
+				Branch:    "kvarn/test",
+				Message:   "test",
 			})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("repo dir is required"))
@@ -263,8 +268,9 @@ var _ = Describe("Git SCM", func() {
 
 		It("returns error for missing branch", func() {
 			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
-				RepoDir: cloneDir,
-				Message: "test",
+				RepoDir:   cloneDir,
+				RemoteURL: bareDir,
+				Message:   "test",
 			})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("branch is required"))
@@ -272,8 +278,9 @@ var _ = Describe("Git SCM", func() {
 
 		It("returns error for missing message", func() {
 			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
-				RepoDir: cloneDir,
-				Branch:  "kvarn/test",
+				RepoDir:   cloneDir,
+				RemoteURL: bareDir,
+				Branch:    "kvarn/test",
 			})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("commit message is required"))

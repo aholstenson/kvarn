@@ -64,7 +64,12 @@ type CloneOpts struct {
 
 // CommitAndPushOpts configures a commit-and-push operation on a host-side clone.
 type CommitAndPushOpts struct {
-	RepoDir     string // host-side clone directory
+	RepoDir string // host-side clone directory
+	// RemoteURL is the push target, stated explicitly rather than read back
+	// off the clone's "origin". Clone deliberately leaves no remote behind, so
+	// there is nothing to read back; naming the target here is also what lets
+	// a clone taken from a local mirror still push to the real forge.
+	RemoteURL   string
 	Branch      string // new branch name to create and push
 	Message     string // commit message
 	AuthorName  string

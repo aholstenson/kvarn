@@ -30,6 +30,8 @@ import (
 	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
 	"github.com/aholstenson/kvarn/internal/sandbox/transfer"
+	gitscm "github.com/aholstenson/kvarn/internal/scm/git"
+	"github.com/aholstenson/kvarn/internal/scm/mirror"
 	"github.com/aholstenson/kvarn/internal/session"
 	sessionsqlite "github.com/aholstenson/kvarn/internal/session/sqlite"
 	"github.com/aholstenson/kvarn/internal/vm"
@@ -74,6 +76,12 @@ const defaultMaxVMLifetime = 24 * time.Hour
 func (c *Cmd) Run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Every clone, fetch and push shells out to git, so a host without one
+	// fails every job. Say so at boot rather than one job at a time.
+	if err := gitscm.CheckAvailable(); err != nil {
+		return fmt.Errorf("git is required to run the orchestrator: %w", err)
+	}
 
 	downloadLogged := false
 	diskImagePath, err := vm.EnsureDiskImage(ctx, vm.DownloadOpts{
@@ -182,6 +190,34 @@ func (c *Cmd) Run() error {
 		"global_bytes", cacheQuota.GlobalBytes,
 		"dir", cacheProvider.BaseDir,
 	)
+
+	reposCfg, err := resolveReposConfig(orchFile.Repos)
+	if err != nil {
+		return fmt.Errorf("repos: %w", err)
+	}
+	var repoMirror *mirror.Store
+	if reposCfg.Enabled {
+		reposDir := reposCfg.Dir
+		if reposDir == "" {
+			if reposDir, err = mirror.DefaultDir(); err != nil {
+				return fmt.Errorf("repos dir: %w", err)
+			}
+		}
+		repoMirror = mirror.New(reposDir)
+		// The mirrors share a filesystem with the image cache the scheduler
+		// sizes its VM disk pool from, so an operator reading this line can see
+		// what is competing for that space.
+		slog.Info("repository mirrors enabled",
+			"dir", reposDir,
+			"prefetch", reposCfg.Policy.Prefetch,
+			"prefetch_interval", reposCfg.Policy.PrefetchInterval,
+			"mirror_depth", reposCfg.Policy.MirrorDepth,
+			"branch_retention", reposCfg.Policy.BranchRetention,
+			"global_bytes", reposCfg.Policy.GlobalBytes,
+		)
+	} else {
+		slog.Info("repository mirrors disabled; every job clones from its forge")
+	}
 
 	imageCacheCfg, err := resolveImageCacheConfig(orchFile.ImageCache)
 	if err != nil {
@@ -305,6 +341,8 @@ func (c *Cmd) Run() error {
 		Scheduler:      sched,
 		CacheProvider:  cacheProvider,
 		CacheQuota:     cacheQuota,
+		RepoMirror:     repoMirror,
+		RepoPolicy:     reposCfg.Policy,
 		Meter:          meter,
 		Instruments:    instruments,
 	})
@@ -401,6 +439,76 @@ func splitHostPort(s string) (string, uint16, error) {
 		return "", 0, fmt.Errorf("invalid port %q", portStr)
 	}
 	return host, uint16(p), nil
+}
+
+// Built-in [repos] defaults, applied when orchestrator.toml leaves a field
+// unset. Prefetch is on because the alternative is that the first job on every
+// project pays for the initial mirror clone on the critical path.
+const (
+	defaultRepoPrefetchInterval = 5 * time.Minute
+	defaultRepoBranchRetention  = 720 * time.Hour // 30 days
+)
+
+// reposResolved is the resolved repository-mirror configuration.
+type reposResolved struct {
+	Enabled bool
+	Dir     string
+	Policy  RepoPolicy
+}
+
+// resolveReposConfig parses the [repos] table. Durations use time.ParseDuration
+// units; an explicit "0" means "never" for branch_retention rather than falling
+// back to the default.
+func resolveReposConfig(c orchcfg.Repos) (reposResolved, error) {
+	out := reposResolved{
+		Enabled: true,
+		Dir:     c.Dir,
+		Policy: RepoPolicy{
+			Prefetch:         true,
+			PrefetchInterval: defaultRepoPrefetchInterval,
+			BranchRetention:  defaultRepoBranchRetention,
+		},
+	}
+	if c.Enabled != nil {
+		out.Enabled = *c.Enabled
+	}
+	if c.Prefetch != nil {
+		out.Policy.Prefetch = *c.Prefetch
+	}
+	if c.PrefetchInterval != "" {
+		d, err := time.ParseDuration(c.PrefetchInterval)
+		if err != nil {
+			return reposResolved{}, fmt.Errorf("prefetch_interval: %w", err)
+		}
+		if d <= 0 {
+			return reposResolved{}, fmt.Errorf("prefetch_interval must be positive")
+		}
+		out.Policy.PrefetchInterval = d
+	}
+	if c.MirrorDepth != nil {
+		if *c.MirrorDepth < 0 {
+			return reposResolved{}, fmt.Errorf("mirror_depth must be non-negative")
+		}
+		out.Policy.MirrorDepth = *c.MirrorDepth
+	}
+	if c.BranchRetention != "" {
+		d, err := time.ParseDuration(c.BranchRetention)
+		if err != nil {
+			return reposResolved{}, fmt.Errorf("branch_retention: %w", err)
+		}
+		if d < 0 {
+			return reposResolved{}, fmt.Errorf("branch_retention must be non-negative")
+		}
+		out.Policy.BranchRetention = d
+	}
+	if c.GlobalBytes != "" {
+		n, err := projconfig.ParseSize(c.GlobalBytes)
+		if err != nil {
+			return reposResolved{}, fmt.Errorf("global_bytes: %w", err)
+		}
+		out.Policy.GlobalBytes = n
+	}
+	return out, nil
 }
 
 // resolveCacheQuota parses the [cache] quotas, falling back to the built-in

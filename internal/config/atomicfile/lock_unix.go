@@ -3,9 +3,11 @@
 package atomicfile
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // WithLock takes an exclusive advisory file lock on "<path>.lock" and runs fn
@@ -19,18 +21,73 @@ import (
 // The lock file persists at "<path>.lock" with mode 0600; it is created on
 // demand alongside the data file's directory.
 func WithLock(path string, fn func() error) (err error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := Acquire(context.Background(), path, true)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	// Released implicitly by f.Close; explicit unlock is a no-op safety net.
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer lock.Release()
 	return fn()
+}
+
+// Lock is a held advisory file lock. Release it exactly once, normally with a
+// defer immediately after acquiring.
+type Lock struct {
+	f *os.File
+}
+
+// Release drops the lock.
+func (l *Lock) Release() {
+	if l == nil || l.f == nil {
+		return
+	}
+	// Released implicitly by Close; the explicit unlock is a no-op safety net.
+	syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
+	l.f.Close()
+	l.f = nil
+}
+
+// lockPollInterval is how often a contended Acquire retries. Short enough that
+// waiting costs nothing noticeable next to the operations being serialized
+// (fetches, repacks), long enough not to spin.
+const lockPollInterval = 20 * time.Millisecond
+
+// Acquire takes an advisory lock on "<path>.lock", exclusive for writers and
+// shared for readers, and returns it. Many shared holders coexist; an exclusive
+// holder excludes everyone.
+//
+// It polls with LOCK_NB rather than blocking in flock(2) because a blocking
+// flock cannot be interrupted: a job cancelled while queued behind a multi-gigabyte
+// fetch has to be able to unwind, and a caller with a deadline has to be able to
+// reach it.
+func Acquire(ctx context.Context, path string, exclusive bool) (*Lock, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+
+	how := syscall.LOCK_SH
+	if exclusive {
+		how = syscall.LOCK_EX
+	}
+
+	for {
+		err := syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB)
+		if err == nil {
+			return &Lock{f: f}, nil
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			f.Close()
+			return nil, err
+		}
+
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, ctx.Err()
+		case <-time.After(lockPollInterval):
+		}
+	}
 }

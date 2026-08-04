@@ -30,6 +30,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/dispatch"
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 	"github.com/aholstenson/kvarn/internal/forge"
+	"github.com/aholstenson/kvarn/internal/logging"
 	"github.com/aholstenson/kvarn/internal/observability/metrics"
 	"github.com/aholstenson/kvarn/internal/observability/reqid"
 	"github.com/aholstenson/kvarn/internal/orchestrator/auth"
@@ -40,6 +41,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/sandbox/transfer"
 	"github.com/aholstenson/kvarn/internal/scm"
 	gitscm "github.com/aholstenson/kvarn/internal/scm/git"
+	"github.com/aholstenson/kvarn/internal/scm/mirror"
 	"github.com/aholstenson/kvarn/internal/session"
 	"github.com/aholstenson/kvarn/internal/vm"
 	llms "github.com/aholstenson/llms-go"
@@ -258,6 +260,8 @@ type Service struct {
 	cacheProvider    cache.Provider         // optional cache provider
 	cacheQuota       cache.Quota            // LRU sweep limits; zero fields = unbounded
 	cacheNamespace   string                 // cache namespace; "" is the shared pool
+	repoMirror       *mirror.Store          // optional; nil clones straight from the forge
+	repoPolicy       RepoPolicy             // mirror maintenance knobs; zero fields disable each
 	sandboxFactory   SandboxFactory         // optional; nil uses defaultSandboxFactory
 	defaultsStore    modelcfg.DefaultsStore // optional; nil means built-in fallbacks only
 	pricingManager   *llms.PricingManager   // optional; nil disables USD computation
@@ -305,6 +309,8 @@ type ServiceOpts struct {
 	CacheProvider      cache.Provider         // optional cache provider
 	CacheQuota         cache.Quota            // LRU sweep limits; zero fields = unbounded
 	Namespace          string                 // cache namespace; "" is the shared pool
+	RepoMirror         *mirror.Store          // optional; nil clones straight from the forge
+	RepoPolicy         RepoPolicy             // mirror maintenance knobs; ignored when RepoMirror is nil
 	SandboxFactory     SandboxFactory         // optional; nil uses defaultSandboxFactory
 	DefaultsStore      modelcfg.DefaultsStore // optional; nil means no user defaults (built-ins only)
 	PricingManager     *llms.PricingManager   // optional; nil disables USD computation
@@ -365,6 +371,8 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		cacheProvider:    opts.CacheProvider,
 		cacheQuota:       opts.CacheQuota,
 		cacheNamespace:   opts.Namespace,
+		repoMirror:       opts.RepoMirror,
+		repoPolicy:       opts.RepoPolicy,
 		sandboxFactory:   opts.SandboxFactory,
 		defaultsStore:    opts.DefaultsStore,
 		pricingManager:   opts.PricingManager,
@@ -683,8 +691,9 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	}
 	defer os.RemoveAll(cloneDir)
 
-	log.Info("cloning repository", "url", cloneURL, "branch", branch, "destination", cloneDir)
+	log.Info("cloning repository", "url", gitscm.RedactURL(cloneURL), "branch", branch, "destination", cloneDir)
 	s.sessionMgr.UpdateState(ctx, sessionID, session.StateCloning, "Cloning repository")
+	cloneStart := time.Now()
 
 	// Pick the SCM to use for cloning.
 	var scmImpl scm.SCM
@@ -698,20 +707,25 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	if proj.CloneDepth != nil {
 		cloneDepth = *proj.CloneDepth
 	}
-	cloneOpts := scm.CloneOpts{
-		URL:         cloneURL,
-		Branch:      branch,
-		Destination: cloneDir,
-		Credentials: creds,
-		Depth:       cloneDepth,
+	wantSHA := ""
+	if spec.pr != nil {
+		wantSHA = spec.pr.headSHA
 	}
-
-	if err := scmImpl.Clone(ctx, cloneOpts); err != nil {
-		log.Error("clone failed", "error", err)
-		s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("clone repository: %w", err))
-		return
+	if !s.cloneViaMirror(ctx, proj, cloneURL, branch, cloneDir, cloneDepth, creds, wantSHA, log) {
+		cloneOpts := scm.CloneOpts{
+			URL:         cloneURL,
+			Branch:      branch,
+			Destination: cloneDir,
+			Credentials: creds,
+			Depth:       cloneDepth,
+		}
+		if err := scmImpl.Clone(ctx, cloneOpts); err != nil {
+			log.Error("clone failed", "error", err)
+			s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("clone repository: %w", err))
+			return
+		}
 	}
-	log.Info("clone complete")
+	log.Info("clone complete", "duration", logging.Elapsed(cloneStart))
 
 	// Load project config from cloned repo.
 	cfg, err := projconfig.Load(cloneDir)
@@ -798,11 +812,14 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		create = defaultSandboxFactory
 	}
 	sess, err := create(ctx, sandbox.Opts{
-		Provider:        s.provider,
-		CreateOpts:      createOpts,
-		Config:          cfg,
-		Transferer:      s.transferer,
-		SourceDir:       cloneDir,
+		Provider:   s.provider,
+		CreateOpts: createOpts,
+		Config:     cfg,
+		Transferer: s.transferer,
+		SourceDir:  cloneDir,
+		// The clone is untouched at this point, so its worktree is exactly
+		// HEAD: ship the repository alone and let the guest write the files.
+		PristineClone:   true,
 		WorkingDir:      s.workspaceDir,
 		Registry:        s.registry,
 		BridgeHandler:   s.bridgeHandler,
@@ -1209,6 +1226,7 @@ func (s *Service) submitChanges(
 
 	if err := forgeImpl.SCM().CommitAndPush(ctx, scm.CommitAndPushOpts{
 		RepoDir:     cloneDir,
+		RemoteURL:   cloneURL,
 		Branch:      prBranch,
 		Message:     commitMsg,
 		AuthorName:  authorName,
@@ -1217,6 +1235,7 @@ func (s *Service) submitChanges(
 	}); err != nil {
 		return fmt.Errorf("commit and push to %s: %w", prBranch, err)
 	}
+	s.recordMirrorPush(ctx, proj, cloneURL, cloneDir, prBranch, log)
 
 	pr, err := forgeImpl.CreatePullRequest(ctx, forge.CreatePROpts{
 		RepoURL:     cloneURL,
@@ -1336,6 +1355,7 @@ func (s *Service) submitFollowup(
 	// Pushing the PR's own branch name is a fast-forward of one new commit.
 	if err := forgeImpl.SCM().CommitAndPush(ctx, scm.CommitAndPushOpts{
 		RepoDir:     cloneDir,
+		RemoteURL:   cloneURL,
 		Branch:      pr.headBranch,
 		Message:     commitMsg,
 		AuthorName:  behavior.CommitAuthorName,
@@ -1344,6 +1364,7 @@ func (s *Service) submitFollowup(
 	}); err != nil {
 		return fmt.Errorf("commit and push to %s: %w", pr.headBranch, err)
 	}
+	s.recordMirrorPush(ctx, proj, cloneURL, cloneDir, pr.headBranch, log)
 
 	log.Info("follow-up commit pushed", "branch", pr.headBranch, "url", pr.url)
 

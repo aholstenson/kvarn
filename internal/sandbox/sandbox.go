@@ -123,6 +123,18 @@ type Opts struct {
 	SourceDir  string // local directory to upload
 	WorkingDir string // VM path; defaults to "/home/kvarn/workspace"
 
+	// SkipFile filters the upload walk; see transfer.Options. Ignored when
+	// PristineClone is set, which installs its own filter.
+	SkipFile func(relPath string, isDir bool) bool
+
+	// PristineClone declares that SourceDir is a clone whose worktree is
+	// exactly HEAD, with nothing uncommitted. Only the repository is then
+	// shipped and the worktree is checked out in the guest, which halves the
+	// bytes crossing the transport. Set it only when that holds: for a dirty
+	// or partially-ignored tree (what `kvarn run`/`kvarn test` send) the
+	// guest checkout would discard the very files the run is about.
+	PristineClone bool
+
 	// Registry and BridgeHandler allow sharing dispatch infrastructure with
 	// an existing service (e.g. the orchestrator). When nil, the sandbox
 	// creates its own.
@@ -418,18 +430,27 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	// Transfer files.
 	if opts.Transferer != nil && opts.SourceDir != "" {
 		emit(opts, TransferringEvent{})
-		switch t := opts.Transferer.(type) {
-		case *transfer.BatchTransferer:
-			t.OnProgress = func(sent, total int64) {
+		uploadOpts := transfer.Options{
+			SkipFile: opts.SkipFile,
+			OnProgress: func(sent, total int64) {
 				emit(opts, TransferProgressEvent{BytesSent: sent, TotalBytes: total})
-			}
-		case *transfer.StreamingTransferer:
-			t.OnProgress = func(sent, total int64) {
-				emit(opts, TransferProgressEvent{BytesSent: sent, TotalBytes: total})
-			}
+			},
 		}
-		if err := opts.Transferer.Upload(ctx, proxy, opts.SourceDir, workingDir); err != nil {
+		if opts.PristineClone {
+			uploadOpts.SkipFile = transfer.GitDirOnlyFilter()
+		}
+		if err := opts.Transferer.Upload(ctx, proxy, opts.SourceDir, workingDir, uploadOpts); err != nil {
 			return nil, fmt.Errorf("transfer files: %w", err)
+		}
+
+		// Materialize the worktree before anything else in this function
+		// touches the workspace: the cache restore, dependency install, image
+		// pull and container start below all assume a populated directory, and
+		// the container bind-mounts this same path.
+		if opts.PristineClone {
+			if err := CheckoutWorktree(ctx, proxy, workingDir); err != nil {
+				return nil, fmt.Errorf("check out worktree in guest: %w", err)
+			}
 		}
 	}
 

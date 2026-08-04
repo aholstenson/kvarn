@@ -1,3 +1,12 @@
+// Package git implements scm.SCM on top of the git command line.
+//
+// The CLI rather than a library because the operations kvarn depends on —
+// shallow single-branch clones, narrow refspec fetches, protocol-v2 ref
+// filtering — are what git itself is fastest and most complete at, and because
+// keeping credentials out of every persistent artifact is easier to guarantee
+// against a process boundary than against an in-process object graph. See
+// auth.go for how credentials are passed, and run.go for why every
+// caller-supplied value is an operand.
 package git
 
 import (
@@ -5,21 +14,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/aholstenson/kvarn/internal/logging"
 	"github.com/aholstenson/kvarn/internal/scm"
-	gogit "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/transport"
-	"github.com/go-git/go-git/v5/plumbing/transport/http"
-	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 )
 
-// Git implements the scm.SCM interface using go-git.
+// Git implements the scm.SCM interface using the git command line.
 type Git struct{}
 
 func (g *Git) Clone(ctx context.Context, opts scm.CloneOpts) error {
@@ -30,52 +36,66 @@ func (g *Git) Clone(ctx context.Context, opts scm.CloneOpts) error {
 		return errors.New("destination is required")
 	}
 
-	cloneOpts := &gogit.CloneOptions{
-		URL: opts.URL,
-	}
-
-	if opts.Branch != "" {
-		cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(opts.Branch)
-		cloneOpts.SingleBranch = true
-	}
-
-	if opts.Depth > 0 {
-		cloneOpts.Depth = opts.Depth
-	}
-
-	creds, err := scm.Resolve(ctx, opts.Credentials)
+	auth, err := ResolveAuth(ctx, opts.URL, opts.Credentials)
 	if err != nil {
-		return fmt.Errorf("resolve credentials: %w", err)
+		return err
 	}
-	if creds != nil {
-		auth, err := authMethod(opts.URL, creds)
-		if err != nil {
-			return fmt.Errorf("configure auth: %w", err)
-		}
-		cloneOpts.Auth = auth
+	defer auth.Close()
+
+	var flags []string
+	if opts.Branch != "" {
+		flags = append(flags, "--branch", opts.Branch, "--single-branch")
+	}
+	if opts.Depth > 0 {
+		flags = append(flags, "--depth", strconv.Itoa(opts.Depth))
 	}
 
-	slog.Info("cloning repository",
-		"url", opts.URL,
-		"branch", opts.Branch,
-		"destination", opts.Destination,
-		"depth", opts.Depth,
-		"has_credentials", creds != nil,
-	)
+	log := slog.With("url", RedactURL(opts.URL), "branch", opts.Branch, "depth", opts.Depth)
+	log.Info("cloning from remote", "destination", opts.Destination)
+	start := time.Now()
 
-	if _, err := gogit.PlainCloneContext(ctx, opts.Destination, false, cloneOpts); err != nil {
-		if err.Error() == "invalid auth method" {
-			if isSSHURL(opts.URL) && creds != nil && (creds.Token != "" || creds.Username != "") {
-				return fmt.Errorf("clone: auth method mismatch: URL %q is SSH but credential uses token/password (use ssh_key instead)", opts.URL)
-			}
-			if !isSSHURL(opts.URL) && creds != nil && len(creds.SSHKey) > 0 {
-				return fmt.Errorf("clone: auth method mismatch: URL %q is HTTPS but credential uses ssh_key (use token instead)", opts.URL)
-			}
-		}
+	if _, err := Run(ctx, Cmd{
+		Config:   auth.Config,
+		Env:      auth.Env,
+		Sub:      "clone",
+		Flags:    flags,
+		Operands: []string{opts.URL, opts.Destination},
+	}); err != nil {
 		return fmt.Errorf("clone: %w", err)
 	}
 
-	slog.Info("clone complete", "url", opts.URL)
+	if err := SanitizeClone(ctx, opts.Destination); err != nil {
+		return fmt.Errorf("clone: %w", err)
+	}
+
+	log.Info("cloned from remote", "duration", logging.Elapsed(start))
+	return nil
+}
+
+// SanitizeClone strips a fresh clone of everything that records where it came
+// from, leaving a repository that is complete but has no upstream.
+//
+// This is what makes it safe to ship the repository into a VM. A project may be
+// configured with a URL that embeds a credential, and git writes that URL into
+// two places: the remote in .git/config, and the "clone: from <url>" entry in
+// the reflog. Removing the remote alone would leave the reflog copy behind.
+//
+// Nothing downstream wants the remote either: the VM never fetches or pushes,
+// changes come back through ExtractChanges, and the host-side push names its
+// target explicitly via CommitAndPushOpts.RemoteURL. With no remote there is no
+// field a credential can hide in, which is a stronger guarantee than sanitizing
+// one.
+func SanitizeClone(ctx context.Context, dir string) error {
+	if _, err := Run(ctx, Cmd{
+		Dir:   dir,
+		Sub:   "remote",
+		Flags: []string{"remove", "origin"},
+	}); err != nil {
+		return fmt.Errorf("remove origin remote: %w", err)
+	}
+	if err := os.RemoveAll(filepath.Join(dir, ".git", "logs")); err != nil {
+		return fmt.Errorf("remove reflogs: %w", err)
+	}
 	return nil
 }
 
@@ -89,50 +109,65 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 	if opts.Message == "" {
 		return errors.New("commit message is required")
 	}
-
-	repo, err := gogit.PlainOpen(opts.RepoDir)
-	if err != nil {
-		return fmt.Errorf("open repo: %w", err)
+	if opts.RemoteURL == "" {
+		return errors.New("remote URL is required")
 	}
 
-	wt, err := repo.Worktree()
-	if err != nil {
-		return fmt.Errorf("get worktree: %w", err)
-	}
+	branchRef := "refs/heads/" + opts.Branch
 
-	// Create the new branch pointing at HEAD. We set HEAD to the new
-	// branch and stage+commit without using Checkout, which would reset
-	// the worktree/index and lose the dirty files written by ExtractChanges.
-	branchRef := plumbing.NewBranchReferenceName(opts.Branch)
-	headRef, err := repo.Head()
+	// Point a new branch at the current commit and move HEAD onto it using
+	// nothing but ref writes. `checkout -b` would reach for the worktree and
+	// index, and the worktree here is deliberately dirty: it holds the files
+	// ExtractChanges copied out of the VM, which are the entire point of the
+	// commit about to be made.
+	head, err := Run(ctx, Cmd{
+		Dir:      opts.RepoDir,
+		Sub:      "rev-parse",
+		Flags:    []string{"--verify"},
+		Operands: []string{"HEAD"},
+	})
 	if err != nil {
 		return fmt.Errorf("resolve HEAD: %w", err)
 	}
-	newRef := plumbing.NewHashReference(branchRef, headRef.Hash())
-	if err := repo.Storer.SetReference(newRef); err != nil {
+	headSHA := strings.TrimSpace(head)
+
+	if _, err := Run(ctx, Cmd{
+		Dir:      opts.RepoDir,
+		Sub:      "update-ref",
+		Operands: []string{branchRef, headSHA},
+	}); err != nil {
 		return fmt.Errorf("create branch ref: %w", err)
 	}
-	// Point HEAD at the new branch.
-	symRef := plumbing.NewSymbolicReference(plumbing.HEAD, branchRef)
-	if err := repo.Storer.SetReference(symRef); err != nil {
+	if _, err := Run(ctx, Cmd{
+		Dir:      opts.RepoDir,
+		Sub:      "symbolic-ref",
+		Operands: []string{"HEAD", branchRef},
+	}); err != nil {
 		return fmt.Errorf("update HEAD: %w", err)
 	}
 
-	// Stage all changes.
-	if err := wt.AddWithOptions(&gogit.AddOptions{All: true}); err != nil {
+	if _, err := Run(ctx, Cmd{
+		Dir:   opts.RepoDir,
+		Sub:   "add",
+		Flags: []string{"-A"},
+	}); err != nil {
 		return fmt.Errorf("stage changes: %w", err)
 	}
 
-	// Commit.
-	now := time.Now()
-	_, err = wt.Commit(opts.Message, &gogit.CommitOptions{
-		Author: &object.Signature{
-			Name:  opts.AuthorName,
-			Email: opts.AuthorEmail,
-			When:  now,
+	// Identity comes from -c rather than global config, which the orchestrator
+	// host may not have at all. The message arrives on stdin so an agent-written
+	// body of arbitrary length and shape never has to survive argv.
+	if _, err := Run(ctx, Cmd{
+		Dir: opts.RepoDir,
+		Config: []string{
+			"user.name=" + opts.AuthorName,
+			"user.email=" + opts.AuthorEmail,
+			"commit.gpgsign=false",
 		},
-	})
-	if err != nil {
+		Sub:   "commit",
+		Flags: []string{"--no-verify", "-F", "-"},
+		Stdin: opts.Message,
+	}); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 
@@ -141,37 +176,22 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 		"author", opts.AuthorName,
 	)
 
-	// Push.
-	pushOpts := &gogit.PushOptions{
-		RefSpecs: []config.RefSpec{
-			config.RefSpec(branchRef + ":" + branchRef),
-		},
-	}
 	// Resolved here rather than reused from clone time: the job between the two
 	// can outlive a short-lived token, and this is the last moment before the
 	// network call.
-	creds, err := scm.Resolve(ctx, opts.Credentials)
+	auth, err := ResolveAuth(ctx, opts.RemoteURL, opts.Credentials)
 	if err != nil {
-		return fmt.Errorf("resolve credentials: %w", err)
+		return fmt.Errorf("configure push auth: %w", err)
 	}
-	if creds != nil {
-		// Resolve the remote URL so auth method selection (SSH vs HTTPS)
-		// matches the actual remote.
-		remoteURL := ""
-		if remote, err := repo.Remote("origin"); err == nil {
-			urls := remote.Config().URLs
-			if len(urls) > 0 {
-				remoteURL = urls[0]
-			}
-		}
-		auth, err := authMethod(remoteURL, creds)
-		if err != nil {
-			return fmt.Errorf("configure push auth: %w", err)
-		}
-		pushOpts.Auth = auth
-	}
+	defer auth.Close()
 
-	if err := repo.PushContext(ctx, pushOpts); err != nil {
+	if _, err := Run(ctx, Cmd{
+		Dir:      opts.RepoDir,
+		Config:   auth.Config,
+		Env:      auth.Env,
+		Sub:      "push",
+		Operands: []string{opts.RemoteURL, branchRef + ":" + branchRef},
+	}); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
 
@@ -179,96 +199,48 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 	return nil
 }
 
+// RedactURL renders a remote URL for a log line with any embedded credential
+// removed. A project may be configured as https://user:token@host/repo.git, and
+// a log file is as durable a place for a token to come to rest as a config file
+// — which is the thing SanitizeClone exists to prevent. Every log line carrying
+// a repository URL goes through this.
+func RedactURL(raw string) string {
+	// An opaque URL — one whose scheme is not followed by "//" — parses with its
+	// whole body, userinfo included, in a single field, so it is handled below
+	// with the other forms url.Parse does not decompose.
+	if u, err := url.Parse(raw); err == nil && u.Opaque == "" {
+		if u.User == nil {
+			return raw
+		}
+		// Replacing the userinfo rather than dropping it keeps the line honest
+		// about the URL being credentialed, which matters when diagnosing which
+		// of two configurations a job actually used. The username goes too: a
+		// GitHub App token is just as often spelled as the user.
+		u.User = url.User("redacted")
+		return u.String()
+	}
+
+	// git accepts forms url.Parse rejects, scp-style "git@host:path" chief
+	// among them. There the user is part of the address rather than a secret —
+	// ssh authenticates with a key — so only a password is worth hiding, and
+	// keeping the rest legible is what makes the line useful.
+	rest, prefix := raw, ""
+	if i := strings.Index(raw, "://"); i >= 0 {
+		prefix, rest = raw[:i+3], raw[i+3:]
+	}
+	at := strings.LastIndex(rest, "@")
+	if at < 0 {
+		return raw
+	}
+	if colon := strings.Index(rest[:at], ":"); colon >= 0 {
+		return prefix + rest[:colon] + ":redacted" + rest[at:]
+	}
+	return raw
+}
+
 // isSSHURL returns true if the URL looks like an SSH git URL.
 func isSSHURL(url string) bool {
 	return strings.HasPrefix(url, "git@") ||
 		strings.HasPrefix(url, "ssh://") ||
 		strings.Contains(url, "@") && strings.Contains(url, ":")
-}
-
-func authMethod(url string, creds *scm.Credentials) (transport.AuthMethod, error) {
-	sshURL := isSSHURL(url)
-
-	// SSH key auth — only valid for SSH URLs.
-	if len(creds.SSHKey) > 0 {
-		if !sshURL {
-			slog.Warn("credential has SSH key but URL is not SSH, falling through to token/password auth",
-				"url", url,
-			)
-		} else {
-			keyData, err := resolveSSHKey(creds.SSHKey)
-			if err != nil {
-				return nil, fmt.Errorf("resolve ssh key: %w", err)
-			}
-			keys, err := ssh.NewPublicKeys("git", keyData, creds.SSHKeyPass)
-			if err != nil {
-				return nil, fmt.Errorf("ssh key: %w", err)
-			}
-			keys.HostKeyCallback = newHostKeyCallback()
-			slog.Info("using SSH key auth")
-			return keys, nil
-		}
-	}
-
-	// Token auth — only valid for HTTP(S) URLs.
-	if creds.Token != "" {
-		if sshURL {
-			slog.Warn("credential has token but URL is SSH, token auth is not supported for SSH URLs",
-				"url", url,
-			)
-			return nil, nil
-		}
-		slog.Info("using token auth", "username", "x-access-token")
-		return &http.BasicAuth{
-			Username: "x-access-token",
-			Password: creds.Token,
-		}, nil
-	}
-
-	// Username/password auth — only valid for HTTP(S) URLs.
-	if creds.Username != "" {
-		if sshURL {
-			slog.Warn("credential has username/password but URL is SSH",
-				"url", url,
-			)
-			return nil, nil
-		}
-		slog.Info("using basic auth", "username", creds.Username)
-		return &http.BasicAuth{
-			Username: creds.Username,
-			Password: creds.Password,
-		}, nil
-	}
-
-	slog.Warn("credentials provided but no auth fields are set")
-	return nil, nil
-}
-
-// resolveSSHKey handles the SSHKey field which can be either a file path or
-// inline PEM data.
-func resolveSSHKey(key []byte) ([]byte, error) {
-	s := string(key)
-
-	// If it looks like PEM data, use it directly.
-	if strings.HasPrefix(strings.TrimSpace(s), "-----BEGIN") {
-		return key, nil
-	}
-
-	// Otherwise treat it as a file path.
-	expanded := os.ExpandEnv(s)
-	if strings.HasPrefix(expanded, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("expand home dir: %w", err)
-		}
-		expanded = home + expanded[1:]
-	}
-
-	data, err := os.ReadFile(expanded)
-	if err != nil {
-		return nil, fmt.Errorf("read key file %q: %w", expanded, err)
-	}
-
-	slog.Info("loaded SSH key from file", "path", expanded)
-	return data, nil
 }

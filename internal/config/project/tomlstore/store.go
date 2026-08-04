@@ -31,6 +31,7 @@ type projectEntry struct {
 	CommitAuthorName     string              `toml:"commit_author_name,omitempty"`
 	CommitAuthorEmail    string              `toml:"commit_author_email,omitempty"`
 	CloneDepth           *int                `toml:"clone_depth,omitempty"`
+	MirrorDepth          *int                `toml:"mirror_depth,omitempty"`
 }
 
 // Store is a TOML file-backed project store.
@@ -111,6 +112,7 @@ func entryToProject(name string, entry *projectEntry) (*project.Project, error) 
 		CommitAuthorName:     entry.CommitAuthorName,
 		CommitAuthorEmail:    entry.CommitAuthorEmail,
 		CloneDepth:           entry.CloneDepth,
+		MirrorDepth:          entry.MirrorDepth,
 	}, nil
 }
 
@@ -138,6 +140,7 @@ func projectToEntry(p *project.Project) (string, *projectEntry) {
 		CommitAuthorName:     p.CommitAuthorName,
 		CommitAuthorEmail:    p.CommitAuthorEmail,
 		CloneDepth:           p.CloneDepth,
+		MirrorDepth:          p.MirrorDepth,
 	}
 }
 

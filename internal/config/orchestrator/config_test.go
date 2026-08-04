@@ -43,6 +43,43 @@ max_vm_lifetime = "4h"
 		Expect(cfg.Scheduler.MaxVMLifetime).To(Equal("4h"))
 	})
 
+	It("parses every repos field", func() {
+		dir := GinkgoT().TempDir()
+		path := filepath.Join(dir, "orchestrator.toml")
+		Expect(os.WriteFile(path, []byte(`
+[repos]
+enabled = true
+dir = "/srv/kvarn/repos"
+prefetch = false
+prefetch_interval = "10m"
+mirror_depth = 50
+branch_retention = "168h"
+global_bytes = "20G"
+`), 0644)).To(Succeed())
+
+		cfg, err := orchcfg.Load(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Repos.Enabled).NotTo(BeNil())
+		Expect(*cfg.Repos.Enabled).To(BeTrue())
+		Expect(cfg.Repos.Dir).To(Equal("/srv/kvarn/repos"))
+		Expect(cfg.Repos.Prefetch).NotTo(BeNil())
+		Expect(*cfg.Repos.Prefetch).To(BeFalse())
+		Expect(cfg.Repos.PrefetchInterval).To(Equal("10m"))
+		Expect(cfg.Repos.MirrorDepth).NotTo(BeNil())
+		Expect(*cfg.Repos.MirrorDepth).To(Equal(50))
+		Expect(cfg.Repos.BranchRetention).To(Equal("168h"))
+		Expect(cfg.Repos.GlobalBytes).To(Equal("20G"))
+	})
+
+	It("leaves repos unset when the table is absent", func() {
+		cfg, err := orchcfg.Load(filepath.Join(GinkgoT().TempDir(), "missing.toml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Repos.Enabled).To(BeNil())
+		Expect(cfg.Repos.Prefetch).To(BeNil())
+		Expect(cfg.Repos.MirrorDepth).To(BeNil())
+		Expect(cfg.Repos.Dir).To(BeEmpty())
+	})
+
 	It("returns parse errors with the path attached", func() {
 		dir := GinkgoT().TempDir()
 		path := filepath.Join(dir, "orchestrator.toml")

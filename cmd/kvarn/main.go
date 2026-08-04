@@ -7,6 +7,7 @@ import (
 	imagecmd "github.com/aholstenson/kvarn/internal/cmd/image"
 	imagecachecmd "github.com/aholstenson/kvarn/internal/cmd/imagecache"
 	"github.com/aholstenson/kvarn/internal/cmd/key"
+	repocmd "github.com/aholstenson/kvarn/internal/cmd/repo"
 	runcmd "github.com/aholstenson/kvarn/internal/cmd/run"
 	"github.com/aholstenson/kvarn/internal/cmd/secrets"
 	"github.com/aholstenson/kvarn/internal/cmd/startjob"
@@ -28,6 +29,7 @@ type CLI struct {
 	Image        imagecmd.Cmd      `cmd:"" help:"Manage the VM disk image."`
 	Cache        cachecmd.Cmd      `cmd:"" help:"Inspect and clear tool caches."`
 	ImageCache   imagecachecmd.Cmd `cmd:"" name:"image-cache" help:"Inspect and manage the pull-through OCI image cache."`
+	Repo         repocmd.Cmd       `cmd:"" help:"Inspect and manage the host-side repository mirrors."`
 }
 
 func main() {
