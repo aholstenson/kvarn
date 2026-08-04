@@ -401,7 +401,7 @@ func (c *Cmd) Run() error {
 				backlog = -1
 			}
 			return metrics.SchedulerSample{
-				BacklogDepth: int64(backlog),
+				BacklogDepth:      int64(backlog),
 				CPUMillisUsed:     int64(used.CPUMillis),
 				CPUMillisTotal:    int64(used.CPUMillis + free.CPUMillis),
 				MemBytesUsed:      int64(used.MemBytes),
