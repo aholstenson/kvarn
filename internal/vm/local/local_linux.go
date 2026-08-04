@@ -71,6 +71,11 @@ func NewProvider() *Provider {
 		reapOrphans(table, walkQEMUProcs("/proc"))
 	}
 
+	// Reaping frees what the table knew about; this catches the rest — files
+	// from a VM whose table entry was never written, and files whose owning
+	// process died without cleaning up after itself.
+	sweepStaleVMFiles(os.TempDir())
+
 	if highest := highestCID(walkQEMUProcs("/proc")); highest > 0 {
 		// allocateCID does nextCID.Add(1)+2, so storing (highest-2) makes the
 		// next call yield (highest+1), safely above all running guests.
@@ -559,10 +564,11 @@ func (p *Provider) allocatePort() uint32 {
 // likewise cleaned. A live PID with a mismatching comm has been recycled by
 // the kernel; we skip the kill but still drop temp files we own.
 //
-// A second pass over running QEMU processes catches the rare case where the
-// orchestrator crashed before persisting an entry: any qemu-system-* process
-// with a managed guest-cid (> 2) that we don't know about gets terminated, at
-// the cost of leaking its temp files (their paths aren't recoverable here).
+// A second pass over running QEMU processes catches the case where the
+// orchestrator crashed after starting a guest but before persisting its entry:
+// any qemu-system-* process with a managed guest-cid (> 2) that we don't know
+// about gets terminated. Its temp files are not named by any entry, so
+// sweepStaleVMFiles collects them by prefix once this returns.
 func reapOrphans(table *vmtable.Store, procs []procEntry) {
 	known := make(map[int]bool, len(table.List()))
 	for _, entry := range table.List() {

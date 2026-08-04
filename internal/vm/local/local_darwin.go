@@ -32,7 +32,15 @@ type Provider struct {
 }
 
 // NewProvider creates a new Provider for macOS using Apple Virtualization Framework.
-func NewProvider() *Provider { return &Provider{} }
+// NewProvider creates a Provider and clears VM temp files left by an earlier
+// run. There are no orphan processes to reap here: a Virtualization.framework
+// VM lives in the orchestrator's address space and dies with it. Its disk does
+// not, and on this platform that disk is a full raw copy of the base image
+// rather than a thin overlay, so sweeping is the whole cleanup story.
+func NewProvider() *Provider {
+	sweepStaleVMFiles(os.TempDir())
+	return &Provider{}
+}
 
 type vmInstance struct {
 	machine     *vz.VirtualMachine

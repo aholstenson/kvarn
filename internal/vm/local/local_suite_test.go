@@ -1,5 +1,3 @@
-//go:build linux
-
 package local_test
 
 import (
@@ -9,7 +7,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-func TestLocalLinux(t *testing.T) {
+func TestLocalProvider(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Local Linux Provider Suite")
+	RunSpecs(t, "Local Provider Suite")
 }
