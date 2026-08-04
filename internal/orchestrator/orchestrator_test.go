@@ -1429,11 +1429,11 @@ var _ = Describe("StartJob admission scheduler", func() {
 		}
 	}
 
-	completedAmong := func(sids ...string) func() int {
+	countInState := func(state string, sids ...string) func() int {
 		return func() int {
 			n := 0
 			for _, sid := range sids {
-				if stateOf(sid)() == "completed" {
+				if stateOf(sid)() == state {
 					n++
 				}
 			}
@@ -1441,6 +1441,24 @@ var _ = Describe("StartJob admission scheduler", func() {
 		}
 	}
 
+	// oneInState returns the single session sitting in state, failing if there
+	// is not exactly one. Callers use it after asserting the count, to name the
+	// job the scheduler happened to leave behind.
+	oneInState := func(state string, sids ...string) string {
+		var found []string
+		for _, sid := range sids {
+			if stateOf(sid)() == state {
+				found = append(found, sid)
+			}
+		}
+		ExpectWithOffset(1, found).To(HaveLen(1), "expected exactly one session in %s", state)
+		return found[0]
+	}
+
+	// Which two of the three jobs win admission is not the submission order:
+	// each dispatched job clones on its own goroutine and reaches the scheduler
+	// whenever that finishes, and admission is FIFO on arrival there. So every
+	// assertion below is on how many jobs are in a state, never on which.
 	It("admits up to capacity, queues the rest, and admits queued jobs as slots free", func() {
 		ids := make([]string, 3)
 		for i := 0; i < 3; i++ {
@@ -1452,29 +1470,27 @@ var _ = Describe("StartJob admission scheduler", func() {
 			ids[i] = resp.Msg.SessionId
 		}
 
-		// Sessions 1 and 2 reach provisioning; session 3 stays queued.
-		Eventually(stateOf(ids[0])).Should(Equal("provisioning"))
-		Eventually(stateOf(ids[1])).Should(Equal("provisioning"))
-		Eventually(stateOf(ids[2])).Should(Equal("queued"))
-		Consistently(stateOf(ids[2]), 200*time.Millisecond).Should(Equal("queued"))
+		// Two of the three fill the pool and reach provisioning; the third
+		// stays queued for want of capacity.
+		Eventually(countInState("provisioning", ids...)).Should(Equal(2))
+		Eventually(countInState("queued", ids...)).Should(Equal(1))
+		Consistently(countInState("queued", ids...), 200*time.Millisecond).Should(Equal(1))
 
-		sess, err := sessionMgr.Get(context.Background(), ids[2])
+		waiting := oneInState("queued", ids...)
+		sess, err := sessionMgr.Get(context.Background(), waiting)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(sess.Message).To(ContainSubstring("Position 1"))
 		Expect(sess.Message).To(ContainSubstring("2 vCPU"))
 
-		// Hand out one token: exactly one of the admitted jobs completes and
-		// releases its lease, which lets session 3 in. Which of the two it is
-		// is a race the test does not control, so assert on the count.
+		// Hand out one token: exactly one admitted job completes and releases
+		// its lease, which lets the waiting job in.
 		release <- struct{}{}
-		Eventually(completedAmong(ids[0], ids[1])).Should(Equal(1))
-		Eventually(stateOf(ids[2])).ShouldNot(Equal("queued"))
+		Eventually(countInState("completed", ids...)).Should(Equal(1))
+		Eventually(stateOf(waiting)).ShouldNot(Equal("queued"))
 
 		// Let the rest run to completion so the test cleans up.
 		release <- struct{}{}
 		release <- struct{}{}
-		Eventually(stateOf(ids[0])).Should(Equal("completed"))
-		Eventually(stateOf(ids[1])).Should(Equal("completed"))
-		Eventually(stateOf(ids[2])).Should(Equal("completed"))
+		Eventually(countInState("completed", ids...)).Should(Equal(3))
 	})
 })

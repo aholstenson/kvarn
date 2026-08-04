@@ -254,7 +254,12 @@ var _ = Describe("Manager", func() {
 			ch, err := mgr.Watch(ctx, sess.ID, 0)
 			Expect(err).NotTo(HaveOccurred())
 
-			const n = 100
+			// The burst stays under the disconnect-on-lag threshold. A producer
+			// that outruns the feeder past it is entitled to cut this watcher
+			// off — the test above covers that path and the gap-free reconnect
+			// it hands the client — and here that would end the stream early
+			// depending only on how the two goroutines were scheduled.
+			const n = session.MaxPending / 2
 			go func() {
 				defer GinkgoRecover()
 				for i := 0; i < n; i++ {
@@ -266,6 +271,7 @@ var _ = Describe("Manager", func() {
 			events, closed := drainClosed(ch, 5*time.Second)
 			Expect(closed).To(BeTrue())
 			seqs := durableSeqs(events)
+			Expect(seqs).NotTo(BeEmpty())
 			Expect(seqs[0]).To(Equal(int64(1)))
 			for i := 1; i < len(seqs); i++ {
 				Expect(seqs[i]).To(Equal(seqs[i-1] + 1))

@@ -8,6 +8,11 @@ import (
 	. "github.com/onsi/gomega"
 )
 
+// MaxPending exposes the disconnect-on-lag threshold to the external test
+// package, so a test that has to stay on one side of it tracks the constant
+// instead of a copy of its value.
+const MaxPending = maxPending
+
 // subscriberCount reports how many live subscribers are registered for id.
 func (m *manager) subscriberCount(id string) int {
 	m.hub.mu.Lock()
