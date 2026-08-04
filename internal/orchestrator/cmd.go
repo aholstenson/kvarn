@@ -783,6 +783,7 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, D
 		PriorityAgeStep: ageStep,
 		MaxBacklog:      resolveCount(c.SchedMaxBacklog, fileCfg.MaxBacklog, defaultMaxBacklog),
 		MaxQueueWait:    maxQueueWait,
+		MaxAttempts:     resolveCount(c.SchedMaxAttempts, fileCfg.MaxAttempts, defaultMaxAttempts),
 	}
 
 	slog.Info("scheduler pool",

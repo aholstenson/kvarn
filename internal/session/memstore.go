@@ -256,6 +256,32 @@ func (m *memStore) TransitionPending(_ context.Context, id string, to PendingTra
 	return true, ev, nil
 }
 
+func (m *memStore) RequeueRun(_ context.Context, id string, opts RequeueOpts) (bool, PersistedEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.sessions[id]
+	if !ok || !State(row.State).IsRestartable() {
+		return false, PersistedEvent{}, nil
+	}
+	sess, err := RowToSession(row)
+	if err != nil {
+		return false, PersistedEvent{}, err
+	}
+	if opts.MaxAttempts > 0 && sess.Attempts >= opts.MaxAttempts {
+		return false, PersistedEvent{}, nil
+	}
+	sess.Attempts++
+	sess.State = StatePending
+	sess.Message = opts.Message
+	sess.Error = ""
+	sess.QueuedAt = time.Now().UTC()
+	ev, err := m.applyTransitionLocked(sess, time.Now().UTC())
+	if err != nil {
+		return false, PersistedEvent{}, err
+	}
+	return true, ev, nil
+}
+
 func (m *memStore) ExpirePending(_ context.Context, cutoff time.Time, reason string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

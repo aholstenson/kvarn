@@ -436,6 +436,68 @@ func (s *Store) TransitionPending(ctx context.Context, id string, to session.Pen
 	return claimed, event, nil
 }
 
+func (s *Store) RequeueRun(ctx context.Context, id string, opts session.RequeueOpts) (bool, session.PersistedEvent, error) {
+	var (
+		requeued bool
+		event    session.PersistedEvent
+	)
+	// The state predicate is built from session.RestartableStates so a state
+	// added there is covered here without being named twice.
+	restartable := session.RestartableStates()
+	placeholders := make([]string, len(restartable))
+	args := make([]any, 0, len(restartable)+1)
+	args = append(args, id)
+	for i, st := range restartable {
+		placeholders[i] = "?"
+		args = append(args, string(st))
+	}
+	query := `SELECT ` + sessionColumns + ` FROM sessions WHERE id = ? AND state IN (` +
+		strings.Join(placeholders, ",") + `)`
+
+	err := retryBusy(func() error {
+		requeued = false
+		event = session.PersistedEvent{}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		sess, err := scanSession(tx.QueryRowContext(ctx, query, args...).Scan)
+		if errors.Is(err, sql.ErrNoRows) {
+			// The run advanced past the restartable states, or finished, while
+			// it was being signalled. Not an error: the caller falls back to
+			// recording the stop it asked for.
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if opts.MaxAttempts > 0 && sess.Attempts >= opts.MaxAttempts {
+			return nil
+		}
+
+		sess.Attempts++
+		sess.State = session.StatePending
+		sess.Message = opts.Message
+		sess.Error = ""
+		sess.QueuedAt = time.Now().UTC()
+		event, err = applyTransition(ctx, tx, sess, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		requeued = true
+		return nil
+	})
+	if err != nil {
+		return false, session.PersistedEvent{}, fmt.Errorf("requeue run: %w", err)
+	}
+	return requeued, event, nil
+}
+
 func (s *Store) ExpirePending(ctx context.Context, cutoff time.Time, reason string) ([]string, error) {
 	var ids []string
 	err := retryBusy(func() error {

@@ -399,4 +399,8 @@ type Manager interface {
 	UpdatePendingPriority(ctx context.Context, id string, priority int) (int, bool, error)
 	// ExpirePending fails backlog entries queued before cutoff.
 	ExpirePending(ctx context.Context, cutoff time.Time, reason string) ([]string, error)
+	// RequeueRun returns a live run to the backlog and broadcasts the state
+	// change, reporting false when the run had already advanced past the
+	// states it is safe to re-run from.
+	RequeueRun(ctx context.Context, id string, opts RequeueOpts) (bool, error)
 }

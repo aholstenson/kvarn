@@ -175,6 +175,28 @@ func (m *manager) TransitionPending(ctx context.Context, id string, to PendingTr
 	return true, nil
 }
 
+func (m *manager) RequeueRun(ctx context.Context, id string, opts RequeueOpts) (bool, error) {
+	ok, pe, err := m.store.RequeueRun(ctx, id, opts)
+	if err != nil || !ok {
+		return false, err
+	}
+	event, err := decodeEvent(pe.Kind, pe.Payload)
+	if err != nil {
+		// The requeue is committed; reporting failure here would tell the
+		// caller the run is still theirs to finish. Watchers converge anyway,
+		// against the store that holds the event.
+		slog.Warn("could not broadcast requeue", "session_id", id, "error", err)
+		return true, nil
+	}
+	seqLock := m.seqLock(id)
+	seqLock.Lock()
+	defer seqLock.Unlock()
+	m.hub.mu.Lock()
+	defer m.hub.mu.Unlock()
+	m.broadcastLocked(id, WatchEvent{Seq: pe.Seq, Event: event})
+	return true, nil
+}
+
 func (m *manager) ExpirePending(ctx context.Context, cutoff time.Time, reason string) ([]string, error) {
 	return m.store.ExpirePending(ctx, cutoff, reason)
 }

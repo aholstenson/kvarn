@@ -55,11 +55,22 @@ func (s *Service) endJob(sessionID string) {
 // goes through here, so wherever the cancellation happens to land — a clone, the
 // queue, the agent, validation — it is reported the same way.
 func (s *Service) failRun(termCtx, rootCtx context.Context, sessionID string, err error) {
-	if cause := context.Cause(rootCtx); errors.Is(cause, errJobCancelled) {
+	cause := context.Cause(rootCtx)
+	switch {
+	case errors.Is(cause, errJobRequeued):
+		// A drain stopped this run so it could be started again later. The
+		// requeue is conditional on the state the run actually unwound from, so
+		// one that reached running in the meantime falls through: it has spent
+		// against its cost cap, and re-running it would spend twice.
+		if s.requeueRun(termCtx, sessionID, cause.Error()) {
+			return
+		}
 		s.sessionMgr.UpdateState(termCtx, sessionID, session.StateCancelled, cause.Error())
-		return
+	case errors.Is(cause, errJobCancelled):
+		s.sessionMgr.UpdateState(termCtx, sessionID, session.StateCancelled, cause.Error())
+	default:
+		s.sessionMgr.Fail(termCtx, sessionID, err)
 	}
-	s.sessionMgr.Fail(termCtx, sessionID, err)
 }
 
 // cancelCause builds the cause recorded on a cancelled run. The sentinel is

@@ -300,6 +300,11 @@ type Service struct {
 	// creation that follows it, so two concurrent SubmitFeedback calls for the
 	// same pull request cannot both find it idle.
 	feedbackMu sync.Mutex
+
+	// drain is the host's admission stance: whether the dispatcher may move
+	// work out of the backlog. See drain.go.
+	drainMu sync.Mutex
+	drain   drainStatus
 }
 
 type ServiceOpts struct {
@@ -438,6 +443,12 @@ func (s *Service) dispatchedPerProject() map[string]int {
 // bounded VM-stop path so VMs are torn down rather than orphaned. Callers
 // typically pass a context with a deadline (see shutdownTimeout in run).
 func (s *Service) Shutdown(ctx context.Context) {
+	// Draining first is what keeps the teardown window from starting work it is
+	// about to kill: the dispatcher can otherwise claim a backlog entry while
+	// jobs are winding down, and that job would be failed seconds later having
+	// spent an attempt. An operator who wants running jobs to *finish* drains
+	// ahead of the signal and waits; this only stops the bleeding.
+	s.setDrain(true, "orchestrator shutting down")
 	s.shutdownCancel()
 
 	done := make(chan struct{})

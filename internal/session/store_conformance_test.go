@@ -471,6 +471,95 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 				Expect(won).To(BeFalse())
 			})
 
+			Describe("RequeueRun", func() {
+				It("returns a run in a restartable state to the backlog", func() {
+					Expect(store.CreateSession(ctx,
+						makeSession("cloning", "p", session.StateCloning, base))).To(Succeed())
+
+					ok, ev, err := store.RequeueRun(ctx, "cloning", session.RequeueOpts{
+						Message: "host draining",
+					})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(ok).To(BeTrue())
+					Expect(ev.Kind).To(Equal("state_change"))
+
+					got, err := store.GetSession(ctx, "cloning")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(got.State).To(Equal(session.StatePending))
+					Expect(got.Message).To(Equal("host draining"))
+					// The wait restarts: the entry is measured from when it
+					// re-entered the backlog, not from the original submission.
+					Expect(got.QueuedAt).To(BeTemporally(">", base))
+					Expect(got.Attempts).To(Equal(1))
+				})
+
+				// A run that reached StateRunning has spent against its cost
+				// cap and holds agent work, so a drain may not silently re-run
+				// it however the caller asked.
+				DescribeTable("refuses a run that is past the restartable states",
+					func(state session.State) {
+						Expect(store.CreateSession(ctx, makeSession("id", "p", state, base))).To(Succeed())
+						ok, _, err := store.RequeueRun(ctx, "id", session.RequeueOpts{})
+						Expect(err).NotTo(HaveOccurred())
+						Expect(ok).To(BeFalse())
+
+						got, err := store.GetSession(ctx, "id")
+						Expect(err).NotTo(HaveOccurred())
+						Expect(got.State).To(Equal(state))
+					},
+					Entry("running", session.StateRunning),
+					Entry("validating", session.StateValidating),
+					Entry("submitting", session.StateSubmitting),
+					Entry("completed", session.StateCompleted),
+					Entry("failed", session.StateFailed),
+					// Already in the backlog: there is nothing to send back,
+					// and requeueing would charge it an attempt it never spent.
+					Entry("pending", session.StatePending),
+				)
+
+				It("refuses a run that has used up its attempts", func() {
+					sess := makeSession("spent", "p", session.StateSetup, base)
+					sess.Attempts = 3
+					Expect(store.CreateSession(ctx, sess)).To(Succeed())
+
+					ok, _, err := store.RequeueRun(ctx, "spent", session.RequeueOpts{MaxAttempts: 3})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(ok).To(BeFalse())
+
+					got, err := store.GetSession(ctx, "spent")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(got.State).To(Equal(session.StateSetup))
+				})
+
+				It("requeues below the attempt cap", func() {
+					sess := makeSession("room", "p", session.StateSetup, base)
+					sess.Attempts = 1
+					Expect(store.CreateSession(ctx, sess)).To(Succeed())
+
+					ok, _, err := store.RequeueRun(ctx, "room", session.RequeueOpts{MaxAttempts: 3})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(ok).To(BeTrue())
+
+					got, err := store.GetSession(ctx, "room")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(got.Attempts).To(Equal(2))
+				})
+
+				It("clears a previous error so the entry does not look failed", func() {
+					sess := makeSession("dirty", "p", session.StateQueued, base)
+					sess.Error = "an earlier attempt failed"
+					Expect(store.CreateSession(ctx, sess)).To(Succeed())
+
+					ok, _, err := store.RequeueRun(ctx, "dirty", session.RequeueOpts{Message: "drained"})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(ok).To(BeTrue())
+
+					got, err := store.GetSession(ctx, "dirty")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(got.Error).To(BeEmpty())
+				})
+			})
+
 			It("expires entries queued before the cutoff and leaves the rest", func() {
 				Expect(store.CreateSession(ctx, queued("stale", "p", 0, base.Add(-48*time.Hour)))).To(Succeed())
 				Expect(store.CreateSession(ctx, queued("fresh", "p", 0, base))).To(Succeed())

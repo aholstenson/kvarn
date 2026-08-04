@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"text/tabwriter"
+	"time"
 
 	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
@@ -21,6 +22,8 @@ import (
 type Cmd struct {
 	Status StatusCmd `cmd:"" help:"Show backlog depth, pipeline population and free capacity."`
 	List   ListCmd   `cmd:"" help:"List the backlog in the order it will be dispatched."`
+	Drain  DrainCmd  `cmd:"" help:"Stop starting new jobs so the host can be stopped safely."`
+	Resume ResumeCmd `cmd:"" help:"Start dispatching from the backlog again."`
 }
 
 type connectFlags struct {
@@ -52,6 +55,19 @@ func (c *StatusCmd) Run() error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	// First line when set: every number below reads differently on a host that
+	// has been taken out of service, so saying so before them is what stops a
+	// stalled backlog from being read as a capacity problem.
+	if st.Draining {
+		drained := "DRAINING — no new jobs will start"
+		if st.DrainReason != "" {
+			drained += fmt.Sprintf(" (%s)", st.DrainReason)
+		}
+		if ts := st.DrainingSince; ts != nil {
+			drained += fmt.Sprintf(", since %s", ts.AsTime().Format(time.RFC3339))
+		}
+		fmt.Fprintf(tw, "State:\t%s\n", drained)
+	}
 	fmt.Fprintf(tw, "Backlog:\t%s\n", formatBound(st.Backlog, st.MaxBacklog))
 	fmt.Fprintf(tw, "Pipeline:\t%s\n", formatBound(st.Dispatched, st.MaxDispatched))
 	fmt.Fprintf(tw, "Awaiting capacity:\t%d\n", st.AdmissionQueue)

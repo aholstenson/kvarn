@@ -48,6 +48,10 @@ type DispatchPolicy struct {
 	// Without it a host that was down over a weekend boots into a flood of work
 	// nobody is waiting for any more. Zero never expires.
 	MaxQueueWait time.Duration
+	// MaxAttempts caps how many dispatches one job may spend. It is the same
+	// bound startup reconciliation applies, held here as well because a drain
+	// requeues live runs and must not push a job past it. Zero is no cap.
+	MaxAttempts int
 	// Interval is the backstop tick. The dispatcher is woken by submissions and
 	// by jobs finishing, so this only has to catch what neither signals: an
 	// entry aging into expiry, or a wake lost to a full channel.
@@ -100,6 +104,14 @@ func (d *dispatcher) maxDispatched() int {
 	return d.policy.MaxDispatched
 }
 
+// maxAttempts is the configured dispatch cap, nil-safe like backlogBound.
+func (d *dispatcher) maxAttempts() int {
+	if d == nil {
+		return 0
+	}
+	return d.policy.MaxAttempts
+}
+
 // ageStep is how much waiting earns a backlog entry one level of effective
 // priority. Callers that report an entry's place need the same value the
 // dispatcher orders by, so they read it from here rather than re-deriving it
@@ -149,6 +161,19 @@ func (d *dispatcher) pass(ctx context.Context) {
 	// nothing can legitimately be waiting; standing down keeps a bridge-only or
 	// VM-only configuration from tripping over sessions a test placed directly.
 	if d.svc.sessionMgr == nil || d.svc.projectStore == nil {
+		return
+	}
+	// A draining host stands down entirely, expiry included. The backlog is
+	// what a drain exists to preserve, and failing an entry for a wait the
+	// operator imposed would be the drain destroying the work it is protecting.
+	// Both resume together.
+	//
+	// The check bounds what a drain stops, not what is already in progress: a
+	// pass that began before the drain was set runs to its end. That costs at
+	// most one more job started and one more expiry sweep of entries already
+	// past their deadline, both of which the drain was a moment too late for
+	// rather than wrong about.
+	if d.svc.isDraining() {
 		return
 	}
 	d.expire(ctx)

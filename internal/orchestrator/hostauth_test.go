@@ -130,6 +130,34 @@ var _ = Describe("Host capability", func() {
 		})
 	})
 
+	// Draining has no project to scope it to at all — it is the orchestrator's
+	// own admission stance — so it is the capability's clearest case.
+	Describe("SetDrain", func() {
+		setDrain := func(addr, token string) error {
+			oc := client.NewOrchestrator(addr, token)
+			_, err := oc.SetDrain(context.Background(), connect.NewRequest(&v1.SetDrainRequest{
+				Draining: true, Reason: "test",
+			}))
+			return err
+		}
+
+		It("is denied to a wildcard key without the capability", func() {
+			Expect(connect.CodeOf(setDrain(tcpAddr, wildcardToken))).To(Equal(connect.CodePermissionDenied))
+		})
+
+		It("is denied to a project-scoped key, however many projects it covers", func() {
+			Expect(connect.CodeOf(setDrain(tcpAddr, scopedToken))).To(Equal(connect.CodePermissionDenied))
+		})
+
+		It("is allowed to a key holding the capability", func() {
+			Expect(setDrain(tcpAddr, wildcardHostToken)).To(Succeed())
+		})
+
+		It("is allowed over the host-local socket with no key at all", func() {
+			Expect(setDrain(sockAddr, "")).To(Succeed())
+		})
+	})
+
 	// Naming a project puts the request back inside the project axis, where
 	// the key's own scope is the whole answer.
 	It("allows a project-filtered bulk cancel without the capability", func() {

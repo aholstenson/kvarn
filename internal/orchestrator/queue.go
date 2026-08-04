@@ -86,7 +86,7 @@ func (s *Service) GetQueueStats(ctx context.Context, _ *connect.Request[v1.GetQu
 	used, free, queueLen := s.scheduler.Snapshot()
 	diskAvail, diskFloor, diskMeasured, diskOpen := s.scheduler.DiskGuard()
 
-	return connect.NewResponse(&v1.GetQueueStatsResponse{
+	stats := &v1.GetQueueStatsResponse{
 		Backlog:            int32(len(pending)),
 		Dispatched:         int32(s.dispatchedCount()),
 		MaxBacklog:         int32(s.dispatcher.backlogBound()),
@@ -99,7 +99,13 @@ func (s *Service) GetQueueStats(ctx context.Context, _ *connect.Request[v1.GetQu
 		DiskFloorBytes:     diskFloor,
 		DiskMeasured:       diskMeasured,
 		DiskGateOpen:       diskOpen,
-	}), nil
+	}
+	// Reported here rather than through an RPC of its own: a job waiting on a
+	// drained host and one waiting on a full one look identical in every other
+	// number, and this is the field that tells them apart.
+	s.drainStatsInto(stats)
+
+	return connect.NewResponse(stats), nil
 }
 
 func capacityToProto(c scheduler.Capacity) *v1.Capacity {

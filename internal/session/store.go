@@ -85,6 +85,20 @@ type PendingTransition struct {
 	Error   string
 }
 
+// RequeueOpts is the target of a RequeueRun call: a live run's return to the
+// backlog, made by a host that has decided to stop starting work rather than by
+// the run failing.
+type RequeueOpts struct {
+	// Message is recorded on the session, so the entry says why it is waiting
+	// again rather than looking like a fresh submission.
+	Message string
+	// MaxAttempts caps how many dispatches a job may spend, as in ReconcileOpts.
+	// A job already at the cap is not requeued: the caller is stopping it either
+	// way, and putting it back only to have the next boot fail it is worse than
+	// saying so now. Zero means no cap.
+	MaxAttempts int
+}
+
 // ReconcileOpts configures startup reconciliation.
 type ReconcileOpts struct {
 	// MaxAttempts caps how many times one job may be dispatched. A restartable
@@ -144,6 +158,15 @@ type Store interface {
 	// queue already holds the request built from it, so silently rewriting the
 	// column would promise a reordering that never happens.
 	UpdatePendingPriority(ctx context.Context, id string, priority int) (previous int, ok bool, err error)
+	// RequeueRun returns a live run to the backlog, atomically and only from a
+	// restartable state, incrementing its attempt count and appending the
+	// resulting state_change event. It reports false without an error when the
+	// session has moved on — a run that reached StateRunning while it was being
+	// signalled has spent budget and holds agent work, so it is no longer
+	// something a drain may silently re-run. That check has to live in the same
+	// transaction as the write, which is why this is a store operation rather
+	// than a read followed by UpdateState.
+	RequeueRun(ctx context.Context, id string, opts RequeueOpts) (bool, PersistedEvent, error)
 	// ExpirePending fails backlog entries queued before cutoff. A separate
 	// sweep rather than a filter on ListPending because a low-priority entry
 	// may never reach the head of the dispatch order, and an entry nobody looks

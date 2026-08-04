@@ -380,6 +380,39 @@ message GetQueueStatsResponse {
   uint64 disk_floor_bytes = 10;
   bool disk_measured = 11;
   bool disk_gate_open = 12;
+  // Admission stance: while draining, nothing leaves the backlog, so a job
+  // waiting here is waiting on an operator rather than on capacity.
+  bool draining = 13;
+  string drain_reason = 14;
+  google.protobuf.Timestamp draining_since = 15;
+}
+
+// SetDrainRequest changes whether the orchestrator dispatches new work. It is
+// the controlled half of a shutdown: draining stops the backlog from entering
+// the pipeline, so the host runs down to empty on its own and can then be
+// stopped without killing anything mid-run.
+//
+// It is a state, not an action — reversible, and observable through
+// GetQueueStats — so a drain started for a deploy that gets called off is
+// undone rather than waited out.
+message SetDrainRequest {
+  bool draining = 1;
+  // Recorded alongside the state and reported by GetQueueStats, so an operator
+  // finding a drained host learns who drained it and why.
+  string reason = 2;
+}
+
+message SetDrainResponse {
+  // Whether the orchestrator was already in the requested state, which is how
+  // a caller tells "I drained it" from "it was already drained".
+  bool previously_draining = 1;
+  // Sessions returned to the backlog because they had not started running yet.
+  // They cost nothing to re-run, and requeueing them is what lets a host reach
+  // empty in the time its actual work takes rather than its whole pipeline.
+  repeated string requeued = 2;
+  // Jobs still in the pipeline once the requeue is signalled. Zero means the
+  // host is already idle and safe to stop.
+  int32 dispatched = 3;
 }
 
 message ListQueueRequest {
@@ -422,4 +455,5 @@ service OrchestratorService {
   rpc ListSessionEvents(ListSessionEventsRequest) returns (ListSessionEventsResponse);
   rpc GetQueueStats(GetQueueStatsRequest) returns (GetQueueStatsResponse);
   rpc ListQueue(ListQueueRequest) returns (ListQueueResponse);
+  rpc SetDrain(SetDrainRequest) returns (SetDrainResponse);
 }
