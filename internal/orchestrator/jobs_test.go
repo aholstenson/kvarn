@@ -207,11 +207,13 @@ var _ = Describe("RetryJob", func() {
 	})
 
 	It("refuses a job that already opened a pull request", func() {
-		// Resubmitting this would open a second pull request for one task.
+		// Resubmitting this would open a second pull request for one task. The
+		// session carries a PR ref but was not submitted against one, which is
+		// exactly the pair the continuation marker exists to tell apart.
 		original := finished("implement", "42")
 
 		_, err := svc.RetryJob(ctx, connect.NewRequest(&v1.RetryJobRequest{SessionId: original.ID}))
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeFailedPrecondition))
-		Expect(err).To(MatchError(ContainSubstring("feedback")))
+		Expect(err).To(MatchError(ContainSubstring("already opened pull request 42")))
 	})
 })

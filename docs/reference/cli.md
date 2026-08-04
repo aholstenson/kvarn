@@ -4,8 +4,8 @@ Every command is a subcommand of the single `kvarn` binary. They fall into three
 groups:
 
 - **Server** — `orchestrator`, run on the host with virtualization.
-- **Client** — `jobs`, `feedback`, `queue`, which talk to a
-  running orchestrator over HTTP and can run from anywhere that can reach it.
+- **Client** — `jobs`, `queue`, which talk to a running orchestrator over HTTP
+  and can run from anywhere that can reach it.
 - **Local** — everything else, which reads and writes files on the host
   (config stores, caches, mirrors, the VM image) with no orchestrator involved.
 
@@ -40,41 +40,37 @@ The orchestrator refuses to start without git ≥ 2.26 on `PATH`.
 
 ## `kvarn jobs start <project> <prompt>`
 
-Starts a job: clones the project's default branch, runs the agent, validates,
-pushes a branch, and opens a pull request where the forge supports it.
+Starts a job. Where the run begins decides the rest of its shape, and that is
+the one choice the command asks for:
+
+- **From a branch** (the default, or `--branch`) — clone it, run the agent,
+  validate, push a branch, and open a pull request where the forge supports it.
+- **From a pull request** (`--pr-ref`) — clone its head branch, run the agent
+  with the prompt as the task, push a follow-up commit to that same branch, and
+  comment. No second PR is opened and the title and body are left alone.
+
+The two are alternatives: a pull request already fixes the branch its commits
+land on, so passing both is an error. See
+[Follow up on a pull request](../how-to/follow-up-on-a-pull-request.md).
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--addr` | local socket, else `http://localhost:8080` | Orchestrator address. Env: `KVARN_ADDR`. |
 | `--branch` | project default | Branch to start from. |
-| `--mode` | `auto` | `auto`, `implement`, `fix`, `feedback`, `review`, `research`. |
+| `--pr-ref` | — | Continue this pull request instead of opening one, in the forge's own format — for GitHub, the PR number. |
+| `--mode` | `feedback` with `--pr-ref`, else `auto` | `auto`, `implement`, `fix`, `feedback`, `review`, `research`. |
 | `--watch` | off | Stream the session until it reaches a terminal state. Without it the session ID is printed and the command returns. |
 | `--idempotency-key` | — | Makes the submission safe to retry; see below. |
 | `--api-key` | — | API key. Env: `KVARN_API_KEY`. |
 
 Without an idempotency key, a client that resends a submission after a network
-timeout gets a second job — a second VM and a second pull request. Pass
-`--idempotency-key` (any string up to 255 bytes, unique per submission, such as
-a UUID) and the orchestrator returns the session the first request created
-instead of starting another job, saying so on stdout. Keys are scoped to the
-project and remembered as long as the session is, so retention eventually
-releases them. Reusing one key for a different prompt, branch or mode is an
-error rather than a silently dropped job.
-
-## `kvarn feedback <project> <pr-ref> <feedback>`
-
-Continues work on an existing pull request: clones its head branch, runs the
-agent with the feedback as the task, pushes a follow-up commit to the same
-branch, and comments. No second PR is opened.
-
-`<pr-ref>` is in the forge's own format — for GitHub, the PR number.
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--addr` | local socket, else `http://localhost:8080` | Orchestrator address. Env: `KVARN_ADDR`. |
-| `--mode` | `feedback` | Override the agent mode. |
-| `--watch` | off | Stream the session. Without it the session ID is printed and the command returns. |
-| `--api-key` | — | API key. Env: `KVARN_API_KEY`. |
+timeout gets a second job — a second VM, and a second pull request or a
+duplicated follow-up commit. Pass `--idempotency-key` (any string up to 255
+bytes, unique per submission, such as a UUID) and the orchestrator returns the
+session the first request created instead of starting another job, saying so on
+stdout. Keys are scoped to the project and remembered as long as the session is,
+so retention eventually releases them. Reusing one key for a different prompt,
+mode or starting point is an error rather than a silently dropped job.
 
 ## `kvarn jobs`
 
@@ -89,7 +85,7 @@ down. Either way the session ends `cancelled`, not `failed`.
 
 | Subcommand | Purpose |
 | --- | --- |
-| `start <project> <prompt>` | Start a job; flags are listed above. |
+| `start <project> <prompt>` | Start a job, from a branch or from a pull request; flags are listed above. |
 | `list` | Jobs newest first. Filters: `--project`, `--state` (repeatable/comma-separated), `--active`, `--mode`, `--pr-ref`, `--since 24h`, `--limit`, `--all` to follow pagination. |
 | `show <session-id>` | One job in full, including its priority, attempt count and cost. |
 | `watch <session-id>` | Stream events until the job finishes. `--from` resumes after an event sequence. |
@@ -98,9 +94,11 @@ down. Either way the session ends `cancelled`, not `failed`.
 | `retry <session-id>` | Resubmit a finished job as a new session. `--prompt` replaces the original text, `--watch` follows the new run. |
 | `priority <session-id> <priority>` | Reorder a job still waiting in the backlog. Higher runs sooner. |
 
-A retry leaves the original session as the record of what happened. A job that
-already opened a pull request is refused — resubmitting it would open a second
-one — so continue it with `kvarn feedback` instead.
+A retry leaves the original session as the record of what happened, and starts
+where the original started: a job submitted against a pull request is retried
+against that same pull request. A job that started from a branch and went on to
+open a pull request is refused — resubmitting it would open a second one — so
+continue it with `kvarn jobs start --pr-ref` instead.
 
 ## `kvarn queue`
 

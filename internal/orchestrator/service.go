@@ -296,10 +296,10 @@ type Service struct {
 	// all, so this is not something a caller should be able to forget to wire.
 	dispatcher *dispatcher
 
-	// feedbackMu serializes the per-PR single-flight check with the session
-	// creation that follows it, so two concurrent SubmitFeedback calls for the
-	// same pull request cannot both find it idle.
-	feedbackMu sync.Mutex
+	// continuationMu serializes the per-PR single-flight check with the session
+	// creation that follows it, so two concurrent submissions against the same
+	// pull request cannot both find it idle.
+	continuationMu sync.Mutex
 
 	// drain is the host's admission stance: whether the dispatcher may move
 	// work out of the backlog. See drain.go.
@@ -573,14 +573,17 @@ func (s *Service) authorizeHost(ctx context.Context, procedure string) error {
 	return nil
 }
 
-// startJobParams is one fresh-job submission: clone the base branch and open a
-// new pull request. It is the shared body of StartJob and of a retry that
-// resubmits such a job.
+// startJobParams is one submission, of either kind. It is the shared body of
+// StartJob and of a retry that resubmits the same work.
 type startJobParams struct {
 	project string
 	prompt  string
-	branch  string
-	mode    string
+	// branch and prRef are the two starting points, and at most one is set.
+	// branch clones and opens a pull request; prRef continues the pull request
+	// it names. Both empty starts from the project's default branch.
+	branch string
+	prRef  string
+	mode   string
 	// idempotencyKey, when set, makes the submission replayable: a second
 	// request carrying it returns the session the first one created. Empty for a
 	// caller that did not ask for the guarantee.
@@ -590,20 +593,34 @@ type startJobParams struct {
 	procedure string
 }
 
+// continues reports whether the submission names a pull request to work on
+// rather than a branch to start from.
+func (p startJobParams) continues() bool { return p.prRef != "" }
+
 // maxIdempotencyKeyLen bounds a caller-supplied key. It is generous for the
 // UUIDs and request ids callers actually use, and stops an unbounded string
 // from being written to every session row.
 const maxIdempotencyKeyLen = 255
 
-// submissionResult is one accepted submission, from StartJob or from
-// SubmitFeedback. Duplicate is true when the request matched an existing
-// idempotency key, so the session it names was created by an earlier request
-// and no new run was started.
+// submissionResult is one accepted submission. Duplicate is true when the
+// request matched an existing idempotency key, so the session it names was
+// created by an earlier request and no new run was started.
 type submissionResult struct {
 	session   *session.Session
 	duplicate bool
 }
 
+// startJob admits one submission of either kind. Everything a submission needs
+// regardless of where it starts is settled here — who may submit it, which mode
+// it runs in, which project it belongs to — and the starting point then decides
+// which arm accepts it.
+//
+// The two arms differ in how much they check up front, and deliberately so. A
+// fresh job resolves nothing beyond its branch, because the dispatcher reads
+// the project, the forge and the credentials as they are when the run actually
+// starts. A continuation has to read its pull request now, because a reference
+// that names nothing is a bad request and should be answered as one rather than
+// become a session that fails minutes later.
 func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionResult, error) {
 	if err := s.authorizeProject(ctx, p.project, p.procedure); err != nil {
 		return nil, err
@@ -613,17 +630,44 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("project-aware jobs not configured"))
 	}
 
+	if strings.TrimSpace(p.prompt) == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("prompt is required"))
+	}
 	if len(p.idempotencyKey) > maxIdempotencyKeyLen {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			fmt.Errorf("idempotency key is %d bytes; the limit is %d", len(p.idempotencyKey), maxIdempotencyKeyLen))
 	}
 
-	log := reqid.LoggerFrom(ctx).With("project", p.project, "mode", p.mode)
-	log.Info("starting job", "branch", p.branch)
-
-	mode, err := coding.ModeByName(p.mode)
+	// A continuation defaults to the mode written for it. Nothing stops a
+	// caller naming another one — reviewing a pull request is as reasonable as
+	// revising it — so the starting point picks the default and never more.
+	modeName := p.mode
+	if modeName == "" && p.continues() {
+		modeName = coding.ModeFeedback.Name
+	}
+	mode, err := coding.ModeByName(modeName)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
+	log := reqid.LoggerFrom(ctx).With("project", p.project, "mode", mode.ModeName())
+
+	if p.continues() {
+		// The pull request arm's own fast path, before the forge round trips
+		// its checks need: a replay spelled the way the first request spelled it
+		// settles here. Anything else — no key, no match yet, or a reference the
+		// forge would canonicalise differently — falls through to the
+		// authoritative check, which compares against the resolved ref.
+		if p.idempotencyKey != "" {
+			claimed, err := s.findClaimedSession(ctx, p.project, p.idempotencyKey)
+			if err != nil {
+				return nil, err
+			}
+			if claimed != nil && sameSubmission(claimed, p.prompt, mode.ModeName(), p.prRef, claimed.PRRef) == nil {
+				log.Info("idempotent replay", "session_id", claimed.ID)
+				return &submissionResult{session: claimed, duplicate: true}, nil
+			}
+		}
 	}
 
 	proj, err := s.projectStore.Get(ctx, p.project)
@@ -634,27 +678,47 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 
 	log.Info("resolved project", "repo", proj.RepoURL, "forge", proj.Forge)
 
+	if p.continues() {
+		return s.startContinuation(ctx, p, proj, mode, log)
+	}
+	return s.startFresh(ctx, p, proj, mode, log)
+}
+
+// startFresh admits a submission that starts from a branch: clone it, and open
+// a pull request against it when the run produces changes.
+func (s *Service) startFresh(
+	ctx context.Context,
+	p startJobParams,
+	proj *project.Project,
+	mode *coding.Mode,
+	log *slog.Logger,
+) (*submissionResult, error) {
 	branch := p.branch
 	if branch == "" {
 		branch = proj.DefaultBranch
 	}
+
+	log.Info("starting job", "branch", branch)
 
 	// The key is resolved against the store before anything else is spent on the
 	// request, so the common retry — the client that saw a timeout and sent the
 	// same submission again — costs a lookup and does not touch the backlog
 	// limit. The branch compared here is the resolved one: a caller that omitted
 	// it and one that named the project default sent the same job.
-	if p.idempotencyKey != "" {
-		existing, err := s.sessionMgr.FindByIdempotencyKey(ctx, p.project, p.idempotencyKey)
-		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("look up idempotency key: %w", err))
+	replay := func(claimed *session.Session) (*submissionResult, error) {
+		if err := sameSubmission(claimed, p.prompt, mode.ModeName(), branch, claimed.BaseBranch); err != nil {
+			return nil, err
 		}
-		if existing != nil {
-			if err := sameSubmission(existing, p.prompt, mode.ModeName(), branch, existing.BaseBranch); err != nil {
-				return nil, err
-			}
-			log.Info("idempotent replay", "session_id", existing.ID)
-			return &submissionResult{session: existing, duplicate: true}, nil
+		log.Info("idempotent replay", "session_id", claimed.ID)
+		return &submissionResult{session: claimed, duplicate: true}, nil
+	}
+	if p.idempotencyKey != "" {
+		claimed, err := s.findClaimedSession(ctx, p.project, p.idempotencyKey)
+		if err != nil {
+			return nil, err
+		}
+		if claimed != nil {
+			return replay(claimed)
 		}
 	}
 
@@ -664,9 +728,7 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 
 	// The session is the durable record that the job exists, so writing it is
 	// what accepts the submission: once this returns, the run happens even if
-	// the orchestrator dies on the next instruction. Nothing else about the job
-	// is resolved here — the dispatcher reads the project, the forge and the
-	// credentials as they are when it actually starts the run.
+	// the orchestrator dies on the next instruction.
 	sess, err := s.sessionMgr.Create(ctx, session.CreateParams{
 		ProjectName:    p.project,
 		Prompt:         p.prompt,
@@ -680,18 +742,14 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 	// store's uniqueness constraint is what decides between them, and the loser
 	// answers with the session the winner created rather than with an error.
 	if errors.Is(err, session.ErrIdempotencyConflict) {
-		existing, findErr := s.sessionMgr.FindByIdempotencyKey(ctx, p.project, p.idempotencyKey)
+		claimed, findErr := s.findClaimedSession(ctx, p.project, p.idempotencyKey)
 		if findErr != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("look up idempotency key: %w", findErr))
+			return nil, findErr
 		}
-		if existing == nil {
+		if claimed == nil {
 			return nil, connect.NewError(connect.CodeInternal, errors.New("idempotency key claimed by a session that cannot be read back"))
 		}
-		if err := sameSubmission(existing, p.prompt, mode.ModeName(), branch, existing.BaseBranch); err != nil {
-			return nil, err
-		}
-		log.Info("idempotent replay", "session_id", existing.ID)
-		return &submissionResult{session: existing, duplicate: true}, nil
+		return replay(claimed)
 	}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create session: %w", err))
@@ -703,33 +761,60 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 	return &submissionResult{session: sess}, nil
 }
 
+// findClaimedSession resolves an idempotency key to the session already holding
+// it, or nil when the key is unclaimed. It exists so both arms report a store
+// failure the same way.
+func (s *Service) findClaimedSession(ctx context.Context, project, key string) (*session.Session, error) {
+	claimed, err := s.sessionMgr.FindByIdempotencyKey(ctx, project, key)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("look up idempotency key: %w", err))
+	}
+	return claimed, nil
+}
+
 // sameSubmission checks that a replayed idempotency key describes the work it
 // originally claimed. A key reused with different content is a client bug — two
 // distinct submissions sharing one key — and silently returning the first one
 // would drop the second without anyone noticing.
 //
-// target is where the work lands: the branch a fresh job starts from, or the
-// pull request a feedback run continues. existingTarget is that same thing read
-// off the claimed session, which is why the caller supplies both.
-func sameSubmission(existing *session.Session, prompt, mode, target, existingTarget string) error {
-	if existing.Prompt == prompt && existing.Mode == mode && existingTarget == target {
+// startFrom is where the run begins: the branch a fresh job clones, or the pull
+// request a continuation works on. claimedStartFrom is that same thing read off
+// the claimed session, which is why the caller supplies both.
+func sameSubmission(claimed *session.Session, prompt, mode, startFrom, claimedStartFrom string) error {
+	if claimed.Prompt == prompt && claimed.Mode == mode && claimedStartFrom == startFrom {
 		return nil
 	}
 	return connect.NewError(connect.CodeAlreadyExists,
-		fmt.Errorf("idempotency key already used by session %s for a different submission", existing.ID))
+		fmt.Errorf("idempotency key already used by session %s for a different submission", claimed.ID))
 }
 
 func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJobRequest]) (*connect.Response[v1.StartJobResponse], error) {
 	msg := req.Msg
 
-	res, err := s.startJob(ctx, startJobParams{
+	p := startJobParams{
 		project:        msg.Project,
 		prompt:         msg.Prompt,
-		branch:         msg.Branch,
 		mode:           msg.Mode,
 		idempotencyKey: msg.IdempotencyKey,
 		procedure:      req.Spec().Procedure,
-	})
+	}
+	// An unset start_from is the project's default branch. A set-but-empty one
+	// is refused rather than folded into that default: a caller that meant to
+	// name a pull request and computed an empty reference would otherwise get a
+	// fresh job and a second pull request, which is the outcome naming the pull
+	// request was meant to avoid.
+	switch from := msg.GetStartFrom().(type) {
+	case *v1.StartJobRequest_Branch:
+		p.branch = strings.TrimSpace(from.Branch)
+	case *v1.StartJobRequest_PrRef:
+		p.prRef = strings.TrimSpace(from.PrRef)
+		if p.prRef == "" {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				errors.New("pr_ref is empty; omit start_from to run from the project's default branch"))
+		}
+	}
+
+	res, err := s.startJob(ctx, p)
 	if err != nil {
 		return nil, err
 	}
@@ -1824,6 +1909,7 @@ func sessionToProto(sess *session.Session) *v1.GetSessionResponse {
 		HeadBranch:      sess.HeadBranch,
 		BaseBranch:      sess.BaseBranch,
 		ParentSessionId: sess.ParentSessionID,
+		Continuation:    sess.Continuation,
 		CreatedAt:       timestamppb.New(sess.CreatedAt),
 		UpdatedAt:       timestamppb.New(sess.UpdatedAt),
 		QueuedAt:        timestamppb.New(sess.QueuedAt),

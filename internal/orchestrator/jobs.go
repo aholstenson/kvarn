@@ -7,9 +7,7 @@ import (
 
 	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
-	"github.com/aholstenson/kvarn/internal/agent/coding"
 	"github.com/aholstenson/kvarn/internal/observability/reqid"
-	"github.com/aholstenson/kvarn/internal/session"
 )
 
 // RetryJob resubmits the request a finished session was created from. It runs
@@ -19,12 +17,10 @@ import (
 // as the original — the project still readable, the key still scoped to it, the
 // backlog not full.
 //
-// Which entry point depends on what the session left behind. A session with no
-// pull request never got that far, so retrying it is a fresh job. A feedback
-// run's retry is another feedback run against the same pull request. A fresh
-// job that did open a pull request is refused: resubmitting it would open a
-// second one for the same task, which is exactly what the restart rules
-// elsewhere exist to prevent.
+// The resubmission starts from wherever the original did, which the session
+// records: a run submitted against a pull request is retried against that same
+// pull request, and a run submitted against a branch is retried against that
+// branch.
 func (s *Service) RetryJob(ctx context.Context, req *connect.Request[v1.RetryJobRequest]) (*connect.Response[v1.RetryJobResponse], error) {
 	if s.sessionMgr == nil {
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
@@ -54,45 +50,40 @@ func (s *Service) RetryJob(ctx context.Context, req *connect.Request[v1.RetryJob
 
 	log := reqid.LoggerFrom(ctx).With("project", sess.ProjectName, "retry_of", sess.ID)
 
-	var retried *session.Session
-	switch {
-	case sess.PRRef == "":
-		// No idempotency key is carried over: a retry is an explicit request for
-		// a second run of a job that already finished, which is the opposite of
-		// what the original key claimed.
-		var res *submissionResult
-		res, err = s.startJob(ctx, startJobParams{
-			project:   sess.ProjectName,
-			prompt:    prompt,
-			branch:    sess.BaseBranch,
-			mode:      sess.Mode,
-			procedure: req.Spec().Procedure,
-		})
-		if res != nil {
-			retried = res.session
-		}
-	case sess.Mode == coding.ModeFeedback.Name:
-		// As above, no idempotency key is carried over: this is a deliberate
-		// second run, not a replay of the first.
-		var res *submissionResult
-		res, err = s.submitFeedback(ctx, submitFeedbackParams{
-			project:   sess.ProjectName,
-			prRef:     sess.PRRef,
-			feedback:  prompt,
-			mode:      sess.Mode,
-			procedure: req.Spec().Procedure,
-		})
-		if res != nil {
-			retried = res.session
-		}
-	default:
+	// A fresh job that got as far as opening a pull request is refused:
+	// resubmitting it would open a second one for the same task, which is what
+	// the restart rules elsewhere exist to prevent. Continuing that pull request
+	// is a different submission, and the caller can make it directly.
+	if !sess.Continuation && sess.PRRef != "" {
 		return nil, connect.NewError(connect.CodeFailedPrecondition,
-			fmt.Errorf("session %s already opened pull request %s; continue it with feedback rather than retrying",
+			fmt.Errorf("session %s already opened pull request %s; start a job against that pull request rather than retrying this one",
 				sess.ID, sess.PRRef))
 	}
+
+	// The retry starts where the original started, which is the one thing a
+	// retry must not re-derive: a continuation resubmitted as a fresh job would
+	// open a second pull request beside the one it was meant to revise.
+	//
+	// No idempotency key is carried over: a retry is an explicit request for a
+	// second run of a job that already finished, which is the opposite of what
+	// the original key claimed.
+	p := startJobParams{
+		project:   sess.ProjectName,
+		prompt:    prompt,
+		mode:      sess.Mode,
+		procedure: req.Spec().Procedure,
+	}
+	if sess.Continuation {
+		p.prRef = sess.PRRef
+	} else {
+		p.branch = sess.BaseBranch
+	}
+
+	res, err := s.startJob(ctx, p)
 	if err != nil {
 		return nil, err
 	}
+	retried := res.session
 
 	log.Info("job retried", "session_id", retried.ID, "mode", retried.Mode)
 

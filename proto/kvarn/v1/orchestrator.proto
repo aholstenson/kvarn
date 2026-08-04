@@ -5,45 +5,39 @@ package kvarn.v1;
 import "google/protobuf/timestamp.proto";
 import "kvarn/v1/bridge.proto";
 
+// StartJobRequest submits one agent run. Where the run begins decides the rest
+// of its shape, so that choice is the request's only branching input: from a
+// branch the agent opens a pull request, from a pull request it pushes a
+// follow-up commit to the one already open.
 message StartJobRequest {
   string project = 1;
   string prompt = 2;
-  string branch = 3;
+  // Optional; defaults to "feedback" when continuing a pull request and to
+  // "auto" otherwise.
   string mode = 4;
   // Optional caller-chosen key that makes submission safe to retry: a second
   // request carrying the same key within the same project returns the session
-  // the first one created instead of starting a second run. Reusing a key with
-  // a different prompt, branch or mode is an error.
+  // the first one created instead of starting a second run. Reusing a key for a
+  // different prompt, mode or starting point is an error.
   string idempotency_key = 5;
+
+  // Where the run begins. The two are alternatives rather than a pair: a
+  // continuation takes its base branch from the pull request, so naming both
+  // would be naming the same thing twice and risking disagreement.
+  oneof start_from {
+    // Clone this branch and open a pull request against it. Unset means the
+    // project's default branch, which is also what an unset start_from means.
+    string branch = 3;
+    // Continue this pull request: run on its head branch and push a follow-up
+    // commit back to it, opening nothing new. Opaque to kvarn; interpreted by
+    // the project's forge.
+    string pr_ref = 6;
+  }
 }
 
 message StartJobResponse {
   string session_id = 1;
   // True when the request matched an existing idempotency key and no new job
-  // was started, so a caller can tell a retry that landed from one that raced.
-  bool duplicate = 2;
-}
-
-// SubmitFeedbackRequest continues work on an existing pull request: the agent
-// runs against the PR's head branch and pushes a follow-up commit to it.
-message SubmitFeedbackRequest {
-  string project = 1;
-  // Opaque to kvarn; interpreted by the project's forge.
-  string pr_ref = 2;
-  string feedback = 3;
-  // Optional; defaults to "feedback".
-  string mode = 4;
-  // Optional caller-chosen key that makes submission safe to retry: a second
-  // request carrying the same key within the same project returns the session
-  // the first one created instead of starting a second run against the pull
-  // request. Reusing a key with different feedback, pull request or mode is an
-  // error.
-  string idempotency_key = 5;
-}
-
-message SubmitFeedbackResponse {
-  string session_id = 1;
-  // True when the request matched an existing idempotency key and no new run
   // was started, so a caller can tell a retry that landed from one that raced.
   bool duplicate = 2;
 }
@@ -78,11 +72,11 @@ message GetSessionResponse {
   CostReport cost = 9;
   // Pull request the session works on: the forge-opaque ref, the branch the
   // commits land on, and the branch it targets. Populated once a fresh job
-  // opens its PR, and from the start for a feedback run.
+  // opens its PR, and from the start for a continuation.
   string pr_ref = 10;
   string head_branch = 11;
   string base_branch = 12;
-  // Session this one continues from, when it was started as a feedback run.
+  // Session this one continues from, when it was started as a continuation.
   // Empty when there was no parent or the parent has been pruned.
   string parent_session_id = 13;
   // When the submission was accepted, and when the session was last written.
@@ -97,6 +91,10 @@ message GetSessionResponse {
   // one means a restart returned it to the backlog.
   int32 priority = 17;
   int32 attempts = 18;
+  // True when the job was submitted against an existing pull request rather
+  // than asked to open one. pr_ref does not answer this on its own: a fresh
+  // job acquires one the moment it opens its pull request.
+  bool continuation = 19;
 }
 
 // CostReport carries accumulated LLM spend for a job: totals across all
@@ -331,7 +329,7 @@ message CancelJobsResponse {
 // history is a record of what happened, and a retry is a new thing happening.
 message RetryJobRequest {
   string session_id = 1;
-  // Replaces the original prompt (or feedback) when set.
+  // Replaces the original prompt when set.
   string prompt = 2;
 }
 
@@ -461,7 +459,6 @@ message ListQueueResponse {
 
 service OrchestratorService {
   rpc StartJob(StartJobRequest) returns (StartJobResponse);
-  rpc SubmitFeedback(SubmitFeedbackRequest) returns (SubmitFeedbackResponse);
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
   rpc CancelJobs(CancelJobsRequest) returns (CancelJobsResponse);
   rpc RetryJob(RetryJobRequest) returns (RetryJobResponse);

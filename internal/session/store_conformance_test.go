@@ -176,6 +176,27 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 			Expect(got.HeadBranch).To(Equal("kvarn/renamed"))
 		})
 
+		It("round-trips the continuation marker", func() {
+			cont := makeSession("cont", "proj", session.StatePending, base)
+			cont.PRRef = "42"
+			cont.Continuation = true
+			Expect(store.CreateSession(ctx, cont)).To(Succeed())
+
+			// A fresh job that has opened its pull request carries a PR ref too,
+			// so the marker is what tells the two apart once both have one.
+			fresh := makeSession("fresh", "proj", session.StatePending, base)
+			fresh.PRRef = "43"
+			Expect(store.CreateSession(ctx, fresh)).To(Succeed())
+
+			got, err := store.GetSession(ctx, "cont")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.Continuation).To(BeTrue())
+
+			got, err = store.GetSession(ctx, "fresh")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.Continuation).To(BeFalse())
+		})
+
 		It("filters by PR ref, alone and combined with active-only", func() {
 			onPR := makeSession("on-pr", "proj", session.StateCompleted, base.Add(1*time.Minute))
 			onPR.PRRef = "42"

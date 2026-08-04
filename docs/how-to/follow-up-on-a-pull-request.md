@@ -1,41 +1,42 @@
 # Follow up on a pull request
 
 A job that opened a pull request is finished, but the review that follows is
-not. `kvarn feedback` continues work on an **existing** PR: it clones that PR's
-head branch, runs the agent with your feedback as the task, pushes a follow-up
-commit to the same branch, and posts a comment. No second PR is opened and the
-title and body are left alone.
+not. `kvarn jobs start --pr-ref` continues work on an **existing** PR: it clones
+that PR's head branch, runs the agent with your prompt as the task, pushes a
+follow-up commit to the same branch, and posts a comment. No second PR is opened
+and the title and body are left alone.
 
 ```sh
-kvarn feedback my-project 1234 "Handle the empty-input case and add a test for it"
+kvarn jobs start my-project --pr-ref 1234 "Handle the empty-input case and add a test for it"
 ```
 
-`kvarn jobs start` keeps its own meaning — clone the base branch, open a new PR.
-The two never share an entry point.
+Continuing a pull request is not a separate command, because it is not a
+separate kind of work: the same job, run against a starting point that already
+exists. Without `--pr-ref` the same command clones a branch and opens a new PR.
+Everything else — modes, cost caps, watching, cancelling, retrying, the queue —
+behaves the same either way.
 
 ## The PR reference
 
-The second argument is in the forge's own format. For GitHub that is the PR
-number; Kvarn itself treats it as opaque, and each forge interprets it.
+`--pr-ref` is in the forge's own format. For GitHub that is the PR number; Kvarn
+itself treats it as opaque, and each forge interprets it.
 
 ## What the agent is given
 
-The feedback run's task is a context pack: the original task (omitted if that
-session has been pruned), the current pull request, a best-effort diff (capped
-at 256 KiB), and your feedback. The session stores your raw feedback as its
-prompt, so `GetSession` shows what was actually asked rather than the assembled
-pack.
+The run's task is a context pack: the original task (omitted if that session has
+been pruned), the current pull request, a best-effort diff (capped at 256 KiB),
+and your prompt. The session stores your raw prompt, so `GetSession` shows what
+was actually asked rather than the assembled pack.
 
-Cost caps and validation retries come from the `feedback` mode like any other —
-see [Control job costs](control-job-costs.md):
+`--pr-ref` selects the `feedback` mode by default, and nothing more: `--mode`
+overrides it if you want, say, a `review` pass over the PR instead. Cost caps
+and validation retries come from whichever mode ends up running — see
+[Control job costs](control-job-costs.md):
 
 ```toml
 [projects.my-project.jobs.feedback]
 max_cost_usd = 3.0
 ```
-
-`--mode` overrides the mode if you want, say, a `review` pass over the PR
-instead.
 
 ## What gets rejected, and why
 
@@ -47,7 +48,7 @@ leaves no trace:
 | No forge configured, or the ref is unreadable | Nothing to push to. |
 | The PR is not open | |
 | The PR head is in a fork | Pushing to a branch in another repository needs the maintainer-edit flag, which an org-scoped App installation token cannot use. |
-| Another feedback run is in flight for the same PR | Named in the error. One run per PR at a time. |
+| Another run is in flight for the same PR | Named in the error. One run per PR at a time. |
 
 Just before pushing, the PR head is re-read; if it moved underneath the run, the
 run fails rather than pushing over someone else's work.
@@ -57,14 +58,15 @@ one-run-per-PR lock can never be stuck.
 
 ## Lineage
 
-A feedback run is a **new session** — terminal states stay terminal. It records
-`parent_session_id`, resolved by finding the oldest session on the same PR.
-Nothing depends on that session still existing; retention may have pruned it.
+Continuing a pull request creates a **new session** — terminal states stay
+terminal. It records `parent_session_id`, resolved by finding the oldest session
+on the same PR. Nothing depends on that session still existing; retention may
+have pruned it.
 
 ## Watching a run
 
-Both `jobs start` and `feedback` print the session ID and return. Pass `--watch`
-to stream the session to your terminal until it reaches a terminal state.
+`jobs start` prints the session ID and returns. Pass `--watch` to stream the
+session to your terminal until it reaches a terminal state.
 
 A session you did not follow at the time can be picked up later:
 `kvarn jobs watch <session-id>` attaches to a run in progress, and

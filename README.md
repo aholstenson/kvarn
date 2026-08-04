@@ -143,7 +143,7 @@ kvarn jobs cancel --project my-project --dry-run  # see what a sweep would stop
 kvarn jobs cancel --project my-project --state pending --reason "bad config"
 ```
 
-A retry creates a new session and leaves the original as the record of what happened. A job that already opened a pull request is not retried — that would open a second one — so continue it with `kvarn feedback` instead.
+A retry creates a new session and leaves the original as the record of what happened, and starts where the original started. A job that began from a branch and went on to open a pull request is not retried — that would open a second one — so continue it with `kvarn jobs start --pr-ref` instead.
 
 When a job is not starting, `kvarn queue` says whether the host is full or others are simply ahead of it:
 

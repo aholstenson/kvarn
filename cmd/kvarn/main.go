@@ -2,7 +2,6 @@ package main
 
 import (
 	cachecmd "github.com/aholstenson/kvarn/internal/cmd/cache"
-	"github.com/aholstenson/kvarn/internal/cmd/feedback"
 	imagecmd "github.com/aholstenson/kvarn/internal/cmd/image"
 	imagecachecmd "github.com/aholstenson/kvarn/internal/cmd/imagecache"
 	jobscmd "github.com/aholstenson/kvarn/internal/cmd/jobs"
@@ -19,7 +18,6 @@ import (
 
 type CLI struct {
 	Orchestrator orchestrator.Cmd  `cmd:"" help:"Run the orchestrator."`
-	Feedback     feedback.Cmd      `cmd:"" help:"Continue work on an existing pull request."`
 	Jobs         jobscmd.Cmd       `cmd:"" help:"Start, list, inspect and manage jobs."`
 	Queue        queuecmd.Cmd      `cmd:"" help:"Inspect the job queue."`
 	Secrets      secrets.Cmd       `cmd:"" help:"Manage per-project secrets."`

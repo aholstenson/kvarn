@@ -79,8 +79,8 @@ delimiter. Only `sha256(secret)` is persisted.
 ## Scope enforcement
 
 Clients send the token as `Authorization: Bearer <token>`. Every project-scoped
-RPC (`StartJob`, `SubmitFeedback`, `CancelJob`, `GetSession`, `WatchSession`,
-`ListSessions`) checks the key's `projects` list.
+RPC (`StartJob`, `CancelJob`, `GetSession`, `WatchSession`, `ListSessions`)
+checks the key's `projects` list.
 
 `SetDrain` checks `capabilities` instead: it has no project to scope it to.
 `CancelJobs` checks both — its project scope as usual, plus the capability when

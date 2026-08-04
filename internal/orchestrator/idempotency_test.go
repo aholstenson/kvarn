@@ -90,7 +90,7 @@ var _ = Describe("StartJob idempotency", func() {
 		second, err := svc.StartJob(ctx, connect.NewRequest(&v1.StartJobRequest{
 			Project:        "alpha",
 			Prompt:         "fix the bug",
-			Branch:         "main",
+			StartFrom:      &v1.StartJobRequest_Branch{Branch: "main"},
 			IdempotencyKey: "req-1",
 		}))
 		Expect(err).NotTo(HaveOccurred())

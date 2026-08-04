@@ -66,7 +66,7 @@ func (c *capturingConversation) Summarize(_ context.Context) (*agent.Result, err
 
 func (c *capturingConversation) Close() error { return nil }
 
-var _ = Describe("SubmitFeedback", func() {
+var _ = Describe("StartJob continuing a pull request", func() {
 	var (
 		client        kvarnv1connect.OrchestratorServiceClient
 		server        *http.Server
@@ -232,11 +232,11 @@ var _ = Describe("SubmitFeedback", func() {
 		os.RemoveAll(tmpDir)
 	})
 
-	submit := func(project, prRef, feedback string) (*connect.Response[v1.SubmitFeedbackResponse], error) {
-		return client.SubmitFeedback(context.Background(), connect.NewRequest(&v1.SubmitFeedbackRequest{
-			Project:  project,
-			PrRef:    prRef,
-			Feedback: feedback,
+	submit := func(project, prRef, feedback string) (*connect.Response[v1.StartJobResponse], error) {
+		return client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			Project:   project,
+			Prompt:    feedback,
+			StartFrom: &v1.StartJobRequest_PrRef{PrRef: prRef},
 		}))
 	}
 
@@ -413,12 +413,32 @@ var _ = Describe("SubmitFeedback", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
+	It("retries a continuation against the same pull request rather than as a fresh job", func() {
+		first, err := submit("test-project", "42", "rename the helper")
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+
+		retried, err := client.RetryJob(context.Background(), connect.NewRequest(&v1.RetryJobRequest{
+			SessionId: first.Msg.SessionId,
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(retried.Msg.SessionId).NotTo(Equal(first.Msg.SessionId))
+
+		// The retry is a continuation of the same pull request. Were the marker
+		// not persisted, the session's PR ref would read as one this job opened
+		// and the retry would be refused outright.
+		sess, err := sessionMgr.Get(context.Background(), retried.Msg.SessionId)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sess.Continuation).To(BeTrue())
+		Expect(sess.PRRef).To(Equal("42"))
+	})
+
 	Describe("idempotency", func() {
-		submitWithKey := func(prRef, feedback, key string) (*connect.Response[v1.SubmitFeedbackResponse], error) {
-			return client.SubmitFeedback(context.Background(), connect.NewRequest(&v1.SubmitFeedbackRequest{
+		submitWithKey := func(prRef, feedback, key string) (*connect.Response[v1.StartJobResponse], error) {
+			return client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
 				Project:        "test-project",
-				PrRef:          prRef,
-				Feedback:       feedback,
+				Prompt:         feedback,
+				StartFrom:      &v1.StartJobRequest_PrRef{PrRef: prRef},
 				IdempotencyKey: key,
 			}))
 		}

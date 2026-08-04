@@ -116,6 +116,7 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*Session, er
 		KeyID:           params.KeyID,
 		Priority:        params.Priority,
 		IdempotencyKey:  params.IdempotencyKey,
+		Continuation:    params.Continuation,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		// A new session enters the backlog at creation, so its queue age starts

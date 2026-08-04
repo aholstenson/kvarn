@@ -143,14 +143,21 @@ type Session struct {
 	Error          string
 	PullRequestURL string
 	// PRRef identifies the pull request this session works on, in the forge's
-	// own format. Set at creation for a feedback run and at submission for a
+	// own format. Set at creation for a continuation and at submission for a
 	// fresh job; empty when no PR was opened.
 	PRRef string
+	// Continuation records that the submission named an existing pull request
+	// to work on. PRRef cannot carry this by itself: a fresh job acquires one
+	// as soon as it opens its pull request, so by the time a run has finished
+	// the two kinds look alike. It is read where that difference decides
+	// something — dispatch builds a continuation's context pack from the PR,
+	// and a retry resubmits the same kind of run it is retrying.
+	Continuation bool
 	// HeadBranch is the branch the session's commits land on, BaseBranch the
 	// branch the PR targets.
 	HeadBranch string
 	BaseBranch string
-	// ParentSessionID records lineage for a feedback run. The parent may
+	// ParentSessionID records lineage for a continuation. The parent may
 	// already have been pruned by retention; nothing depends on it existing.
 	ParentSessionID string
 	// Cost is the LLM spend snapshot for the run. Updated on warning, on
@@ -366,6 +373,9 @@ type CreateParams struct {
 	ParentSessionID string
 	KeyID           string
 	Priority        int
+	// Continuation marks a submission that named an existing pull request; see
+	// the field of the same name on Session.
+	Continuation bool
 	// IdempotencyKey claims the submission for the caller's key; see the field
 	// of the same name on Session. Empty for a submission with no key.
 	IdempotencyKey string

@@ -351,13 +351,10 @@ func (s *Service) resolveSpec(ctx context.Context, sess *session.Session) (jobSp
 		baseBranch:  sess.BaseBranch,
 	}
 
-	// A pull request ref present on a session that has not run yet identifies a
-	// feedback run: a fresh job only acquires one at submission, long after it
-	// leaves the backlog.
-	if sess.PRRef == "" {
+	if !sess.Continuation {
 		return spec, nil
 	}
-	return s.resolveFeedbackSpec(ctx, sess, proj, spec)
+	return s.resolveContinuationSpec(ctx, sess, proj, spec)
 }
 
 // recheckKey re-validates the submitting API key at dispatch. The key's scopes
@@ -380,11 +377,11 @@ func (s *Service) recheckKey(ctx context.Context, sess *session.Session) error {
 	return nil
 }
 
-// resolveFeedbackSpec assembles a feedback run's context pack against the pull
-// request's current state. SubmitFeedback rejected the cases that can be known
+// resolveContinuationSpec assembles a continuation's context pack against the
+// pull request's current state. Submission rejected the cases that can be known
 // up front; they are re-checked here because a pull request can be merged,
 // closed or moved while its run waits in the backlog.
-func (s *Service) resolveFeedbackSpec(ctx context.Context, sess *session.Session, proj *project.Project, spec jobSpec) (jobSpec, error) {
+func (s *Service) resolveContinuationSpec(ctx context.Context, sess *session.Session, proj *project.Project, spec jobSpec) (jobSpec, error) {
 	fr, err := s.resolveForge(ctx, proj)
 	if err != nil {
 		return jobSpec{}, fmt.Errorf("resolve forge: %w", err)
