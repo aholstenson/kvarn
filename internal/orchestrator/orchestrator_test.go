@@ -1293,18 +1293,16 @@ var _ = Describe("StartJob admission scheduler", func() {
 		sessionMgr session.Manager
 		listener   net.Listener
 		tmpDir     string
-		gates      []chan struct{}
-		counter    atomic.Int32
+		// release hands out one token per blocked sandbox. Tokens are not
+		// addressed to a particular job: which admitted job reaches the
+		// factory first is a goroutine race, so the test can only release
+		// "one running job", never a named one.
+		release chan struct{}
 	)
 
 	BeforeEach(func() {
 		sessionMgr = session.NewManager(session.NewMemStore())
-		gates = []chan struct{}{
-			make(chan struct{}),
-			make(chan struct{}),
-			make(chan struct{}),
-		}
-		counter.Store(0)
+		release = make(chan struct{}, 3)
 
 		var err error
 		listener, err = net.Listen("tcp", "127.0.0.1:0")
@@ -1330,19 +1328,16 @@ var _ = Describe("StartJob admission scheduler", func() {
 		}
 		mockForgeInst := &mockForge{scmImpl: &mockSCM{}}
 
-		// Factory: emit ProvisioningEvent, then block on the per-job gate so
+		// Factory: emit ProvisioningEvent, then block for a release token so
 		// the slot stays occupied while the test observes admission ordering.
 		factory := func(ctx context.Context, opts sandbox.Opts) (orchestrator.Sandbox, error) {
-			idx := int(counter.Add(1) - 1)
 			if opts.OnEvent != nil {
 				opts.OnEvent(sandbox.ProvisioningEvent{})
 			}
-			if idx < len(gates) {
-				select {
-				case <-gates[idx]:
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				}
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
 			}
 
 			wsDir, err := os.MkdirTemp("", "sched-ws-*")
@@ -1414,14 +1409,8 @@ var _ = Describe("StartJob admission scheduler", func() {
 	})
 
 	AfterEach(func() {
-		// Best-effort: drain any unreleased gates so blocked goroutines exit.
-		for _, g := range gates {
-			select {
-			case <-g:
-			default:
-				close(g)
-			}
-		}
+		// Unblock any sandbox still waiting for a token so its goroutine exits.
+		close(release)
 		server.Close()
 		os.RemoveAll(tmpDir)
 	})
@@ -1433,6 +1422,18 @@ var _ = Describe("StartJob admission scheduler", func() {
 				return ""
 			}
 			return string(s.State)
+		}
+	}
+
+	completedAmong := func(sids ...string) func() int {
+		return func() int {
+			n := 0
+			for _, sid := range sids {
+				if stateOf(sid)() == "completed" {
+					n++
+				}
+			}
+			return n
 		}
 	}
 
@@ -1458,15 +1459,17 @@ var _ = Describe("StartJob admission scheduler", func() {
 		Expect(sess.Message).To(ContainSubstring("Position 1"))
 		Expect(sess.Message).To(ContainSubstring("2 vCPU"))
 
-		// Unblock session 1: it completes, releases its lease, and session 3
-		// is admitted.
-		close(gates[0])
-		Eventually(stateOf(ids[0])).Should(Equal("completed"))
+		// Hand out one token: exactly one of the admitted jobs completes and
+		// releases its lease, which lets session 3 in. Which of the two it is
+		// is a race the test does not control, so assert on the count.
+		release <- struct{}{}
+		Eventually(completedAmong(ids[0], ids[1])).Should(Equal(1))
 		Eventually(stateOf(ids[2])).ShouldNot(Equal("queued"))
 
 		// Let the rest run to completion so the test cleans up.
-		close(gates[1])
-		close(gates[2])
+		release <- struct{}{}
+		release <- struct{}{}
+		Eventually(stateOf(ids[0])).Should(Equal("completed"))
 		Eventually(stateOf(ids[1])).Should(Equal("completed"))
 		Eventually(stateOf(ids[2])).Should(Equal("completed"))
 	})
