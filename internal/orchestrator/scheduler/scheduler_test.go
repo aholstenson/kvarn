@@ -204,7 +204,7 @@ var _ = Describe("Scheduler", func() {
 		l2, _ := s.Acquire(context.Background(), req(2000, 4, 16))
 
 		var (
-			mu       sync.Mutex
+			mu         sync.Mutex
 			positionsA []int
 			positionsB []int
 		)

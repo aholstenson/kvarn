@@ -14,7 +14,9 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
+	"time"
 )
 
 // ErrTooLarge is returned by Acquire when a request's footprint exceeds the
@@ -34,17 +36,20 @@ type Options struct {
 	// While measured free space is below it no request is admitted, whatever
 	// the accounting pool says. Zero disables the guard.
 	DiskFloorBytes uint64
+	// Policy chooses which queued request is admitted next. Nil means FIFO.
+	Policy Policy
 }
 
 // Scheduler admits Requests against a fixed Capacity pool, queueing those that
-// don't fit. Strict FIFO: the head of the queue blocks every later waiter until
-// it can be admitted, even if a later waiter would fit in the current free
-// capacity. Replace tryAdmitLocked to swap in a smarter policy.
+// don't fit. It owns the mechanics — blocking, cancellation, leases, the host
+// disk guard — while the admission order is the Policy's, defaulting to FIFO.
 type Scheduler struct {
 	mu        sync.Mutex
 	total     Capacity
 	used      Capacity
+	running   map[Tenant]Usage
 	queue     []*waiter
+	policy    Policy
 	cpuOC     float64
 	diskOC    float64
 	unbounded bool
@@ -59,16 +64,23 @@ type Scheduler struct {
 }
 
 type waiter struct {
-	req     Request
-	done    chan struct{}
-	granted bool
+	req        Request
+	done       chan struct{}
+	enqueuedAt time.Time
+	granted    bool
 }
 
 // New constructs a bounded scheduler. The Total in opts has CPU and disk
 // overcommit already applied by the caller.
 func New(opts Options) *Scheduler {
+	p := opts.Policy
+	if p == nil {
+		p = FIFO{}
+	}
 	return &Scheduler{
 		total:     opts.Total,
+		running:   make(map[Tenant]Usage),
+		policy:    p,
 		cpuOC:     opts.CPUOvercommit,
 		diskOC:    opts.DiskOvercommit,
 		diskPath:  opts.DiskPath,
@@ -103,18 +115,23 @@ func (s *Scheduler) Acquire(ctx context.Context, req Request) (Lease, error) {
 		return nil, ErrTooLarge
 	}
 
-	// Fast path: no one waiting and the request fits right now.
-	if len(s.queue) == 0 && s.diskGateOpenLocked() && s.freeLocked().fits(req) {
-		s.used.CPUMillis += req.CPUMillis
-		s.used.MemBytes += req.MemBytes
-		s.used.DiskBytes += req.DiskBytes
+	// Every request joins the queue, even one that fits an idle pool. A fast
+	// path around the policy would be a fast path around whatever the policy
+	// enforces — a tenant's concurrency cap, a reservation held for the head —
+	// and would apply exactly when the pool is empty enough for those to
+	// matter. The extra allocation is nothing next to booting a VM.
+	w := &waiter{req: req, done: make(chan struct{}), enqueuedAt: time.Now()}
+	s.queue = append(s.queue, w)
+	notes := s.tryAdmitLocked()
+	if w.granted {
 		s.mu.Unlock()
+		fireNotifications(notes)
 		return s.newLease(req), nil
 	}
-
-	w := &waiter{req: req, done: make(chan struct{})}
-	s.queue = append(s.queue, w)
-	notes := s.collectNotificationsLocked()
+	if notes == nil {
+		// Nothing moved, so tell the new arrival where it landed.
+		notes = s.collectNotificationsLocked()
+	}
 	s.mu.Unlock()
 
 	fireNotifications(notes)
@@ -127,7 +144,7 @@ func (s *Scheduler) Acquire(ctx context.Context, req Request) (Lease, error) {
 		if w.granted {
 			// Admitted between the channel close and our select picking ctx;
 			// give the capacity back so it isn't leaked.
-			s.deductLocked(req)
+			s.creditLocked(req.Tenant, req.capacity())
 			notes := s.tryAdmitLocked()
 			s.mu.Unlock()
 			fireNotifications(notes)
@@ -157,6 +174,21 @@ func (s *Scheduler) Snapshot() (used, free Capacity, queueLen int) {
 	return s.used, s.freeLocked(), len(s.queue)
 }
 
+// TenantUsage returns a copy of what each tenant currently holds. Only tenants
+// with a running job appear.
+func (s *Scheduler) TenantUsage() map[Tenant]Usage {
+	if s.unbounded {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[Tenant]Usage, len(s.running))
+	for t, u := range s.running {
+		out[t] = u
+	}
+	return out
+}
+
 func (s *Scheduler) freeLocked() Capacity {
 	return Capacity{
 		CPUMillis: s.total.CPUMillis - s.used.CPUMillis,
@@ -165,41 +197,90 @@ func (s *Scheduler) freeLocked() Capacity {
 	}
 }
 
-func (s *Scheduler) deductLocked(req Request) {
-	s.used.CPUMillis -= req.CPUMillis
-	s.used.MemBytes -= req.MemBytes
-	s.used.DiskBytes -= req.DiskBytes
+// chargeLocked books capacity against the pool and its tenant.
+func (s *Scheduler) chargeLocked(t Tenant, c Capacity) {
+	s.used.CPUMillis += c.CPUMillis
+	s.used.MemBytes += c.MemBytes
+	s.used.DiskBytes += c.DiskBytes
+
+	u := s.running[t]
+	u.CPUMillis += c.CPUMillis
+	u.MemBytes += c.MemBytes
+	u.DiskBytes += c.DiskBytes
+	u.Jobs++
+	s.running[t] = u
 }
 
-func (s *Scheduler) release(granted Capacity) {
+// creditLocked reverses chargeLocked. A tenant that drops to zero is deleted
+// rather than left at zero, so the map tracks who is running now instead of
+// growing once per project the host has ever seen.
+func (s *Scheduler) creditLocked(t Tenant, c Capacity) {
+	s.used.CPUMillis -= c.CPUMillis
+	s.used.MemBytes -= c.MemBytes
+	s.used.DiskBytes -= c.DiskBytes
+
+	u := s.running[t]
+	u.CPUMillis -= c.CPUMillis
+	u.MemBytes -= c.MemBytes
+	u.DiskBytes -= c.DiskBytes
+	u.Jobs--
+	if u.Jobs <= 0 {
+		delete(s.running, t)
+		return
+	}
+	s.running[t] = u
+}
+
+func (s *Scheduler) release(t Tenant, granted Capacity) {
 	s.mu.Lock()
-	s.used.CPUMillis -= granted.CPUMillis
-	s.used.MemBytes -= granted.MemBytes
-	s.used.DiskBytes -= granted.DiskBytes
+	s.creditLocked(t, granted)
 	notes := s.tryAdmitLocked()
 	s.mu.Unlock()
 	fireNotifications(notes)
 }
 
-// tryAdmitLocked drains the head of the queue while it fits, then collects
-// position-change notifications for the remaining waiters. Strict FIFO is
-// enforced here: if the head doesn't fit we stop, even if later waiters would.
+// tryAdmitLocked asks the policy for waiters to admit until it declines, then
+// collects position-change notifications for whoever is left. The policy sees a
+// State refreshed after each admission, so it decides against the capacity that
+// actually remains rather than the capacity it started with.
 func (s *Scheduler) tryAdmitLocked() []notification {
 	if !s.diskGateOpenLocked() {
 		return nil
 	}
+
+	// One Waiting slice for the whole drain, kept in step with s.queue as
+	// entries leave it.
+	view := make([]Waiting, len(s.queue))
+	for i, w := range s.queue {
+		view[i] = Waiting{Request: w.req, EnqueuedAt: w.enqueuedAt}
+	}
+
 	admitted := 0
 	for len(s.queue) > 0 {
-		head := s.queue[0]
-		if !s.freeLocked().fits(head.req) {
+		i := s.policy.Next(State{
+			Free:    s.freeLocked(),
+			Total:   s.total,
+			Queue:   view,
+			Running: s.running,
+		})
+		if i < 0 || i >= len(s.queue) {
 			break
 		}
-		s.used.CPUMillis += head.req.CPUMillis
-		s.used.MemBytes += head.req.MemBytes
-		s.used.DiskBytes += head.req.DiskBytes
-		head.granted = true
-		s.queue = s.queue[1:]
-		close(head.done)
+		// A policy is pluggable, so its answer is checked rather than trusted:
+		// admitting a request that does not fit would drive used past total and
+		// underflow the unsigned free capacity on release.
+		w := s.queue[i]
+		if !s.freeLocked().Fits(w.req) {
+			slog.Error("admission policy chose a request that does not fit; ignoring",
+				"index", i, "cpu_millis", w.req.CPUMillis, "mem_bytes", w.req.MemBytes, "disk_bytes", w.req.DiskBytes)
+			break
+		}
+
+		s.chargeLocked(w.req.Tenant, w.req.capacity())
+		w.granted = true
+		s.queue = append(s.queue[:i], s.queue[i+1:]...)
+		view = append(view[:i], view[i+1:]...)
+		close(w.done)
 		admitted++
 	}
 	if admitted == 0 {
@@ -247,11 +328,8 @@ func fireNotifications(notes []notification) {
 
 func (s *Scheduler) newLease(req Request) Lease {
 	return &realLease{
-		s: s,
-		granted: Capacity{
-			CPUMillis: req.CPUMillis,
-			MemBytes:  req.MemBytes,
-			DiskBytes: req.DiskBytes,
-		},
+		s:       s,
+		tenant:  req.Tenant,
+		granted: req.capacity(),
 	}
 }

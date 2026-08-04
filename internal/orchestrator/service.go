@@ -408,6 +408,16 @@ func (s *Service) Shutdown(ctx context.Context) {
 	}
 }
 
+// callerKeyID returns the API key behind ctx, or "" when auth is disabled and
+// no identity was injected. Unauthenticated jobs share the empty key, which is
+// the honest reading: without auth there is no caller to tell apart.
+func callerKeyID(ctx context.Context) string {
+	if id, ok := auth.IdentityFrom(ctx); ok {
+		return id.KeyID
+	}
+	return ""
+}
+
 // authorizeProject enforces that the authenticated caller is allowed to act on
 // the given project. It is a no-op when auth is disabled (local dev). When auth
 // is enabled the interceptor has already injected an Identity; a missing one is
@@ -485,6 +495,7 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 	go s.runJob(rootCtx, cancelJob, jobSpec{
 		requestID:   reqID,
 		sessionID:   sess.ID,
+		keyID:       callerKeyID(ctx),
 		proj:        proj,
 		mode:        mode,
 		agentPrompt: msg.Prompt,
@@ -510,8 +521,12 @@ type prTarget struct {
 // behavior: clone the base branch and open a new pull request. A non-nil pr
 // means continuing on that PR's head branch.
 type jobSpec struct {
-	requestID   string
-	sessionID   string
+	requestID string
+	sessionID string
+	// keyID is the API key that submitted the job, captured here because the
+	// job's context is detached from the request's and so carries no identity.
+	// Empty when auth is disabled.
+	keyID       string
 	proj        *project.Project
 	mode        *coding.Mode
 	agentPrompt string
@@ -759,6 +774,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		CPUMillis: uint64(cpuCount) * 1000,
 		MemBytes:  memBytes,
 		DiskBytes: uint64(diskBytes),
+		Tenant:    scheduler.Tenant{Project: proj.Name, KeyID: spec.keyID},
 		OnWait: func(e scheduler.WaitEvent) {
 			need := fmt.Sprintf("need %d vCPU / %s memory / %s disk",
 				cpuCount, formatBytes(memBytes), formatBytes(uint64(diskBytes)))

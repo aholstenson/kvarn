@@ -154,6 +154,7 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.Su
 	go s.runJob(rootCtx, cancelJob, jobSpec{
 		requestID:   reqID,
 		sessionID:   sess.ID,
+		keyID:       callerKeyID(ctx),
 		proj:        proj,
 		mode:        mode,
 		agentPrompt: agentPrompt,

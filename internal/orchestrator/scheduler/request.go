@@ -11,8 +11,8 @@ type Capacity struct {
 	DiskBytes uint64
 }
 
-// fits reports whether req can be admitted against free.
-func (c Capacity) fits(req Request) bool {
+// Fits reports whether req can be admitted against the capacity in c.
+func (c Capacity) Fits(req Request) bool {
 	return req.CPUMillis <= c.CPUMillis &&
 		req.MemBytes <= c.MemBytes &&
 		req.DiskBytes <= c.DiskBytes
@@ -25,7 +25,20 @@ type Request struct {
 	CPUMillis uint64
 	MemBytes  uint64
 	DiskBytes uint64
-	OnWait    func(WaitEvent)
+	// Tenant attributes the request's capacity to whoever asked for it, so a
+	// Policy can weigh what one project or key already holds. Optional: an
+	// unset Tenant is accounted under the zero value.
+	Tenant Tenant
+	OnWait func(WaitEvent)
+}
+
+// capacity is the footprint the request occupies once admitted.
+func (r Request) capacity() Capacity {
+	return Capacity{
+		CPUMillis: r.CPUMillis,
+		MemBytes:  r.MemBytes,
+		DiskBytes: r.DiskBytes,
+	}
 }
 
 // WaitEvent is delivered to Request.OnWait when a waiter enqueues and when its
@@ -59,16 +72,19 @@ func (l *noopLease) Release()          {}
 func (l *noopLease) Granted() Capacity { return l.granted }
 
 // realLease is the bounded scheduler's lease. release is invoked at most once
-// thanks to sync.Once, so accidental double-release never double-credits.
+// thanks to sync.Once, so accidental double-release never double-credits. The
+// tenant is carried along so the release credits the same per-tenant total the
+// admission charged.
 type realLease struct {
 	s       *Scheduler
+	tenant  Tenant
 	granted Capacity
 	once    sync.Once
 }
 
 func (l *realLease) Release() {
 	l.once.Do(func() {
-		l.s.release(l.granted)
+		l.s.release(l.tenant, l.granted)
 	})
 }
 
