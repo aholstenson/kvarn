@@ -2,8 +2,16 @@ package session
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrIdempotencyConflict is returned by CreateSession when the session's
+// idempotency key is already held by another session in the same project. The
+// caller resolves it by reading that session back and returning it, which is
+// how the loser of a race between two copies of one retried request still ends
+// up describing the single job that was created.
+var ErrIdempotencyConflict = errors.New("idempotency key already used")
 
 // PersistedEvent is one durable entry in a session's monotonic event log.
 type PersistedEvent struct {
@@ -124,8 +132,16 @@ type ReconcileResult struct {
 // session records plus a per-session monotonic event log. Implementations need
 // not provide pub/sub — the Manager owns the live hub and layers replay on top.
 type Store interface {
+	// CreateSession persists a new session. It returns ErrIdempotencyConflict
+	// when the session carries an idempotency key another session in the same
+	// project already holds, so two concurrent submissions of one retried
+	// request settle in the store rather than both creating a job.
 	CreateSession(ctx context.Context, s *Session) error
 	GetSession(ctx context.Context, id string) (*Session, error)
+	// FindByIdempotencyKey returns the session holding key within project, or
+	// nil when none does. An empty key matches nothing: a submission without a
+	// key claims nothing and must never be handed back as somebody's retry.
+	FindByIdempotencyKey(ctx context.Context, project, key string) (*Session, error)
 	// UpdateSession persists the mutable fields of s (state, message, error,
 	// pull_request_url, pr_ref, head_branch, cost, updated_at). It never
 	// touches the event log.

@@ -62,6 +62,7 @@ type Row struct {
 	Priority        int
 	Attempts        int
 	QueuedAt        int64 // unix micros UTC
+	IdempotencyKey  string
 }
 
 // SessionToRow converts a Session into its persisted Row form, marshalling the
@@ -93,6 +94,7 @@ func SessionToRow(s *Session) (Row, error) {
 		Priority:        s.Priority,
 		Attempts:        s.Attempts,
 		QueuedAt:        ToMicros(s.QueuedAt),
+		IdempotencyKey:  s.IdempotencyKey,
 	}, nil
 }
 
@@ -125,6 +127,7 @@ func RowToSession(r Row) (*Session, error) {
 		Priority:        r.Priority,
 		Attempts:        r.Attempts,
 		QueuedAt:        FromMicros(r.QueuedAt),
+		IdempotencyKey:  r.IdempotencyKey,
 	}, nil
 }
 

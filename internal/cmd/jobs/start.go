@@ -19,6 +19,8 @@ type StartCmd struct {
 	Branch  string `help:"Branch override." default:""`
 	Mode    string `help:"Agent mode: auto, implement, fix, feedback, review, research." default:"auto"`
 	Watch   bool   `help:"Stream the session until it reaches a terminal state." negatable:""`
+
+	IdempotencyKey string `help:"Key that makes this submission replayable: resending it returns the session the first request created instead of starting a second job." default:""`
 }
 
 func (c *StartCmd) Run() error {
@@ -30,6 +32,8 @@ func (c *StartCmd) Run() error {
 		Prompt:  c.Prompt,
 		Branch:  c.Branch,
 		Mode:    c.Mode,
+
+		IdempotencyKey: c.IdempotencyKey,
 	}))
 	if err != nil {
 		return fmt.Errorf("start job: %w", err)
@@ -37,6 +41,9 @@ func (c *StartCmd) Run() error {
 
 	sessionID := resp.Msg.SessionId
 	fmt.Fprintf(os.Stdout, "Session: %s\n", sessionID)
+	if resp.Msg.Duplicate {
+		fmt.Fprintf(os.Stdout, "Idempotency key %q already started this job; no new job was submitted.\n", c.IdempotencyKey)
+	}
 
 	if !c.Watch {
 		return nil

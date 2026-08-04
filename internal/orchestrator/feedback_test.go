@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"connectrpc.com/connect"
@@ -410,5 +411,101 @@ var _ = Describe("SubmitFeedback", func() {
 
 		_, err = submit("test-project", "42", "also add a test")
 		Expect(err).NotTo(HaveOccurred())
+	})
+
+	Describe("idempotency", func() {
+		submitWithKey := func(prRef, feedback, key string) (*connect.Response[v1.SubmitFeedbackResponse], error) {
+			return client.SubmitFeedback(context.Background(), connect.NewRequest(&v1.SubmitFeedbackRequest{
+				Project:        "test-project",
+				PrRef:          prRef,
+				Feedback:       feedback,
+				IdempotencyKey: key,
+			}))
+		}
+
+		It("returns the first session when the same key is replayed after the run finished", func() {
+			first, err := submitWithKey("42", "rename the helper", "req-1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(first.Msg.Duplicate).To(BeFalse())
+			Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+
+			second, err := submitWithKey("42", "rename the helper", "req-1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(second.Msg.SessionId).To(Equal(first.Msg.SessionId))
+			Expect(second.Msg.Duplicate).To(BeTrue())
+
+			// The point of the key: one run, so one follow-up commit and one
+			// comment on the pull request.
+			Expect(activeSessions()).To(Equal(1))
+			mockScm.mu.Lock()
+			pushCalls := mockScm.pushCalls
+			mockScm.mu.Unlock()
+			Expect(pushCalls).To(Equal(1))
+			Expect(mockForgeInst.commentCalls).To(Equal(1))
+		})
+
+		It("returns the in-flight session rather than refusing the retry as a second run", func() {
+			gate = make(chan struct{})
+
+			first, err := submitWithKey("42", "rename the helper", "req-1")
+			Expect(err).NotTo(HaveOccurred())
+
+			// Without the key this is the "already running" rejection above.
+			// With it, the retry is asking about the very run that is holding
+			// the pull request, so it gets that run back.
+			second, err := submitWithKey("42", "rename the helper", "req-1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(second.Msg.SessionId).To(Equal(first.Msg.SessionId))
+			Expect(second.Msg.Duplicate).To(BeTrue())
+			Expect(activeSessions()).To(Equal(1))
+
+			close(gate)
+			Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+		})
+
+		It("matches a replay that spells the pull request the way the forge does not", func() {
+			// The forge resolves both spellings to the same pull request, so the
+			// replay is the same submission even though the request strings
+			// differ. Matching happens against the ref the forge returned.
+			alt := openPR()
+			mockForgeInst.pullRequests["#42"] = alt
+
+			first, err := submitWithKey("42", "rename the helper", "req-1")
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+
+			second, err := submitWithKey("#42", "rename the helper", "req-1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(second.Msg.SessionId).To(Equal(first.Msg.SessionId))
+			Expect(second.Msg.Duplicate).To(BeTrue())
+			Expect(activeSessions()).To(Equal(1))
+		})
+
+		It("starts a second run for a different key", func() {
+			first, err := submitWithKey("42", "rename the helper", "req-1")
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+
+			second, err := submitWithKey("42", "also add a test", "req-2")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(second.Msg.SessionId).NotTo(Equal(first.Msg.SessionId))
+			Expect(second.Msg.Duplicate).To(BeFalse())
+		})
+
+		It("refuses a key reused for different feedback", func() {
+			first, err := submitWithKey("42", "rename the helper", "req-1")
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+
+			_, err = submitWithKey("42", "something else entirely", "req-1")
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodeAlreadyExists))
+			Expect(activeSessions()).To(Equal(1))
+		})
+
+		It("rejects an oversized key", func() {
+			_, err := submitWithKey("42", "rename the helper", strings.Repeat("k", 256))
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
+			Expect(activeSessions()).To(Equal(0))
+		})
 	})
 })

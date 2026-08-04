@@ -23,6 +23,10 @@ type submitFeedbackParams struct {
 	prRef    string
 	feedback string
 	mode     string
+	// idempotencyKey, when set, makes the submission replayable: a second
+	// request carrying it returns the session the first one created. Empty for a
+	// caller that did not ask for the guarantee.
+	idempotencyKey string
 	// procedure names the RPC on whose behalf the submission is authorized, for
 	// the audit log that records a denial.
 	procedure string
@@ -34,7 +38,7 @@ type submitFeedbackParams struct {
 //
 // Every rejection happens before a session is created, so a refused request
 // leaves no trace.
-func (s *Service) submitFeedback(ctx context.Context, p submitFeedbackParams) (*session.Session, error) {
+func (s *Service) submitFeedback(ctx context.Context, p submitFeedbackParams) (*submissionResult, error) {
 	if err := s.authorizeProject(ctx, p.project, p.procedure); err != nil {
 		return nil, err
 	}
@@ -50,6 +54,10 @@ func (s *Service) submitFeedback(ctx context.Context, p submitFeedbackParams) (*
 	if strings.TrimSpace(p.feedback) == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("feedback is required"))
 	}
+	if len(p.idempotencyKey) > maxIdempotencyKeyLen {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("idempotency key is %d bytes; the limit is %d", len(p.idempotencyKey), maxIdempotencyKeyLen))
+	}
 
 	modeName := p.mode
 	if modeName == "" {
@@ -62,6 +70,22 @@ func (s *Service) submitFeedback(ctx context.Context, p submitFeedbackParams) (*
 
 	log := reqid.LoggerFrom(ctx).With("project", p.project, "pr_ref", prRef, "mode", mode.ModeName())
 	log.Info("submitting feedback")
+
+	// A replay whose pull request reference is spelled the way the first request
+	// spelled it settles here, without the forge round trips the rest of this
+	// function makes. Anything else — no key, no match yet, or a reference the
+	// forge would canonicalise differently — falls through to the authoritative
+	// check below, which compares against the ref the forge resolved.
+	if p.idempotencyKey != "" {
+		claimed, err := s.sessionMgr.FindByIdempotencyKey(ctx, p.project, p.idempotencyKey)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("look up idempotency key: %w", err))
+		}
+		if claimed != nil && sameSubmission(claimed, p.feedback, mode.ModeName(), prRef, claimed.PRRef) == nil {
+			log.Info("idempotent replay", "session_id", claimed.ID)
+			return &submissionResult{session: claimed, duplicate: true}, nil
+		}
+	}
 
 	proj, err := s.projectStore.Get(ctx, p.project)
 	if err != nil {
@@ -108,6 +132,24 @@ func (s *Service) submitFeedback(ctx context.Context, p submitFeedbackParams) (*
 	s.feedbackMu.Lock()
 	defer s.feedbackMu.Unlock()
 
+	// The key is resolved inside the lock and before the single-flight check,
+	// because the two would otherwise disagree about a retry: the run the first
+	// request started is still active, so the check would refuse the retry with
+	// "already running" instead of handing back the session it is asking about.
+	if p.idempotencyKey != "" {
+		claimed, err := s.sessionMgr.FindByIdempotencyKey(ctx, proj.Name, p.idempotencyKey)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("look up idempotency key: %w", err))
+		}
+		if claimed != nil {
+			if err := sameSubmission(claimed, p.feedback, mode.ModeName(), pr.Ref, claimed.PRRef); err != nil {
+				return nil, err
+			}
+			log.Info("idempotent replay", "session_id", claimed.ID)
+			return &submissionResult{session: claimed, duplicate: true}, nil
+		}
+	}
+
 	prFilter := session.SessionFilter{Project: proj.Name, PRRef: pr.Ref}
 	activeFilter := prFilter
 	activeFilter.ActiveOnly = true
@@ -144,7 +186,25 @@ func (s *Service) submitFeedback(ctx context.Context, p submitFeedbackParams) (*
 		ParentSessionID: parentID,
 		KeyID:           callerKeyID(ctx),
 		Priority:        jobPriority(proj, mode.ModeName()),
+		IdempotencyKey:  p.idempotencyKey,
 	})
+	// feedbackMu serializes this against another request in the same process, so
+	// a conflict here means a second orchestrator sharing the store claimed the
+	// key. It resolves the same way: answer with the session that won.
+	if errors.Is(err, session.ErrIdempotencyConflict) {
+		claimed, findErr := s.sessionMgr.FindByIdempotencyKey(ctx, proj.Name, p.idempotencyKey)
+		if findErr != nil {
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("look up idempotency key: %w", findErr))
+		}
+		if claimed == nil {
+			return nil, connect.NewError(connect.CodeInternal, errors.New("idempotency key claimed by a session that cannot be read back"))
+		}
+		if err := sameSubmission(claimed, p.feedback, mode.ModeName(), pr.Ref, claimed.PRRef); err != nil {
+			return nil, err
+		}
+		log.Info("idempotent replay", "session_id", claimed.ID)
+		return &submissionResult{session: claimed, duplicate: true}, nil
+	}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create session: %w", err))
 	}
@@ -157,24 +217,28 @@ func (s *Service) submitFeedback(ctx context.Context, p submitFeedbackParams) (*
 	log.Info("feedback run queued", "session_id", sess.ID, "head_branch", pr.HeadBranch, "parent_session_id", parentID)
 	s.dispatcher.poke()
 
-	return sess, nil
+	return &submissionResult{session: sess}, nil
 }
 
 func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.SubmitFeedbackRequest]) (*connect.Response[v1.SubmitFeedbackResponse], error) {
 	msg := req.Msg
 
-	sess, err := s.submitFeedback(ctx, submitFeedbackParams{
-		project:   msg.Project,
-		prRef:     msg.PrRef,
-		feedback:  msg.Feedback,
-		mode:      msg.Mode,
-		procedure: req.Spec().Procedure,
+	res, err := s.submitFeedback(ctx, submitFeedbackParams{
+		project:        msg.Project,
+		prRef:          msg.PrRef,
+		feedback:       msg.Feedback,
+		mode:           msg.Mode,
+		idempotencyKey: msg.IdempotencyKey,
+		procedure:      req.Spec().Procedure,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return connect.NewResponse(&v1.SubmitFeedbackResponse{SessionId: sess.ID}), nil
+	return connect.NewResponse(&v1.SubmitFeedbackResponse{
+		SessionId: res.session.ID,
+		Duplicate: res.duplicate,
+	}), nil
 }
 
 // buildFeedbackPrompt assembles the task message for a feedback run: what the

@@ -57,21 +57,34 @@ func (s *Service) RetryJob(ctx context.Context, req *connect.Request[v1.RetryJob
 	var retried *session.Session
 	switch {
 	case sess.PRRef == "":
-		retried, err = s.startJob(ctx, startJobParams{
+		// No idempotency key is carried over: a retry is an explicit request for
+		// a second run of a job that already finished, which is the opposite of
+		// what the original key claimed.
+		var res *submissionResult
+		res, err = s.startJob(ctx, startJobParams{
 			project:   sess.ProjectName,
 			prompt:    prompt,
 			branch:    sess.BaseBranch,
 			mode:      sess.Mode,
 			procedure: req.Spec().Procedure,
 		})
+		if res != nil {
+			retried = res.session
+		}
 	case sess.Mode == coding.ModeFeedback.Name:
-		retried, err = s.submitFeedback(ctx, submitFeedbackParams{
+		// As above, no idempotency key is carried over: this is a deliberate
+		// second run, not a replay of the first.
+		var res *submissionResult
+		res, err = s.submitFeedback(ctx, submitFeedbackParams{
 			project:   sess.ProjectName,
 			prRef:     sess.PRRef,
 			feedback:  prompt,
 			mode:      sess.Mode,
 			procedure: req.Spec().Procedure,
 		})
+		if res != nil {
+			retried = res.session
+		}
 	default:
 		return nil, connect.NewError(connect.CodeFailedPrecondition,
 			fmt.Errorf("session %s already opened pull request %s; continue it with feedback rather than retrying",

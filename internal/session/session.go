@@ -176,6 +176,11 @@ type Session struct {
 	// CreatedAt so a requeued job ages from its return to the queue, and it is
 	// what the dispatcher's ordering and the backlog age limit both read.
 	QueuedAt time.Time
+	// IdempotencyKey is the caller-chosen key that claims this submission. It is
+	// unique per project among the sessions that carry one, which is what makes
+	// a retried StartJob return this session instead of starting a second run.
+	// Empty when the caller supplied no key.
+	IdempotencyKey string
 }
 
 // Event represents something that happened to a session.
@@ -361,11 +366,20 @@ type CreateParams struct {
 	ParentSessionID string
 	KeyID           string
 	Priority        int
+	// IdempotencyKey claims the submission for the caller's key; see the field
+	// of the same name on Session. Empty for a submission with no key.
+	IdempotencyKey string
 }
 
 type Manager interface {
+	// Create persists a new session. It returns ErrIdempotencyConflict when the
+	// params carry an idempotency key that another session in the project
+	// already holds; FindByIdempotencyKey then resolves that session.
 	Create(ctx context.Context, params CreateParams) (*Session, error)
 	Get(ctx context.Context, id string) (*Session, error)
+	// FindByIdempotencyKey returns the session holding key within project, or
+	// nil when none does.
+	FindByIdempotencyKey(ctx context.Context, project, key string) (*Session, error)
 	List(ctx context.Context, filter SessionFilter) ([]*Session, error)
 	UpdateState(ctx context.Context, id string, state State, message string) error
 	// UpdateCost persists the latest cost snapshot on the session. Watchers

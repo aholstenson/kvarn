@@ -40,8 +40,29 @@ func (m *memStore) CreateSession(_ context.Context, s *Session) error {
 	if _, ok := m.sessions[s.ID]; ok {
 		return fmt.Errorf("session %q already exists", s.ID)
 	}
+	if s.IdempotencyKey != "" {
+		for _, existing := range m.sessions {
+			if existing.ProjectName == s.ProjectName && existing.IdempotencyKey == s.IdempotencyKey {
+				return ErrIdempotencyConflict
+			}
+		}
+	}
 	m.sessions[s.ID] = row
 	return nil
+}
+
+func (m *memStore) FindByIdempotencyKey(_ context.Context, project, key string) (*Session, error) {
+	if key == "" {
+		return nil, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, row := range m.sessions {
+		if row.ProjectName == project && row.IdempotencyKey == key {
+			return RowToSession(row)
+		}
+	}
+	return nil, nil
 }
 
 func (m *memStore) GetSession(_ context.Context, id string) (*Session, error) {

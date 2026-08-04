@@ -85,6 +85,71 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 			Expect(got.CreatedAt.Equal(base)).To(BeTrue())
 		})
 
+		Describe("idempotency keys", func() {
+			It("round-trips the key and finds the session by it", func() {
+				s := makeSession("s1", "proj", session.StatePending, base)
+				s.IdempotencyKey = "req-1"
+				Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+				got, err := store.GetSession(ctx, "s1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got.IdempotencyKey).To(Equal("req-1"))
+
+				found, err := store.FindByIdempotencyKey(ctx, "proj", "req-1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(found).NotTo(BeNil())
+				Expect(found.ID).To(Equal("s1"))
+			})
+
+			It("reports no session for an unclaimed or empty key", func() {
+				s := makeSession("s1", "proj", session.StatePending, base)
+				s.IdempotencyKey = "req-1"
+				Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+				found, err := store.FindByIdempotencyKey(ctx, "proj", "req-2")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(found).To(BeNil())
+
+				// A keyless session claims nothing, so the empty key must never
+				// resolve to one of them.
+				plain := makeSession("s2", "proj", session.StatePending, base)
+				Expect(store.CreateSession(ctx, plain)).To(Succeed())
+				found, err = store.FindByIdempotencyKey(ctx, "proj", "")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(found).To(BeNil())
+			})
+
+			It("rejects a second session claiming the same key in one project", func() {
+				first := makeSession("s1", "proj", session.StatePending, base)
+				first.IdempotencyKey = "req-1"
+				Expect(store.CreateSession(ctx, first)).To(Succeed())
+
+				second := makeSession("s2", "proj", session.StatePending, base)
+				second.IdempotencyKey = "req-1"
+				Expect(store.CreateSession(ctx, second)).To(MatchError(session.ErrIdempotencyConflict))
+			})
+
+			It("scopes keys to a project", func() {
+				first := makeSession("s1", "proj", session.StatePending, base)
+				first.IdempotencyKey = "req-1"
+				Expect(store.CreateSession(ctx, first)).To(Succeed())
+
+				other := makeSession("s2", "other", session.StatePending, base)
+				other.IdempotencyKey = "req-1"
+				Expect(store.CreateSession(ctx, other)).To(Succeed())
+
+				found, err := store.FindByIdempotencyKey(ctx, "other", "req-1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(found.ID).To(Equal("s2"))
+			})
+
+			It("lets keyless sessions coexist", func() {
+				for _, id := range []string{"s1", "s2"} {
+					Expect(store.CreateSession(ctx, makeSession(id, "proj", session.StatePending, base))).To(Succeed())
+				}
+			})
+		})
+
 		It("round-trips the pull request fields", func() {
 			s := makeSession("s1", "proj", session.StateRunning, base)
 			s.PRRef = "42"
@@ -620,7 +685,7 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 
 			sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
 			for i := 0; i < n; i++ {
-				Expect(seqs[i]).To(Equal(int64(i + 1)), "expected gapless seq range")
+				Expect(seqs[i]).To(Equal(int64(i+1)), "expected gapless seq range")
 			}
 		})
 

@@ -20,6 +20,8 @@ type Cmd struct {
 	Mode     string `help:"Agent mode; defaults to feedback." default:""`
 	Watch    bool   `help:"Stream the session until it reaches a terminal state." negatable:""`
 	APIKey   string `help:"API key for the orchestrator." env:"KVARN_API_KEY" default:""`
+
+	IdempotencyKey string `help:"Key that makes this submission replayable: resending it returns the session the first request created instead of starting a second run." default:""`
 }
 
 func (c *Cmd) Run() error {
@@ -30,6 +32,8 @@ func (c *Cmd) Run() error {
 		PrRef:    c.PRRef,
 		Feedback: c.Feedback,
 		Mode:     c.Mode,
+
+		IdempotencyKey: c.IdempotencyKey,
 	}))
 	if err != nil {
 		return fmt.Errorf("submit feedback: %w", err)
@@ -37,6 +41,9 @@ func (c *Cmd) Run() error {
 
 	sessionID := resp.Msg.SessionId
 	fmt.Fprintf(os.Stdout, "Session: %s\n", sessionID)
+	if resp.Msg.Duplicate {
+		fmt.Fprintf(os.Stdout, "Idempotency key %q already started this run; no new run was submitted.\n", c.IdempotencyKey)
+	}
 
 	if !c.Watch {
 		return nil

@@ -49,7 +49,17 @@ pushes a branch, and opens a pull request where the forge supports it.
 | `--branch` | project default | Branch to start from. |
 | `--mode` | `auto` | `auto`, `implement`, `fix`, `feedback`, `review`, `research`. |
 | `--watch` | off | Stream the session until it reaches a terminal state. Without it the session ID is printed and the command returns. |
+| `--idempotency-key` | — | Makes the submission safe to retry; see below. |
 | `--api-key` | — | API key. Env: `KVARN_API_KEY`. |
+
+Without an idempotency key, a client that resends a submission after a network
+timeout gets a second job — a second VM and a second pull request. Pass
+`--idempotency-key` (any string up to 255 bytes, unique per submission, such as
+a UUID) and the orchestrator returns the session the first request created
+instead of starting another job, saying so on stdout. Keys are scoped to the
+project and remembered as long as the session is, so retention eventually
+releases them. Reusing one key for a different prompt, branch or mode is an
+error rather than a silently dropped job.
 
 ## `kvarn feedback <project> <pr-ref> <feedback>`
 

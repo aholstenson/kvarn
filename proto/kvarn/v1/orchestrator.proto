@@ -10,10 +10,18 @@ message StartJobRequest {
   string prompt = 2;
   string branch = 3;
   string mode = 4;
+  // Optional caller-chosen key that makes submission safe to retry: a second
+  // request carrying the same key within the same project returns the session
+  // the first one created instead of starting a second run. Reusing a key with
+  // a different prompt, branch or mode is an error.
+  string idempotency_key = 5;
 }
 
 message StartJobResponse {
   string session_id = 1;
+  // True when the request matched an existing idempotency key and no new job
+  // was started, so a caller can tell a retry that landed from one that raced.
+  bool duplicate = 2;
 }
 
 // SubmitFeedbackRequest continues work on an existing pull request: the agent
@@ -25,10 +33,19 @@ message SubmitFeedbackRequest {
   string feedback = 3;
   // Optional; defaults to "feedback".
   string mode = 4;
+  // Optional caller-chosen key that makes submission safe to retry: a second
+  // request carrying the same key within the same project returns the session
+  // the first one created instead of starting a second run against the pull
+  // request. Reusing a key with different feedback, pull request or mode is an
+  // error.
+  string idempotency_key = 5;
 }
 
 message SubmitFeedbackResponse {
   string session_id = 1;
+  // True when the request matched an existing idempotency key and no new run
+  // was started, so a caller can tell a retry that landed from one that raced.
+  bool duplicate = 2;
 }
 
 // CancelJobRequest stops a run that is still in flight. Cancelling a session

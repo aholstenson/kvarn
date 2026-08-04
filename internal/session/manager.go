@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -33,10 +34,10 @@ type subscriber struct {
 	notify chan struct{} // buffered(1); poked when pending grows
 
 	// Guarded by hub.mu:
-	nextSeq int64          // smallest durable seq not yet enqueued
-	pending []WatchEvent   // events awaiting the feeder, in seq order
-	dead    chan struct{}  // closed on lag-disconnect to unblock a stuck send
-	closed  bool           // no further enqueues permitted
+	nextSeq int64         // smallest durable seq not yet enqueued
+	pending []WatchEvent  // events awaiting the feeder, in seq order
+	dead    chan struct{} // closed on lag-disconnect to unblock a stuck send
+	closed  bool          // no further enqueues permitted
 }
 
 // hub.mu guards the subscriber map and every field marked as such on
@@ -114,6 +115,7 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*Session, er
 		ParentSessionID: params.ParentSessionID,
 		KeyID:           params.KeyID,
 		Priority:        params.Priority,
+		IdempotencyKey:  params.IdempotencyKey,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		// A new session enters the backlog at creation, so its queue age starts
@@ -121,9 +123,16 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*Session, er
 		QueuedAt: now,
 	}
 	if err := m.store.CreateSession(ctx, s); err != nil {
+		if errors.Is(err, ErrIdempotencyConflict) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 	return copySession(s), nil
+}
+
+func (m *manager) FindByIdempotencyKey(ctx context.Context, project, key string) (*Session, error) {
+	return m.store.FindByIdempotencyKey(ctx, project, key)
 }
 
 func (m *manager) Get(ctx context.Context, id string) (*Session, error) {

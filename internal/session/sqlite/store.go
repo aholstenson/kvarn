@@ -94,29 +94,50 @@ func (s *Store) CreateSession(ctx context.Context, sess *session.Session) error 
 		`INSERT INTO sessions
 		   (id, project_name, prompt, mode, state, message, error, pull_request_url,
 		    pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at,
-		    key_id, priority, attempts, queued_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    key_id, priority, attempts, queued_at, idempotency_key)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.ID, row.ProjectName, row.Prompt, row.Mode, row.State, row.Message,
 		row.Error, row.PullRequestURL, row.PRRef, row.HeadBranch, row.BaseBranch,
 		row.ParentSessionID, row.CostJSON, row.CreatedAt, row.UpdatedAt,
-		row.KeyID, row.Priority, row.Attempts, row.QueuedAt,
+		row.KeyID, row.Priority, row.Attempts, row.QueuedAt, row.IdempotencyKey,
 	)
+	if isUniqueViolation(err) {
+		return session.ErrIdempotencyConflict
+	}
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
 	}
 	return nil
 }
 
+// FindByIdempotencyKey resolves the session that claimed key within project.
+func (s *Store) FindByIdempotencyKey(ctx context.Context, project, key string) (*session.Session, error) {
+	if key == "" {
+		return nil, nil
+	}
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+sessionColumns+` FROM sessions WHERE project_name = ? AND idempotency_key = ?`,
+		project, key)
+	sess, err := scanSession(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return sess, nil
+}
+
 const sessionColumns = `id, project_name, prompt, mode, state, message, error, pull_request_url, ` +
 	`pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at, ` +
-	`key_id, priority, attempts, queued_at`
+	`key_id, priority, attempts, queued_at, idempotency_key`
 
 func scanSession(scan func(dest ...any) error) (*session.Session, error) {
 	var r session.Row
 	if err := scan(&r.ID, &r.ProjectName, &r.Prompt, &r.Mode, &r.State, &r.Message,
 		&r.Error, &r.PullRequestURL, &r.PRRef, &r.HeadBranch, &r.BaseBranch,
 		&r.ParentSessionID, &r.CostJSON, &r.CreatedAt, &r.UpdatedAt,
-		&r.KeyID, &r.Priority, &r.Attempts, &r.QueuedAt); err != nil {
+		&r.KeyID, &r.Priority, &r.Attempts, &r.QueuedAt, &r.IdempotencyKey); err != nil {
 		return nil, err
 	}
 	return session.RowToSession(r)
@@ -230,8 +251,8 @@ func (s *Store) ListSessions(ctx context.Context, filter session.SessionFilter) 
 func (s *Store) AppendEvent(ctx context.Context, sessionID, kind string, payload []byte) (session.PersistedEvent, error) {
 	recordedAt := time.Now().UTC()
 	var (
-		seq        int64
-		recMicros  int64
+		seq       int64
+		recMicros int64
 	)
 	err := retryBusy(func() error {
 		// Seq assignment is index-backed by the (session_id, seq) PK; RETURNING
@@ -680,6 +701,18 @@ func retryBusy(fn func() error) error {
 		}
 	}
 	return err
+}
+
+// isUniqueViolation reports whether err is a UNIQUE index violation. The only
+// unique index an insert can trip is the idempotency one — the primary key is a
+// generated id, and it reports its own extended code — so a caller reads this
+// as "that key is already claimed".
+func isUniqueViolation(err error) bool {
+	var serr *modernc.Error
+	if errors.As(err, &serr) {
+		return serr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+	}
+	return false
 }
 
 func isBusy(err error) bool {
