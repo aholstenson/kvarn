@@ -281,12 +281,19 @@ type Service struct {
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
 
-	// running maps a session ID to the cancel func of its job context, which is
-	// what CancelJob stops the run with. An entry exists from before the job
-	// goroutine is spawned until after it has written the session's terminal
-	// state, so a cancel arriving at any point in between finds the job.
+	// running maps a session ID to its in-flight run. An entry exists from
+	// before the job goroutine is spawned until after it has written the
+	// session's terminal state, so a cancel arriving at any point in between
+	// finds the job. It is also the dispatcher's census of the in-memory
+	// pipeline — how much room is left, and who is holding it.
 	runningMu sync.Mutex
-	running   map[string]context.CancelCauseFunc
+	running   map[string]runningJob
+
+	// dispatcher moves work from the durable backlog into that pipeline. It is
+	// always present and its loop is started by the constructor: a service
+	// whose submissions only reach a table nothing drains cannot run a job at
+	// all, so this is not something a caller should be able to forget to wire.
+	dispatcher *dispatcher
 
 	// feedbackMu serializes the per-PR single-flight check with the session
 	// creation that follows it, so two concurrent SubmitFeedback calls for the
@@ -323,12 +330,13 @@ type ServiceOpts struct {
 	TenantLimits        TenantLimitDefaults    // host-wide per-project/per-key caps a project or key overrides
 	Meter               metric.Meter           // optional; nil uses an otel no-op meter
 	Instruments         *metrics.Instruments   // optional; nil disables job/auth/scheduler instrumentation
+	Dispatch            DispatchPolicy         // backlog dispatch bounds; zero value dispatches everything immediately
 }
 
 func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
 	reg := dispatch.NewRegistry()
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
-	return &Service{
+	s := &Service{
 		provider:       p,
 		registry:       reg,
 		bridgeHandler:  dispatch.NewHandler(reg),
@@ -337,8 +345,10 @@ func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
 		meter:          otelnoop.NewMeterProvider().Meter("kvarn"),
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
-		running:        make(map[string]context.CancelCauseFunc),
+		running:        make(map[string]runningJob),
 	}
+	s.startDispatcher(DispatchPolicy{})
+	return s
 }
 
 func NewServiceWithOpts(opts ServiceOpts) *Service {
@@ -356,7 +366,7 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 	}
 	reg := dispatch.NewRegistry()
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
-	return &Service{
+	s := &Service{
 		provider:         opts.Provider,
 		registry:         reg,
 		bridgeHandler:    dispatch.NewHandler(reg),
@@ -389,8 +399,37 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		instruments:      opts.Instruments,
 		shutdownCtx:      shutdownCtx,
 		shutdownCancel:   shutdownCancel,
-		running:          make(map[string]context.CancelCauseFunc),
+		running:          make(map[string]runningJob),
 	}
+	s.startDispatcher(opts.Dispatch)
+	return s
+}
+
+// startDispatcher builds the backlog dispatcher and starts its loop on the
+// service's shutdown context, so draining the service also stops new work being
+// pulled out of the backlog.
+func (s *Service) startDispatcher(policy DispatchPolicy) {
+	s.dispatcher = newDispatcher(s, policy)
+	s.dispatcher.start(s.shutdownCtx)
+}
+
+// dispatchedCount is how many runs occupy the in-memory pipeline.
+func (s *Service) dispatchedCount() int {
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	return len(s.running)
+}
+
+// dispatchedPerProject counts in-flight runs by project, for the dispatcher's
+// per-project share of the pipeline.
+func (s *Service) dispatchedPerProject() map[string]int {
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	out := make(map[string]int, len(s.running))
+	for _, job := range s.running {
+		out[job.project]++
+	}
+	return out
 }
 
 // Shutdown signals every in-flight runJob to wind down and waits for them to
@@ -414,18 +453,31 @@ func (s *Service) Shutdown(ctx context.Context) {
 	}
 }
 
-// checkQueueDepth refuses a submission while the admission queue is at its
-// bound. The authoritative check happens at Acquire, but by then the job owns a
-// session and a clone: turning it away here costs the caller nothing and tells
-// it something it can act on, which a failed session buried in the log does
-// not. It is a hint, so a job accepted here may still meet a full queue later.
-func (s *Service) checkQueueDepth(ctx context.Context, project string) error {
-	if !s.scheduler.QueueFull() {
+// checkBacklogDepth refuses a submission the durable backlog cannot take. This
+// is the only place a submission is turned away for depth: the in-memory queue
+// behind it is fed by the dispatcher, which never pushes more into it than it
+// holds, so its own bound is a guard rather than a limit callers meet.
+//
+// A backlog entry costs a row, which is why its bound can be set orders of
+// magnitude above the pipeline's and why reaching it means something has gone
+// badly wrong rather than that the host is merely busy.
+func (s *Service) checkBacklogDepth(ctx context.Context, project string) error {
+	maxBacklog := s.dispatcher.backlogBound()
+	if maxBacklog <= 0 {
 		return nil
 	}
-	s.instruments.RecordAdmissionDenied(ctx, project, "queue_full")
-	return connect.NewError(connect.CodeResourceExhausted,
-		errors.New("admission queue is full; retry when the host has caught up"))
+	depth, err := s.sessionMgr.CountPending(ctx)
+	if err != nil {
+		// A store that cannot be counted will not take the session either;
+		// let the create call report the real problem.
+		slog.WarnContext(ctx, "could not measure backlog depth", "error", err)
+		return nil
+	}
+	if depth < maxBacklog {
+		return nil
+	}
+	s.instruments.RecordAdmissionDenied(ctx, project, "backlog_full")
+	return connect.NewError(connect.CodeResourceExhausted, errBacklogFull)
 }
 
 // callerKeyID returns the API key behind ctx, or "" when auth is disabled and
@@ -489,7 +541,7 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("project %q: %w", msg.Project, err))
 	}
 
-	if err := s.checkQueueDepth(ctx, msg.Project); err != nil {
+	if err := s.checkBacklogDepth(ctx, msg.Project); err != nil {
 		return nil, err
 	}
 
@@ -500,31 +552,25 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 		branch = proj.DefaultBranch
 	}
 
+	// The session is the durable record that the job exists, so writing it is
+	// what accepts the submission: once this returns, the run happens even if
+	// the orchestrator dies on the next instruction. Nothing else about the job
+	// is resolved here — the dispatcher reads the project, the forge and the
+	// credentials as they are when it actually starts the run.
 	sess, err := s.sessionMgr.Create(ctx, session.CreateParams{
 		ProjectName: msg.Project,
 		Prompt:      msg.Prompt,
 		Mode:        mode.ModeName(),
 		BaseBranch:  branch,
+		KeyID:       callerKeyID(ctx),
+		Priority:    jobPriority(proj, mode.ModeName()),
 	})
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create session: %w", err))
 	}
 
-	log.Info("session created", "session_id", sess.ID, "branch", branch)
-
-	reqID, _ := reqid.FromContext(ctx)
-	s.instruments.RecordJobStart(ctx, msg.Project, mode.ModeName())
-	s.jobsWG.Add(1)
-	rootCtx, cancelJob := s.beginJob(sess.ID)
-	go s.runJob(rootCtx, cancelJob, jobSpec{
-		requestID:   reqID,
-		sessionID:   sess.ID,
-		keyID:       callerKeyID(ctx),
-		proj:        proj,
-		mode:        mode,
-		agentPrompt: msg.Prompt,
-		baseBranch:  branch,
-	})
+	log.Info("job queued", "session_id", sess.ID, "branch", branch)
+	s.dispatcher.poke()
 
 	return connect.NewResponse(&v1.StartJobResponse{
 		SessionId: sess.ID,
@@ -545,7 +591,6 @@ type prTarget struct {
 // behavior: clone the base branch and open a new pull request. A non-nil pr
 // means continuing on that PR's head branch.
 type jobSpec struct {
-	requestID string
 	sessionID string
 	// keyID is the API key that submitted the job, captured here because the
 	// job's context is detached from the request's and so carries no identity.
@@ -628,9 +673,9 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	mode := spec.mode
 	defer s.endJob(sessionID)
 	defer cancelJob(nil)
-	if spec.requestID != "" {
-		rootCtx = reqid.WithRequestID(rootCtx, spec.requestID)
-	}
+	// A run is no longer bounded by the request that submitted it — it may
+	// start minutes later, after a restart, from a backlog row — so the session
+	// ID rather than a request ID is what ties its log lines together.
 	ctx := rootCtx
 	// Writes that decide the session's final state have to outlive the job's
 	// context. A cost-cap trip cancels rootCtx and shutdown cancels its parent,

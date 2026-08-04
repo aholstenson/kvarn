@@ -2,60 +2,76 @@ package orchestrator
 
 import (
 	"context"
+	"time"
 
 	"connectrpc.com/connect"
-	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
+	"github.com/aholstenson/kvarn/internal/session"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("checkQueueDepth", func() {
+var _ = Describe("checkBacklogDepth", func() {
 	var (
 		ctx    context.Context
 		cancel context.CancelFunc
+		mgr    session.Manager
 	)
 
-	small := scheduler.Capacity{
-		CPUMillis: 1000,
-		MemBytes:  1024 * 1024 * 1024,
-		DiskBytes: 1024 * 1024 * 1024,
+	// serviceWithBacklog builds a Service whose backlog is bounded at max,
+	// without starting a dispatcher loop that would drain what the test queues.
+	serviceWithBacklog := func(max int) *Service {
+		svc := &Service{sessionMgr: mgr}
+		svc.dispatcher = newDispatcher(svc, DispatchPolicy{MaxBacklog: max})
+		return svc
 	}
-	one := scheduler.Request{CPUMillis: 1000, MemBytes: 1024 * 1024 * 1024, DiskBytes: 1024 * 1024 * 1024}
+
+	queue := func(svc *Service, n int) {
+		for range n {
+			_, err := mgr.Create(ctx, session.CreateParams{ProjectName: "alpha", Prompt: "p", Mode: "auto"})
+			Expect(err).NotTo(HaveOccurred())
+		}
+	}
 
 	BeforeEach(func() {
 		ctx, cancel = context.WithCancel(context.Background())
 		DeferCleanup(cancel)
+		mgr = session.NewManager(session.NewMemStore())
 	})
 
-	It("accepts while the queue has room", func() {
-		svc := &Service{scheduler: scheduler.New(scheduler.Options{Total: small, MaxQueue: 1})}
-		Expect(svc.checkQueueDepth(ctx, "alpha")).To(Succeed())
+	It("accepts while the backlog has room", func() {
+		svc := serviceWithBacklog(2)
+		queue(svc, 1)
+		Expect(svc.checkBacklogDepth(ctx, "alpha")).To(Succeed())
 	})
 
-	It("refuses with ResourceExhausted once the queue is full", func() {
-		sched := scheduler.New(scheduler.Options{Total: small, MaxQueue: 1})
-		svc := &Service{scheduler: sched}
+	It("refuses with ResourceExhausted once the backlog is full", func() {
+		svc := serviceWithBacklog(2)
+		queue(svc, 2)
 
-		hold, err := sched.Acquire(ctx, one)
-		Expect(err).NotTo(HaveOccurred())
-		defer hold.Release()
-
-		go func() {
-			defer GinkgoRecover()
-			if lease, err := sched.Acquire(ctx, one); err == nil {
-				lease.Release()
-			}
-		}()
-		Eventually(func() int { _, _, q := sched.Snapshot(); return q }).Should(Equal(1))
-
-		err = svc.checkQueueDepth(ctx, "alpha")
+		err := svc.checkBacklogDepth(ctx, "alpha")
 		Expect(err).To(HaveOccurred())
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeResourceExhausted))
 	})
 
-	It("accepts against an unbounded scheduler", func() {
-		svc := &Service{scheduler: scheduler.NewUnbounded()}
-		Expect(svc.checkQueueDepth(ctx, "alpha")).To(Succeed())
+	It("ignores sessions that have left the backlog", func() {
+		svc := serviceWithBacklog(2)
+		queue(svc, 2)
+
+		// A dispatched job no longer occupies a backlog slot, so the room it
+		// gives back is room a new submission can use.
+		pending, err := mgr.ListPending(ctx, session.PendingQuery{Now: time.Now()})
+		Expect(err).NotTo(HaveOccurred())
+		won, err := mgr.TransitionPending(ctx, pending[0].ID, session.PendingTransition{State: session.StateQueued})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(won).To(BeTrue())
+
+		Expect(svc.checkBacklogDepth(ctx, "alpha")).To(Succeed())
+	})
+
+	It("accepts against an unbounded backlog", func() {
+		svc := serviceWithBacklog(0)
+		queue(svc, 5)
+		Expect(svc.checkBacklogDepth(ctx, "alpha")).To(Succeed())
 	})
 })
 

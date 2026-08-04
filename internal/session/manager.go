@@ -112,8 +112,13 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*Session, er
 		HeadBranch:      params.HeadBranch,
 		BaseBranch:      params.BaseBranch,
 		ParentSessionID: params.ParentSessionID,
+		KeyID:           params.KeyID,
+		Priority:        params.Priority,
 		CreatedAt:       now,
 		UpdatedAt:       now,
+		// A new session enters the backlog at creation, so its queue age starts
+		// with it. A requeue moves this forward; CreatedAt never moves.
+		QueuedAt: now,
 	}
 	if err := m.store.CreateSession(ctx, s); err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
@@ -123,6 +128,48 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*Session, er
 
 func (m *manager) Get(ctx context.Context, id string) (*Session, error) {
 	return m.store.GetSession(ctx, id)
+}
+
+func (m *manager) ListPending(ctx context.Context, q PendingQuery) ([]*Session, error) {
+	return m.store.ListPending(ctx, q)
+}
+
+func (m *manager) CountPending(ctx context.Context) (int, error) {
+	return m.store.CountPending(ctx)
+}
+
+// TransitionPending moves a session out of the backlog and, when it wins the
+// move, broadcasts the state change the store persisted with it.
+//
+// The store numbered that event inside its own transaction, so unlike
+// persistAndBroadcast this only has to deliver it. Doing so outside the store's
+// transaction would reorder against a concurrent append on the same session —
+// but a pending session has no other event source, since nothing runs against
+// it until precisely this call hands it to one.
+func (m *manager) TransitionPending(ctx context.Context, id string, to PendingTransition) (bool, error) {
+	ok, pe, err := m.store.TransitionPending(ctx, id, to)
+	if err != nil || !ok {
+		return false, err
+	}
+	event, err := decodeEvent(pe.Kind, pe.Payload)
+	if err != nil {
+		// The transition is committed; failing here would tell the caller it
+		// did not happen. Watchers still converge — they poll or reconnect
+		// against the store, which has the event.
+		slog.Warn("could not broadcast pending transition", "session_id", id, "error", err)
+		return true, nil
+	}
+	seqLock := m.seqLock(id)
+	seqLock.Lock()
+	defer seqLock.Unlock()
+	m.hub.mu.Lock()
+	defer m.hub.mu.Unlock()
+	m.broadcastLocked(id, WatchEvent{Seq: pe.Seq, Event: event})
+	return true, nil
+}
+
+func (m *manager) ExpirePending(ctx context.Context, cutoff time.Time, reason string) ([]string, error) {
+	return m.store.ExpirePending(ctx, cutoff, reason)
 }
 
 func (m *manager) List(ctx context.Context, filter SessionFilter) ([]*Session, error) {

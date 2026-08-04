@@ -12,6 +12,10 @@ import (
 type State string
 
 const (
+	// StatePending is the durable backlog: the submission has been accepted and
+	// persisted, but no orchestrator goroutine owns it yet. It is the only state
+	// a job can be in without a run behind it, which is what lets the backlog
+	// outlive the process that took the request.
 	StatePending                State = "pending"
 	StateQueued                 State = "queued"
 	StateCloning                State = "cloning"
@@ -45,6 +49,48 @@ func TerminalStates() []State {
 	return slices.Clone(terminalStates)
 }
 
+// restartableStates are the states a run can be returned to the backlog from
+// when the orchestrator restarts underneath it, rather than being failed.
+//
+// The line is drawn where a run starts producing effects the host cannot take
+// back. Everything up to and including setup has done nothing but read: a
+// clone, a wait for capacity, a VM boot, an image pull, a cache restore. The
+// VM is gone and its work is worthless, but re-running from the start reaches
+// the same place, so a restart during a burst costs latency and nothing else.
+//
+// Past that point it is no longer true. StateRunning and StateValidating have
+// spent budget against the job's cost cap and hold agent work that only exists
+// in a VM that no longer does, so a silent retry would recharge the cap and
+// throw away the reasoning. StateSubmitting is the one that must never come
+// back: a push may have landed and a pull request may exist without its URL
+// having reached the store, and requeueing would open a second one.
+//
+// StatePending is deliberately absent. It is where a requeue lands, not
+// something to requeue from — a pending session never left the backlog, so
+// reconciliation leaves it untouched rather than charging it an attempt for a
+// restart it did not participate in.
+var restartableStates = []State{
+	StateQueued,
+	StateCloning,
+	StateProvisioning,
+	StateTransferring,
+	StateInstallingDependencies,
+	StatePullingImage,
+	StateSetup,
+}
+
+// IsRestartable reports whether a run left in this state by a dead
+// orchestrator can be returned to the backlog instead of being failed.
+func (s State) IsRestartable() bool {
+	return slices.Contains(restartableStates, s)
+}
+
+// RestartableStates returns the states a run can be requeued from, for stores
+// that need the set in a query.
+func RestartableStates() []State {
+	return slices.Clone(restartableStates)
+}
+
 // Session tracks the lifecycle of a job execution.
 type Session struct {
 	ID             string
@@ -71,6 +117,26 @@ type Session struct {
 	// Cost is the LLM spend snapshot for the run. Updated on warning, on
 	// over-budget cancellation, and once at the end of the run.
 	Cost cost.Report
+
+	// KeyID is the API key that submitted the job. It is persisted because a
+	// pending session outlives the request that created it, and the dispatcher
+	// needs it to attribute the job to a tenant and to re-check that the key is
+	// still allowed to run it. Empty when auth is disabled.
+	KeyID string
+	// Priority ranks this job against others in the backlog, higher first. It
+	// is captured at submission from the project's config, so an operator's
+	// later edit applies to jobs submitted after the change rather than
+	// reshuffling a backlog that has already formed.
+	Priority int
+	// Attempts counts how many times the job has been dispatched. A run
+	// requeued by startup reconciliation carries the count forward, so a job
+	// that reliably kills the orchestrator is failed rather than retried
+	// forever.
+	Attempts int
+	// QueuedAt is when the job last entered the backlog. It is distinct from
+	// CreatedAt so a requeued job ages from its return to the queue, and it is
+	// what the dispatcher's ordering and the backlog age limit both read.
+	QueuedAt time.Time
 }
 
 // Event represents something that happened to a session.
@@ -254,6 +320,8 @@ type CreateParams struct {
 	HeadBranch      string
 	BaseBranch      string
 	ParentSessionID string
+	KeyID           string
+	Priority        int
 }
 
 type Manager interface {
@@ -278,4 +346,15 @@ type Manager interface {
 	Watch(ctx context.Context, id string, fromSeq int64) (<-chan WatchEvent, error)
 	// ListEvents returns durable history with seq > afterSeq for polling.
 	ListEvents(ctx context.Context, id string, afterSeq int64, limit int) ([]WatchEvent, error)
+
+	// ListPending returns backlog entries in dispatch order.
+	ListPending(ctx context.Context, q PendingQuery) ([]*Session, error)
+	// CountPending returns how many sessions are waiting in the backlog.
+	CountPending(ctx context.Context) (int, error)
+	// TransitionPending atomically moves a session out of StatePending and
+	// broadcasts the resulting state change, reporting false when the session
+	// had already left the backlog.
+	TransitionPending(ctx context.Context, id string, to PendingTransition) (bool, error)
+	// ExpirePending fails backlog entries queued before cutoff.
+	ExpirePending(ctx context.Context, cutoff time.Time, reason string) ([]string, error)
 }

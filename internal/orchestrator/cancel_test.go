@@ -162,17 +162,42 @@ var _ = Describe("CancelJob", func() {
 		Expect(err.Error()).To(ContainSubstring("already finished"))
 	})
 
-	It("rejects a non-terminal session with no run behind it", func() {
+	It("rejects a mid-run session with no run behind it", func() {
 		sess, err := sessionMgr.Create(context.Background(), session.CreateParams{
 			ProjectName: "test-project", Prompt: "orphan", Mode: "auto",
 		})
 		Expect(err).NotTo(HaveOccurred())
+		// Past the backlog but with no goroutine behind it — the shape a
+		// terminal write that failed outright leaves, since startup
+		// reconciliation settles every other way of getting here.
+		Expect(sessionMgr.UpdateState(context.Background(), sess.ID, session.StateCloning, "")).To(Succeed())
 
 		_, err = svc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
 			SessionId: sess.ID,
 		}))
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeFailedPrecondition))
 		Expect(err.Error()).To(ContainSubstring("not running"))
+	})
+
+	It("cancels a job still waiting in the backlog", func() {
+		sess, err := sessionMgr.Create(context.Background(), session.CreateParams{
+			ProjectName: "test-project", Prompt: "queued", Mode: "auto",
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		// No goroutine owns a backlog entry, so the cancel lands on the row
+		// itself rather than on a context.
+		resp, err := svc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
+			SessionId: sess.ID, Reason: "changed my mind",
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Msg.PreviousState).To(Equal(string(session.StatePending)))
+
+		got, err := sessionMgr.Get(context.Background(), sess.ID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.State).To(Equal(session.StateCancelled))
+		Expect(got.Message).To(ContainSubstring("changed my mind"))
+		Expect(got.Error).To(BeEmpty())
 	})
 
 	It("cancels a job that has not reached the agent yet", func() {

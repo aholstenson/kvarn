@@ -87,15 +87,8 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.Su
 			fmt.Errorf("pull request %s comes from a fork (%s); its head branch cannot be pushed to", prRef, pr.HeadRepo))
 	}
 
-	if err := s.checkQueueDepth(ctx, proj.Name); err != nil {
+	if err := s.checkBacklogDepth(ctx, proj.Name); err != nil {
 		return nil, err
-	}
-
-	// Diff is context, not a requirement: a run without it is still useful.
-	diff, err := fr.impl.GetPullRequestDiff(ctx, getOpts)
-	if err != nil {
-		log.Warn("failed to fetch pull request diff; continuing without it", "error", err)
-		diff = ""
 	}
 
 	// Serialize the single-flight check with session creation so two requests
@@ -117,20 +110,18 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.Su
 
 	// Lineage, best-effort: the oldest session on this PR carries the task the
 	// pull request came from. Retention may have pruned it.
-	var parentID, originalPrompt string
+	var parentID string
 	if prior, err := s.sessionMgr.List(ctx, prFilter); err != nil {
 		log.Warn("failed to look up prior sessions for pull request", "error", err)
 	} else if len(prior) > 0 {
 		// Listing is newest-first, so the last row is the original run.
-		oldest := prior[len(prior)-1]
-		parentID = oldest.ID
-		originalPrompt = oldest.Prompt
+		parentID = prior[len(prior)-1].ID
 	}
 
-	agentPrompt := buildFeedbackPrompt(originalPrompt, pr, diff, msg.Feedback)
-
-	// The session's own prompt stays the raw feedback so GetSession reports
-	// what was actually asked, not the assembled context pack.
+	// The session's prompt is the raw feedback — both because GetSession should
+	// report what was actually asked, and because it is the input the context
+	// pack is rebuilt from at dispatch. Assembling the pack here would freeze a
+	// diff that the pull request may outgrow while the run waits its turn.
 	sess, err := s.sessionMgr.Create(ctx, session.CreateParams{
 		ProjectName:     proj.Name,
 		Prompt:          msg.Feedback,
@@ -139,6 +130,8 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.Su
 		HeadBranch:      pr.HeadBranch,
 		BaseBranch:      pr.BaseBranch,
 		ParentSessionID: parentID,
+		KeyID:           callerKeyID(ctx),
+		Priority:        jobPriority(proj, mode.ModeName()),
 	})
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create session: %w", err))
@@ -149,28 +142,8 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.Su
 		log.Warn("failed to record pull request on session", "session_id", sess.ID, "error", err)
 	}
 
-	log.Info("session created", "session_id", sess.ID, "head_branch", pr.HeadBranch, "parent_session_id", parentID)
-
-	reqID, _ := reqid.FromContext(ctx)
-	s.instruments.RecordJobStart(ctx, proj.Name, mode.ModeName())
-	s.jobsWG.Add(1)
-	rootCtx, cancelJob := s.beginJob(sess.ID)
-	go s.runJob(rootCtx, cancelJob, jobSpec{
-		requestID:   reqID,
-		sessionID:   sess.ID,
-		keyID:       callerKeyID(ctx),
-		proj:        proj,
-		mode:        mode,
-		agentPrompt: agentPrompt,
-		userPrompt:  msg.Feedback,
-		baseBranch:  pr.BaseBranch,
-		pr: &prTarget{
-			ref:        pr.Ref,
-			headBranch: pr.HeadBranch,
-			headSHA:    pr.HeadSHA,
-			url:        pr.URL,
-		},
-	})
+	log.Info("feedback run queued", "session_id", sess.ID, "head_branch", pr.HeadBranch, "parent_session_id", parentID)
+	s.dispatcher.poke()
 
 	return connect.NewResponse(&v1.SubmitFeedbackResponse{SessionId: sess.ID}), nil
 }

@@ -319,9 +319,13 @@ type mockForge struct {
 	diff         string
 	diffErr      error
 	getPRCalls   int
-	// movedHeadSHA, when set, is reported from the second GetPullRequest call
-	// onward — the shape of someone pushing to the branch mid-run.
-	movedHeadSHA string
+	// movedHeadSHA, when set, is reported once getPRCalls passes
+	// moveHeadAfterCall — the shape of someone pushing to the branch mid-run.
+	// A feedback run reads the pull request twice before it could push: once to
+	// validate the submission, once when the dispatcher builds its context
+	// pack. Moving the head after both is what puts the change inside the run.
+	movedHeadSHA      string
+	moveHeadAfterCall int
 }
 
 func (m *mockForge) SCM() scm.SCM { return m.scmImpl }
@@ -386,7 +390,7 @@ func (m *mockForge) GetPullRequest(_ context.Context, opts forge.GetPROpts) (*fo
 		return nil, fmt.Errorf("pull request %q not found", opts.PRRef)
 	}
 	cp := *pr
-	if m.movedHeadSHA != "" && m.getPRCalls > 1 {
+	if m.movedHeadSHA != "" && m.getPRCalls > m.moveHeadAfterCall {
 		cp.HeadSHA = m.movedHeadSHA
 	}
 	return &cp, nil

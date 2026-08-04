@@ -177,13 +177,14 @@ var _ = Describe("OrchestratorService authorization", func() {
 		})
 
 		It("reaches the in-scope session", func() {
-			// No job is running behind these fixture sessions, so authorization
-			// passing is what the FailedPrecondition here proves.
+			// The fixture session sits in the backlog, so the cancel lands on
+			// the row and succeeds. Reaching the session at all is what this
+			// asserts; the scope check is the test above.
 			oc := client.NewOrchestrator(addr, scopedToken)
 			_, err := oc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
 				SessionId: allowedSession,
 			}))
-			Expect(connect.CodeOf(err)).To(Equal(connect.CodeFailedPrecondition))
+			Expect(err).NotTo(HaveOccurred())
 		})
 	})
 

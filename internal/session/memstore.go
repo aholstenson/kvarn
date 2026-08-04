@@ -161,40 +161,179 @@ func (m *memStore) MaxSeq(_ context.Context, sessionID string) (int64, error) {
 	return int64(len(m.events[sessionID])), nil
 }
 
-func (m *memStore) ReconcileNonTerminal(_ context.Context, reason string) ([]string, error) {
+func (m *memStore) ListPending(_ context.Context, q PendingQuery) ([]*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var ids []string
-	now := time.Now().UTC()
-	for id, row := range m.sessions {
-		if State(row.State).IsTerminal() {
+
+	var pending []Row
+	ceiling := 0
+	for _, r := range m.sessions {
+		if State(r.State) != StatePending {
 			continue
 		}
-		row.State = string(StateFailed)
-		row.Error = reason
-		row.UpdatedAt = ToMicros(now)
-		m.sessions[id] = row
+		if len(pending) == 0 || r.Priority > ceiling {
+			ceiling = r.Priority
+		}
+		pending = append(pending, r)
+	}
 
-		s, err := RowToSession(row)
+	// Effective priority with the same aging and clamp as the SQLite store, so
+	// a test that exercises ordering here proves the same rule.
+	effective := func(r Row) int {
+		p := r.Priority
+		if q.AgeStep > 0 {
+			p += int(q.Now.Sub(FromMicros(r.QueuedAt)) / q.AgeStep)
+			if p > ceiling {
+				p = ceiling
+			}
+		}
+		return p
+	}
+	sort.SliceStable(pending, func(i, j int) bool {
+		pi, pj := effective(pending[i]), effective(pending[j])
+		if pi != pj {
+			return pi > pj
+		}
+		return pending[i].QueuedAt < pending[j].QueuedAt
+	})
+
+	var out []*Session
+	for _, r := range pending {
+		s, err := RowToSession(r)
 		if err != nil {
 			return nil, err
 		}
-		_, payload, _, err := encodeEvent(StateChangeEvent{Session: s})
+		out = append(out, s)
+		if q.Limit > 0 && len(out) >= q.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) CountPending(_ context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, r := range m.sessions {
+		if State(r.State) == StatePending {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (m *memStore) TransitionPending(_ context.Context, id string, to PendingTransition) (bool, PersistedEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.sessions[id]
+	if !ok || State(row.State) != StatePending {
+		return false, PersistedEvent{}, nil
+	}
+	sess, err := RowToSession(row)
+	if err != nil {
+		return false, PersistedEvent{}, err
+	}
+	sess.State = to.State
+	sess.Message = to.Message
+	sess.Error = to.Error
+	ev, err := m.applyTransitionLocked(sess, time.Now().UTC())
+	if err != nil {
+		return false, PersistedEvent{}, err
+	}
+	return true, ev, nil
+}
+
+func (m *memStore) ExpirePending(_ context.Context, cutoff time.Time, reason string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cutoffMicros := ToMicros(cutoff)
+	now := time.Now().UTC()
+	var ids []string
+	for id, row := range m.sessions {
+		if State(row.State) != StatePending || row.QueuedAt >= cutoffMicros {
+			continue
+		}
+		sess, err := RowToSession(row)
 		if err != nil {
 			return nil, err
 		}
-		seq := int64(len(m.events[id])) + 1
-		m.events[id] = append(m.events[id], PersistedEvent{
-			SessionID:  id,
-			Seq:        seq,
-			Kind:       kindStateChange,
-			Payload:    payload,
-			RecordedAt: now,
-		})
+		sess.State = StateFailed
+		sess.Error = reason
+		if _, err := m.applyTransitionLocked(sess, now); err != nil {
+			return nil, err
+		}
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	return ids, nil
+}
+
+func (m *memStore) ReconcileStartup(_ context.Context, opts ReconcileOpts) (ReconcileResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var result ReconcileResult
+	now := time.Now().UTC()
+	for id, row := range m.sessions {
+		state := State(row.State)
+		if state.IsTerminal() || state == StatePending {
+			continue
+		}
+		sess, err := RowToSession(row)
+		if err != nil {
+			return ReconcileResult{}, err
+		}
+		requeue := state.IsRestartable()
+		if requeue && opts.MaxAttempts > 0 && sess.Attempts >= opts.MaxAttempts {
+			requeue = false
+		}
+		if requeue {
+			sess.Attempts++
+			sess.State = StatePending
+			sess.Message = opts.RequeueMessage
+			sess.Error = ""
+			sess.QueuedAt = now
+			result.Requeued = append(result.Requeued, id)
+		} else {
+			sess.State = StateFailed
+			sess.Error = opts.FailError
+			if opts.MaxAttempts > 0 && sess.Attempts >= opts.MaxAttempts {
+				sess.Error = fmt.Sprintf("%s (gave up after %d attempts)", opts.FailError, sess.Attempts)
+			}
+			result.Failed = append(result.Failed, id)
+		}
+		if _, err := m.applyTransitionLocked(sess, now); err != nil {
+			return ReconcileResult{}, err
+		}
+	}
+	sort.Strings(result.Requeued)
+	sort.Strings(result.Failed)
+	return result, nil
+}
+
+// applyTransitionLocked persists an already-mutated session and appends the
+// state_change event recording it. Caller holds m.mu.
+func (m *memStore) applyTransitionLocked(sess *Session, now time.Time) (PersistedEvent, error) {
+	sess.UpdatedAt = now
+	row, err := SessionToRow(sess)
+	if err != nil {
+		return PersistedEvent{}, err
+	}
+	m.sessions[sess.ID] = row
+
+	_, payload, _, err := encodeEvent(StateChangeEvent{Session: sess})
+	if err != nil {
+		return PersistedEvent{}, err
+	}
+	ev := PersistedEvent{
+		SessionID:  sess.ID,
+		Seq:        int64(len(m.events[sess.ID])) + 1,
+		Kind:       kindStateChange,
+		Payload:    payload,
+		RecordedAt: now,
+	}
+	m.events[sess.ID] = append(m.events[sess.ID], ev)
+	return ev, nil
 }
 
 func (m *memStore) PruneTerminalBefore(_ context.Context, cutoff time.Time) (int, error) {

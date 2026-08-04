@@ -107,12 +107,27 @@ type Scheduler struct {
 	// stream of high-priority ones (e.g. "5m"). "0" disables aging and lets
 	// priority strictly dominate. Empty falls through to the built-in default.
 	PriorityAgeStep string `toml:"priority_age_step,omitempty"`
-	// MaxQueue bounds how many jobs may wait for capacity at once. A waiting
-	// job holds a goroutine and a clone already on disk, so an unbounded queue
-	// quietly consumes the same filesystem the pool is sized from. Jobs beyond
-	// it are refused rather than queued. 0 is unbounded; empty takes the
-	// default.
+	// MaxQueue bounds how many jobs may occupy the in-memory pipeline at once
+	// — cloning, waiting for capacity, or running. Each holds a goroutine and
+	// a clone already on disk, so an unbounded pipeline quietly consumes the
+	// same filesystem the pool is sized from. Jobs beyond it wait in the
+	// durable backlog instead. 0 is unbounded; empty takes the default.
 	MaxQueue *int `toml:"max_queue,omitempty"`
+	// MaxBacklog bounds the durable backlog: jobs accepted and persisted but
+	// not yet dispatched into the pipeline. A backlog entry costs a row rather
+	// than a clone, so this can sit far above max_queue; reaching it refuses
+	// the submission. 0 is unbounded; empty takes the default.
+	MaxBacklog *int `toml:"max_backlog,omitempty"`
+	// MaxQueueWait fails a backlog entry that has waited this long without
+	// being dispatched (e.g. "24h"), so a host that was down for days does not
+	// boot into a flood of work nobody is waiting for. "0" never expires;
+	// empty takes the default.
+	MaxQueueWait string `toml:"max_queue_wait,omitempty"`
+	// MaxAttempts caps how many times one job may be dispatched. A run
+	// interrupted by a restart returns to the backlog and spends an attempt;
+	// past the cap it fails, so a job that kills the orchestrator on every
+	// attempt stops killing it. 0 disables the cap; empty takes the default.
+	MaxAttempts *int `toml:"max_attempts,omitempty"`
 	// MaxConcurrentClones bounds how many jobs may be cloning and reading
 	// their kvarn.yml at once — the work that happens *before* admission and
 	// is therefore not covered by the pool. 0 is unbounded; empty takes the

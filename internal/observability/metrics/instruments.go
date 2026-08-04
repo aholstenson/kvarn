@@ -28,6 +28,7 @@ type Instruments struct {
 	schedDiskUsed   metric.Int64ObservableGauge
 	schedDiskAvail  metric.Int64ObservableGauge
 	schedQueue      metric.Int64ObservableGauge
+	schedBacklog    metric.Int64ObservableGauge
 	schedHostDisk   metric.Int64ObservableGauge
 	schedPaused     metric.Int64ObservableGauge
 
@@ -46,8 +47,13 @@ type SchedulerSample struct {
 	CPUMillisUsed, CPUMillisTotal int64
 	MemBytesUsed, MemBytesTotal   int64
 	DiskBytesUsed, DiskBytesTotal int64
-	// QueueDepth is how many jobs are waiting for capacity.
-	QueueDepth int64
+	// QueueDepth is how many jobs are waiting for capacity in the in-memory
+	// pipeline, and BacklogDepth how many are persisted but not yet dispatched
+	// into it. The pair distinguishes a busy host — pipeline full, backlog
+	// empty — from one that is not keeping up at all. A negative BacklogDepth
+	// means the store could not be counted and is not reported.
+	QueueDepth   int64
+	BacklogDepth int64
 	// HostDiskFreeBytes is the disk guard's last measurement of real free
 	// space, and HostDiskMeasured says whether one has been taken yet. The
 	// pool's disk accounting is overcommitted, so this is the number that says
@@ -143,6 +149,10 @@ func NewInstruments(m metric.Meter, sessions SessionCounter, sched SchedulerSamp
 			metric.WithDescription("Jobs waiting for admission")); err != nil {
 			return nil, fmt.Errorf("scheduler.queue_depth: %w", err)
 		}
+		if ins.schedBacklog, err = m.Int64ObservableGauge("kvarn.scheduler.backlog_depth",
+			metric.WithDescription("Jobs persisted in the durable backlog, not yet dispatched")); err != nil {
+			return nil, fmt.Errorf("scheduler.backlog_depth: %w", err)
+		}
 		if ins.schedHostDisk, err = m.Int64ObservableGauge("kvarn.scheduler.host_disk_free",
 			metric.WithDescription("Measured free space on the filesystem VM disks are allocated on")); err != nil {
 			return nil, fmt.Errorf("scheduler.host_disk_free: %w", err)
@@ -155,7 +165,7 @@ func NewInstruments(m metric.Meter, sessions SessionCounter, sched SchedulerSamp
 			ins.schedCPUUsed, ins.schedCPUAvail,
 			ins.schedMemUsed, ins.schedMemAvail,
 			ins.schedDiskUsed, ins.schedDiskAvail,
-			ins.schedQueue, ins.schedPaused,
+			ins.schedQueue, ins.schedBacklog, ins.schedPaused,
 			ins.schedHostDisk,
 		}
 		reg, err := m.RegisterCallback(func(_ context.Context, obs metric.Observer) error {
@@ -167,6 +177,9 @@ func NewInstruments(m metric.Meter, sessions SessionCounter, sched SchedulerSamp
 			obs.ObserveInt64(ins.schedDiskUsed, s.DiskBytesUsed)
 			obs.ObserveInt64(ins.schedDiskAvail, s.DiskBytesTotal-s.DiskBytesUsed)
 			obs.ObserveInt64(ins.schedQueue, s.QueueDepth)
+			if s.BacklogDepth >= 0 {
+				obs.ObserveInt64(ins.schedBacklog, s.BacklogDepth)
+			}
 			obs.ObserveInt64(ins.schedPaused, boolGauge(s.AdmissionPaused))
 			// Reporting a zero before the first sample would read as a full
 			// disk, which is the one thing this gauge is watched for.

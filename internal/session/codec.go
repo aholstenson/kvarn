@@ -58,6 +58,10 @@ type Row struct {
 	CostJSON        string
 	CreatedAt       int64 // unix micros UTC
 	UpdatedAt       int64 // unix micros UTC
+	KeyID           string
+	Priority        int
+	Attempts        int
+	QueuedAt        int64 // unix micros UTC
 }
 
 // SessionToRow converts a Session into its persisted Row form, marshalling the
@@ -85,6 +89,10 @@ func SessionToRow(s *Session) (Row, error) {
 		CostJSON:        costJSON,
 		CreatedAt:       ToMicros(s.CreatedAt),
 		UpdatedAt:       ToMicros(s.UpdatedAt),
+		KeyID:           s.KeyID,
+		Priority:        s.Priority,
+		Attempts:        s.Attempts,
+		QueuedAt:        ToMicros(s.QueuedAt),
 	}, nil
 }
 
@@ -113,6 +121,10 @@ func RowToSession(r Row) (*Session, error) {
 		Cost:            report,
 		CreatedAt:       FromMicros(r.CreatedAt),
 		UpdatedAt:       FromMicros(r.UpdatedAt),
+		KeyID:           r.KeyID,
+		Priority:        r.Priority,
+		Attempts:        r.Attempts,
+		QueuedAt:        FromMicros(r.QueuedAt),
 	}, nil
 }
 

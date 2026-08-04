@@ -93,11 +93,13 @@ func (s *Store) CreateSession(ctx context.Context, sess *session.Session) error 
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO sessions
 		   (id, project_name, prompt, mode, state, message, error, pull_request_url,
-		    pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at,
+		    key_id, priority, attempts, queued_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.ID, row.ProjectName, row.Prompt, row.Mode, row.State, row.Message,
 		row.Error, row.PullRequestURL, row.PRRef, row.HeadBranch, row.BaseBranch,
 		row.ParentSessionID, row.CostJSON, row.CreatedAt, row.UpdatedAt,
+		row.KeyID, row.Priority, row.Attempts, row.QueuedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
@@ -106,13 +108,15 @@ func (s *Store) CreateSession(ctx context.Context, sess *session.Session) error 
 }
 
 const sessionColumns = `id, project_name, prompt, mode, state, message, error, pull_request_url, ` +
-	`pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at`
+	`pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at, ` +
+	`key_id, priority, attempts, queued_at`
 
 func scanSession(scan func(dest ...any) error) (*session.Session, error) {
 	var r session.Row
 	if err := scan(&r.ID, &r.ProjectName, &r.Prompt, &r.Mode, &r.State, &r.Message,
 		&r.Error, &r.PullRequestURL, &r.PRRef, &r.HeadBranch, &r.BaseBranch,
-		&r.ParentSessionID, &r.CostJSON, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		&r.ParentSessionID, &r.CostJSON, &r.CreatedAt, &r.UpdatedAt,
+		&r.KeyID, &r.Priority, &r.Attempts, &r.QueuedAt); err != nil {
 		return nil, err
 	}
 	return session.RowToSession(r)
@@ -130,6 +134,11 @@ func (s *Store) GetSession(ctx context.Context, id string) (*session.Session, er
 	return sess, nil
 }
 
+// UpdateSession writes a run's mutable fields. The queue columns (key_id,
+// priority, attempts, queued_at) are deliberately not among them: they are set
+// once at submission and thereafter only by the backlog operations below, so an
+// ordinary state update along the job's path cannot disturb the ordering or the
+// attempt count.
 func (s *Store) UpdateSession(ctx context.Context, sess *session.Session) error {
 	row, err := session.SessionToRow(sess)
 	if err != nil {
@@ -270,60 +279,123 @@ func (s *Store) MaxSeq(ctx context.Context, sessionID string) (int64, error) {
 	return seq, nil
 }
 
-func (s *Store) ReconcileNonTerminal(ctx context.Context, reason string) ([]string, error) {
-	var ids []string
+func (s *Store) ListPending(ctx context.Context, q session.PendingQuery) ([]*session.Session, error) {
+	// The ordering is computed rather than read off the index, so this sorts
+	// the pending rows. The partial index is what keeps that set small: it is
+	// the backlog, not the session history.
+	pending := string(session.StatePending)
+	query := `SELECT ` + sessionColumns + ` FROM sessions WHERE state = ? ORDER BY `
+	args := []any{pending}
+	if q.AgeStep > 0 {
+		// Effective priority = configured + one level per AgeStep waited,
+		// clamped to the highest priority in the backlog so aging can only
+		// close a gap an operator opened. Mirrors scheduler.Fair.rank.
+		query += `MIN(priority + (? - queued_at) / ?,
+		              (SELECT MAX(priority) FROM sessions WHERE state = ?)) DESC, queued_at ASC`
+		args = append(args, session.ToMicros(q.Now), q.AgeStep.Microseconds(), pending)
+	} else {
+		query += `priority DESC, queued_at ASC`
+	}
+	if q.Limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, q.Limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list pending: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*session.Session
+	for rows.Next() {
+		sess, err := scanSession(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CountPending(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sessions WHERE state = ?`, string(session.StatePending)).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count pending: %w", err)
+	}
+	return n, nil
+}
+
+func (s *Store) TransitionPending(ctx context.Context, id string, to session.PendingTransition) (bool, session.PersistedEvent, error) {
+	var (
+		claimed bool
+		event   session.PersistedEvent
+	)
 	err := retryBusy(func() error {
-		ids = ids[:0]
+		claimed = false
+		event = session.PersistedEvent{}
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
 		defer tx.Rollback()
 
-		placeholders, stateArgs := terminalStates()
-		rows, err := tx.QueryContext(ctx,
-			`SELECT `+sessionColumns+` FROM sessions WHERE state NOT IN (`+placeholders+`) ORDER BY id`,
-			stateArgs...)
+		row := tx.QueryRowContext(ctx,
+			`SELECT `+sessionColumns+` FROM sessions WHERE id = ? AND state = ?`,
+			id, string(session.StatePending))
+		sess, err := scanSession(row.Scan)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Already claimed, cancelled or gone. Not an error: the caller
+			// competing for it simply lost.
+			return nil
+		}
 		if err != nil {
 			return err
 		}
-		var stale []*session.Session
-		for rows.Next() {
-			sess, err := scanSession(rows.Scan)
-			if err != nil {
-				rows.Close()
-				return err
-			}
-			stale = append(stale, sess)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
+
+		sess.State = to.State
+		sess.Message = to.Message
+		sess.Error = to.Error
+		event, err = applyTransition(ctx, tx, sess, time.Now().UTC())
+		if err != nil {
 			return err
 		}
-		rows.Close()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		claimed = true
+		return nil
+	})
+	if err != nil {
+		return false, session.PersistedEvent{}, fmt.Errorf("transition pending: %w", err)
+	}
+	return claimed, event, nil
+}
+
+func (s *Store) ExpirePending(ctx context.Context, cutoff time.Time, reason string) ([]string, error) {
+	var ids []string
+	err := retryBusy(func() error {
+		ids = nil
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		stale, err := querySessions(ctx, tx,
+			`SELECT `+sessionColumns+` FROM sessions WHERE state = ? AND queued_at < ? ORDER BY id`,
+			string(session.StatePending), session.ToMicros(cutoff))
+		if err != nil {
+			return err
+		}
 
 		now := time.Now().UTC()
 		for _, sess := range stale {
 			sess.State = session.StateFailed
 			sess.Error = reason
-			sess.UpdatedAt = now
-			row, err := session.SessionToRow(sess)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE sessions SET state = ?, error = ?, updated_at = ? WHERE id = ?`,
-				row.State, row.Error, row.UpdatedAt, row.ID); err != nil {
-				return err
-			}
-			kind, payload, err := session.EncodeStateChange(sess)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO session_events (session_id, seq, kind, payload, recorded_at)
-				 SELECT ?, COALESCE((SELECT MAX(seq) FROM session_events WHERE session_id = ?), 0) + 1, ?, ?, ?`,
-				sess.ID, sess.ID, kind, payload, session.ToMicros(now)); err != nil {
+			if _, err := applyTransition(ctx, tx, sess, now); err != nil {
 				return err
 			}
 			ids = append(ids, sess.ID)
@@ -331,9 +403,124 @@ func (s *Store) ReconcileNonTerminal(ctx context.Context, reason string) ([]stri
 		return tx.Commit()
 	})
 	if err != nil {
-		return nil, fmt.Errorf("reconcile non-terminal: %w", err)
+		return nil, fmt.Errorf("expire pending: %w", err)
 	}
 	return ids, nil
+}
+
+func (s *Store) ReconcileStartup(ctx context.Context, opts session.ReconcileOpts) (session.ReconcileResult, error) {
+	var result session.ReconcileResult
+	err := retryBusy(func() error {
+		result = session.ReconcileResult{}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		// Pending sessions are excluded along with the terminal ones: they are
+		// the backlog this reconciliation feeds, and touching them would charge
+		// an attempt for a restart they sat out.
+		placeholders, stateArgs := terminalStates()
+		stateArgs = append(stateArgs, string(session.StatePending))
+		stale, err := querySessions(ctx, tx,
+			`SELECT `+sessionColumns+` FROM sessions WHERE state NOT IN (`+placeholders+`, ?) ORDER BY id`,
+			stateArgs...)
+		if err != nil {
+			return err
+		}
+
+		now := time.Now().UTC()
+		for _, sess := range stale {
+			requeue := sess.State.IsRestartable()
+			if requeue && opts.MaxAttempts > 0 && sess.Attempts >= opts.MaxAttempts {
+				requeue = false
+			}
+			if requeue {
+				sess.Attempts++
+				sess.State = session.StatePending
+				sess.Message = opts.RequeueMessage
+				sess.Error = ""
+				// QueuedAt moves so the entry ages from its return to the
+				// backlog. Cost is not touched, so a job that already spent
+				// against its cap carries that spend into the retry.
+				sess.QueuedAt = now
+				result.Requeued = append(result.Requeued, sess.ID)
+			} else {
+				sess.State = session.StateFailed
+				sess.Error = opts.FailError
+				if opts.MaxAttempts > 0 && sess.Attempts >= opts.MaxAttempts {
+					sess.Error = fmt.Sprintf("%s (gave up after %d attempts)", opts.FailError, sess.Attempts)
+				}
+				result.Failed = append(result.Failed, sess.ID)
+			}
+			if _, err := applyTransition(ctx, tx, sess, now); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	})
+	if err != nil {
+		return session.ReconcileResult{}, fmt.Errorf("reconcile startup: %w", err)
+	}
+	return result, nil
+}
+
+// querySessions runs a session-shaped SELECT to completion inside tx. Reading
+// the whole result before the next statement matters on a single-connection
+// pool: an open rows cursor and a write on the same connection deadlock.
+func querySessions(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]*session.Session, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*session.Session
+	for rows.Next() {
+		sess, err := scanSession(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+// applyTransition persists an already-mutated session and appends the
+// state_change event recording it, in the caller's transaction so a watcher can
+// never observe one without the other.
+func applyTransition(ctx context.Context, tx *sql.Tx, sess *session.Session, now time.Time) (session.PersistedEvent, error) {
+	sess.UpdatedAt = now
+	row, err := session.SessionToRow(sess)
+	if err != nil {
+		return session.PersistedEvent{}, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE sessions
+		    SET state = ?, message = ?, error = ?, attempts = ?, queued_at = ?, updated_at = ?
+		  WHERE id = ?`,
+		row.State, row.Message, row.Error, row.Attempts, row.QueuedAt, row.UpdatedAt, row.ID); err != nil {
+		return session.PersistedEvent{}, err
+	}
+	kind, payload, err := session.EncodeStateChange(sess)
+	if err != nil {
+		return session.PersistedEvent{}, err
+	}
+	var seq int64
+	if err := tx.QueryRowContext(ctx,
+		`INSERT INTO session_events (session_id, seq, kind, payload, recorded_at)
+		 SELECT ?, COALESCE((SELECT MAX(seq) FROM session_events WHERE session_id = ?), 0) + 1, ?, ?, ?
+		 RETURNING seq`,
+		sess.ID, sess.ID, kind, payload, session.ToMicros(now)).Scan(&seq); err != nil {
+		return session.PersistedEvent{}, err
+	}
+	return session.PersistedEvent{
+		SessionID:  sess.ID,
+		Seq:        seq,
+		Kind:       kind,
+		Payload:    payload,
+		RecordedAt: now,
+	}, nil
 }
 
 func (s *Store) PruneTerminalBefore(ctx context.Context, cutoff time.Time) (int, error) {

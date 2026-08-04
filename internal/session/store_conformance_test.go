@@ -26,7 +26,19 @@ func makeSession(id, project string, state session.State, createdAt time.Time) *
 		State:       state,
 		CreatedAt:   createdAt,
 		UpdatedAt:   createdAt,
+		// Production creates a session straight into the backlog, so its queue
+		// age starts with it.
+		QueuedAt: createdAt,
 	}
+}
+
+// idsOf reduces a session slice to its ids, for order assertions.
+func idsOf(sessions []*session.Session) []string {
+	out := make([]string, len(sessions))
+	for i, s := range sessions {
+		out[i] = s.ID
+	}
+	return out
 }
 
 // DescribeStore runs the shared Store conformance suite against the store the
@@ -226,34 +238,190 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 			Expect(page2[0].ID).To(Equal("id1"))
 		})
 
-		It("reconciles non-terminal sessions, appends state_change, and is idempotent", func() {
+		It("requeues restartable sessions and fails the rest, appending state_change to each", func() {
+			cloning := makeSession("cloning", "p", session.StateCloning, base)
 			running := makeSession("run", "p", session.StateRunning, base)
+			submitting := makeSession("submit", "p", session.StateSubmitting, base)
 			done := makeSession("done", "p", session.StateCompleted, base)
-			Expect(store.CreateSession(ctx, running)).To(Succeed())
-			Expect(store.CreateSession(ctx, done)).To(Succeed())
+			for _, s := range []*session.Session{cloning, running, submitting, done} {
+				Expect(store.CreateSession(ctx, s)).To(Succeed())
+			}
 
-			ids, err := store.ReconcileNonTerminal(ctx, "orchestrator restarted")
+			res, err := store.ReconcileStartup(ctx, session.ReconcileOpts{
+				RequeueMessage: "requeued", FailError: "orchestrator restarted",
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ids).To(ConsistOf("run"))
+			Expect(res.Requeued).To(ConsistOf("cloning"))
+			// A run that had spent budget, and one that may already have pushed
+			// a branch, are both too late to start over.
+			Expect(res.Failed).To(ConsistOf("run", "submit"))
 
-			got, err := store.GetSession(ctx, "run")
+			back, err := store.GetSession(ctx, "cloning")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(got.State).To(Equal(session.StateFailed))
-			Expect(got.Error).To(Equal("orchestrator restarted"))
+			Expect(back.State).To(Equal(session.StatePending))
+			Expect(back.Attempts).To(Equal(1))
+			Expect(back.Error).To(BeEmpty())
+			Expect(back.QueuedAt).To(BeTemporally(">", base))
 
-			evs, err := store.ListEvents(ctx, "run", 0, 0)
+			failed, err := store.GetSession(ctx, "run")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(evs).To(HaveLen(1))
-			Expect(evs[0].Kind).To(Equal("state_change"))
+			Expect(failed.State).To(Equal(session.StateFailed))
+			Expect(failed.Error).To(Equal("orchestrator restarted"))
 
-			// The terminal session is untouched and re-running is a no-op.
-			ids2, err := store.ReconcileNonTerminal(ctx, "again")
+			for _, id := range []string{"cloning", "run", "submit"} {
+				evs, err := store.ListEvents(ctx, id, 0, 0)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(evs).To(HaveLen(1))
+				Expect(evs[0].Kind).To(Equal("state_change"))
+			}
+
+			// The terminal session is untouched, and the requeued one is now
+			// pending so a second pass leaves it in the backlog rather than
+			// charging it another attempt.
+			res2, err := store.ReconcileStartup(ctx, session.ReconcileOpts{FailError: "again"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ids2).To(BeEmpty())
+			Expect(res2.Requeued).To(BeEmpty())
+			Expect(res2.Failed).To(BeEmpty())
 
 			doneEvs, err := store.ListEvents(ctx, "done", 0, 0)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(doneEvs).To(BeEmpty())
+		})
+
+		It("fails a restartable session that has used up its attempts", func() {
+			s := makeSession("looper", "p", session.StateSetup, base)
+			s.Attempts = 3
+			Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+			res, err := store.ReconcileStartup(ctx, session.ReconcileOpts{
+				MaxAttempts: 3, FailError: "orchestrator restarted",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Requeued).To(BeEmpty())
+			Expect(res.Failed).To(ConsistOf("looper"))
+
+			got, err := store.GetSession(ctx, "looper")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.State).To(Equal(session.StateFailed))
+			Expect(got.Error).To(ContainSubstring("gave up after 3 attempts"))
+		})
+
+		It("carries spend into a requeued run so a retry cannot recharge the cap", func() {
+			s := makeSession("spent", "p", session.StateSetup, base)
+			s.Cost = cost.Report{InputTokens: 100, TotalUSD: 2.5}
+			Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+			_, err := store.ReconcileStartup(ctx, session.ReconcileOpts{RequeueMessage: "requeued"})
+			Expect(err).NotTo(HaveOccurred())
+
+			got, err := store.GetSession(ctx, "spent")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.State).To(Equal(session.StatePending))
+			Expect(got.Cost.TotalUSD).To(Equal(2.5))
+		})
+
+		Describe("backlog", func() {
+			// queued builds a pending session that entered the backlog at the
+			// given time with the given priority.
+			queued := func(id string, project string, priority int, at time.Time) *session.Session {
+				s := makeSession(id, project, session.StatePending, at)
+				s.Priority = priority
+				s.QueuedAt = at
+				return s
+			}
+
+			It("counts and lists only pending sessions", func() {
+				Expect(store.CreateSession(ctx, queued("a", "p", 0, base))).To(Succeed())
+				Expect(store.CreateSession(ctx, makeSession("b", "p", session.StateRunning, base))).To(Succeed())
+
+				n, err := store.CountPending(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(1))
+
+				got, err := store.ListPending(ctx, session.PendingQuery{Now: base})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(idsOf(got)).To(Equal([]string{"a"}))
+			})
+
+			It("orders by priority first and arrival second", func() {
+				Expect(store.CreateSession(ctx, queued("old-low", "p", 0, base))).To(Succeed())
+				Expect(store.CreateSession(ctx, queued("new-high", "p", 5, base.Add(time.Minute)))).To(Succeed())
+				Expect(store.CreateSession(ctx, queued("old-high", "p", 5, base))).To(Succeed())
+
+				got, err := store.ListPending(ctx, session.PendingQuery{Now: base.Add(time.Minute)})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(idsOf(got)).To(Equal([]string{"old-high", "new-high", "old-low"}))
+			})
+
+			It("ages a waiting entry up to, but never past, the highest priority queued", func() {
+				Expect(store.CreateSession(ctx, queued("waiting", "p", 0, base))).To(Succeed())
+				Expect(store.CreateSession(ctx, queued("important", "p", 2, base.Add(time.Hour)))).To(Succeed())
+
+				q := session.PendingQuery{Now: base.Add(time.Hour), AgeStep: 10 * time.Minute}
+				got, err := store.ListPending(ctx, q)
+				Expect(err).NotTo(HaveOccurred())
+				// Six age steps would put it at 6, but the clamp holds it at 2
+				// and the tie falls to arrival — which the waiting entry wins.
+				Expect(idsOf(got)).To(Equal([]string{"waiting", "important"}))
+			})
+
+			It("honours the limit", func() {
+				for i := range 3 {
+					Expect(store.CreateSession(ctx, queued(fmt.Sprintf("s%d", i), "p", 0, base.Add(time.Duration(i)*time.Second)))).To(Succeed())
+				}
+				got, err := store.ListPending(ctx, session.PendingQuery{Now: base, Limit: 2})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got).To(HaveLen(2))
+			})
+
+			It("lets exactly one caller transition a pending session", func() {
+				Expect(store.CreateSession(ctx, queued("race", "p", 0, base))).To(Succeed())
+
+				won, ev, err := store.TransitionPending(ctx, "race", session.PendingTransition{
+					State: session.StateQueued, Message: "dispatched",
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(won).To(BeTrue())
+				Expect(ev.Kind).To(Equal("state_change"))
+				Expect(ev.Seq).To(Equal(int64(1)))
+
+				// The loser is told it lost rather than handed an error.
+				won2, _, err := store.TransitionPending(ctx, "race", session.PendingTransition{
+					State: session.StateCancelled, Message: "too late",
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(won2).To(BeFalse())
+
+				got, err := store.GetSession(ctx, "race")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got.State).To(Equal(session.StateQueued))
+				Expect(got.Message).To(Equal("dispatched"))
+			})
+
+			It("reports a miss for a session that was never pending", func() {
+				Expect(store.CreateSession(ctx, makeSession("busy", "p", session.StateRunning, base))).To(Succeed())
+				won, _, err := store.TransitionPending(ctx, "busy", session.PendingTransition{State: session.StateCancelled})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(won).To(BeFalse())
+			})
+
+			It("expires entries queued before the cutoff and leaves the rest", func() {
+				Expect(store.CreateSession(ctx, queued("stale", "p", 0, base.Add(-48*time.Hour)))).To(Succeed())
+				Expect(store.CreateSession(ctx, queued("fresh", "p", 0, base))).To(Succeed())
+
+				ids, err := store.ExpirePending(ctx, base.Add(-24*time.Hour), "waited too long")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(ids).To(ConsistOf("stale"))
+
+				got, err := store.GetSession(ctx, "stale")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got.State).To(Equal(session.StateFailed))
+				Expect(got.Error).To(Equal("waited too long"))
+
+				n, err := store.CountPending(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(1))
+			})
 		})
 
 		It("treats a cancelled session as terminal", func() {
@@ -266,9 +434,10 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 
 			// Startup reconciliation leaves it alone rather than flipping it to
 			// failed, and retention prunes it like any other finished session.
-			ids, err := store.ReconcileNonTerminal(ctx, "orchestrator restarted")
+			res, err := store.ReconcileStartup(ctx, session.ReconcileOpts{FailError: "orchestrator restarted"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ids).To(BeEmpty())
+			Expect(res.Requeued).To(BeEmpty())
+			Expect(res.Failed).To(BeEmpty())
 
 			n, err := store.PruneTerminalBefore(ctx, base.Add(-24*time.Hour))
 			Expect(err).NotTo(HaveOccurred())

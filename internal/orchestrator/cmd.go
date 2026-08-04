@@ -61,7 +61,10 @@ type Cmd struct {
 	SchedDiskFloor      string  `help:"Real free space the VM disk filesystem must keep (e.g. 20G); admission pauses below it. 0 disables. Empty = file / 10% of the pool." env:"KVARN_SCHED_DISK_FLOOR" default:""`
 	SchedBackfillGrace  string  `help:"How long a queued job may be skipped by ones that fit before it holds the line (e.g. 1m). 0 = strict FIFO. Empty = file / built-in default." env:"KVARN_SCHED_BACKFILL_GRACE" default:""`
 	SchedPriorityAge    string  `help:"How long a queued job waits to gain one level of priority (e.g. 5m). 0 disables aging. Empty = file / built-in default." env:"KVARN_SCHED_PRIORITY_AGE_STEP" default:""`
-	SchedMaxQueue       int     `help:"Max jobs waiting for capacity; further jobs are refused. -1 = unbounded. 0 = file / built-in default." env:"KVARN_SCHED_MAX_QUEUE" default:"0"`
+	SchedMaxQueue       int     `help:"Max jobs in the in-memory pipeline (cloning, queued, running); the rest wait in the backlog. -1 = unbounded. 0 = file / built-in default." env:"KVARN_SCHED_MAX_QUEUE" default:"0"`
+	SchedMaxBacklog     int     `help:"Max jobs accepted into the durable backlog; further submissions are refused. -1 = unbounded. 0 = file / built-in default." env:"KVARN_SCHED_MAX_BACKLOG" default:"0"`
+	SchedMaxQueueWait   string  `help:"Fail a backlog entry that has waited this long undispatched (e.g. 24h). 0 = never. Empty = file / built-in default." env:"KVARN_SCHED_MAX_QUEUE_WAIT" default:""`
+	SchedMaxAttempts    int     `help:"Max dispatches per job; a restart-interrupted run spends one. -1 = no cap. 0 = file / built-in default." env:"KVARN_SCHED_MAX_ATTEMPTS" default:"0"`
 	SchedMaxClones      int     `help:"Max jobs cloning at once before admission. -1 = unbounded. 0 = file / built-in default." env:"KVARN_SCHED_MAX_CLONES" default:"0"`
 	SchedMaxVMLifetime  string  `help:"Host-wide per-VM wall-time failsafe (e.g. 4h). Empty = file / built-in default." env:"KVARN_SCHED_MAX_VM_LIFETIME" default:""`
 
@@ -101,10 +104,27 @@ const defaultBackfillGrace = time.Minute
 // runtime rather than a shift.
 const defaultPriorityAgeStep = 5 * time.Minute
 
-// defaultMaxQueue bounds the admission queue when the operator sets none. It is
-// generous — a queue this deep is a backlog, not a burst — because its job is
-// to stop an unbounded accumulation of clones, not to shape traffic.
+// defaultMaxQueue bounds the in-memory pipeline when the operator sets none.
+// Its job is to stop an unbounded accumulation of clones, not to shape traffic:
+// work beyond it is not refused, it waits in the durable backlog.
 const defaultMaxQueue = 64
+
+// defaultMaxBacklog bounds the durable backlog. It is two orders of magnitude
+// above the pipeline because a backlog entry is a row rather than a clone and a
+// goroutine: the bound exists to catch a runaway submitter, not to express how
+// much work the host can hold.
+const defaultMaxBacklog = 1000
+
+// defaultMaxQueueWait is how long a job may sit in the backlog before it is
+// failed. A day is far longer than any healthy wait, which is the point — it
+// only catches work whose requester has long since stopped waiting for it,
+// typically after the host was down.
+const defaultMaxQueueWait = 24 * time.Hour
+
+// defaultMaxAttempts caps dispatches per job. A restart mid-clone should not
+// cost a job its run, but a job that takes the orchestrator down with it must
+// not be retried indefinitely; three attempts distinguishes the two.
+const defaultMaxAttempts = 3
 
 // defaultMaxConcurrentClones bounds the work that happens before admission.
 // Clones are I/O bound and mostly served from local mirrors, so a handful
@@ -211,7 +231,7 @@ func (c *Cmd) Run() error {
 		return fmt.Errorf("load orchestrator config: %w", err)
 	}
 
-	sched, err := c.buildScheduler(orchFile.Scheduler)
+	sched, dispatchPolicy, err := c.buildScheduler(orchFile.Scheduler)
 	if err != nil {
 		return fmt.Errorf("scheduler: %w", err)
 	}
@@ -328,13 +348,27 @@ func (c *Cmd) Run() error {
 	defer sessionStore.Close()
 	slog.Info("sessions database", "path", sessionsDBPath)
 
-	// VMs do not survive an orchestrator restart, so any session left
-	// non-terminal in the store can never make progress. Flip them to failed
-	// (appending a state_change event) before serving.
-	if ids, err := sessionStore.ReconcileNonTerminal(ctx, "orchestrator restarted"); err != nil {
+	// VMs do not survive an orchestrator restart, so no session left mid-run in
+	// the store can continue where it left off. What differs is whether
+	// starting it over is safe: a run that had only cloned, queued or booted a
+	// VM goes back to the backlog and runs again, while one that had already
+	// spent budget or pushed a branch is failed. This happens before the
+	// listener opens, so the dispatcher never races a session it is about to
+	// requeue. See session.RestartableStates for where the line falls and why.
+	maxAttempts := resolveCount(c.SchedMaxAttempts, orchFile.Scheduler.MaxAttempts, defaultMaxAttempts)
+	reconciled, err := sessionStore.ReconcileStartup(ctx, session.ReconcileOpts{
+		MaxAttempts:    maxAttempts,
+		RequeueMessage: "Requeued after the orchestrator restarted",
+		FailError:      "orchestrator restarted",
+	})
+	if err != nil {
 		return fmt.Errorf("reconcile sessions: %w", err)
-	} else if len(ids) > 0 {
-		slog.Info("reconciled non-terminal sessions to failed", "count", len(ids))
+	}
+	if n := len(reconciled.Requeued); n > 0 {
+		slog.Info("requeued interrupted jobs", "count", n, "max_attempts", maxAttempts)
+	}
+	if n := len(reconciled.Failed); n > 0 {
+		slog.Warn("failed interrupted jobs that could not be safely restarted", "count", n)
 	}
 
 	retention, err := resolveSessionRetention(orchFile.Sessions)
@@ -359,7 +393,15 @@ func (c *Cmd) Run() error {
 		func() metrics.SchedulerSample {
 			used, free, queued := sched.Snapshot()
 			hostFree, _, measured, open := sched.DiskGuard()
+			// Backlog depth answers a question queue depth cannot: a full
+			// pipeline with an empty backlog is a busy host, while a deep
+			// backlog is work the host is not keeping up with at all.
+			backlog, err := sessionStore.CountPending(ctx)
+			if err != nil {
+				backlog = -1
+			}
 			return metrics.SchedulerSample{
+				BacklogDepth: int64(backlog),
 				CPUMillisUsed:     int64(used.CPUMillis),
 				CPUMillisTotal:    int64(used.CPUMillis + free.CPUMillis),
 				MemBytesUsed:      int64(used.MemBytes),
@@ -399,6 +441,7 @@ func (c *Cmd) Run() error {
 		APIKeyStore:         apiKeyStore,
 		AuthEnabled:         !c.NoAuth,
 		Scheduler:           sched,
+		Dispatch:            dispatchPolicy,
 		TenantLimits:        tenantLimits,
 		MaxConcurrentClones: resolveCount(c.SchedMaxClones, orchFile.Scheduler.MaxConcurrentClones, defaultMaxConcurrentClones),
 		CacheProvider:       cacheProvider,
@@ -601,7 +644,11 @@ func resolveCacheQuota(c orchcfg.Cache) (cache.Quota, error) {
 // Host fallbacks: NumCPU / 75% memory / 75% free disk on the image cache
 // filesystem. Rejects degenerate configurations early so the orchestrator
 // never starts with a pool that can't admit anything.
-func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, error) {
+//
+// It also returns the backlog dispatch policy, because the two must agree:
+// max_queue is the pipeline population the dispatcher fills and the queue bound
+// the scheduler guards, and both tiers age a waiting job at the same rate.
+func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, DispatchPolicy, error) {
 	overcommit := c.SchedCPUOvercommit
 	if overcommit == 0 && fileCfg.CPUOvercommit != nil {
 		overcommit = *fileCfg.CPUOvercommit
@@ -610,7 +657,7 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 		overcommit = defaultCPUOvercommit
 	}
 	if overcommit < 1.0 {
-		return nil, fmt.Errorf("cpu_overcommit must be >= 1.0, got %g", overcommit)
+		return nil, DispatchPolicy{}, fmt.Errorf("cpu_overcommit must be >= 1.0, got %g", overcommit)
 	}
 
 	cpus := uint64(c.SchedCPUs)
@@ -631,7 +678,7 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 			return scheduler.FractionOf(host), nil
 		})
 	if err != nil {
-		return nil, err
+		return nil, DispatchPolicy{}, err
 	}
 
 	diskOvercommit := c.SchedDiskOvercommit
@@ -642,7 +689,7 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 		diskOvercommit = defaultDiskOvercommit
 	}
 	if diskOvercommit < 1.0 {
-		return nil, fmt.Errorf("disk_overcommit must be >= 1.0, got %g", diskOvercommit)
+		return nil, DispatchPolicy{}, fmt.Errorf("disk_overcommit must be >= 1.0, got %g", diskOvercommit)
 	}
 
 	// The disk pool and the guard both concern one filesystem — the one VM
@@ -650,7 +697,7 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 	// sizes the pool by hand and the host fallback below never runs.
 	diskPath, err := scheduler.DefaultImageCacheDir()
 	if err != nil {
-		return nil, err
+		return nil, DispatchPolicy{}, err
 	}
 
 	rawDisk, err := resolveSize(c.SchedDisk, fileCfg.Disk, "--sched-disk", "scheduler.disk",
@@ -662,7 +709,7 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 			return scheduler.FractionOf(free), nil
 		})
 	if err != nil {
-		return nil, err
+		return nil, DispatchPolicy{}, err
 	}
 	diskBytes := uint64(float64(rawDisk) * diskOvercommit)
 
@@ -674,30 +721,50 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 			return uint64(float64(rawDisk) * defaultDiskFloorFraction), nil
 		})
 	if err != nil {
-		return nil, err
+		return nil, DispatchPolicy{}, err
 	}
 
 	total := scheduler.Capacity{CPUMillis: cpuMillis, MemBytes: memBytes, DiskBytes: diskBytes}
 	if total.CPUMillis == 0 || total.MemBytes == 0 || total.DiskBytes == 0 {
-		return nil, fmt.Errorf("admission pool has a zero dimension: %+v", total)
+		return nil, DispatchPolicy{}, fmt.Errorf("admission pool has a zero dimension: %+v", total)
 	}
 
 	grace, err := resolveDuration(c.SchedBackfillGrace, fileCfg.BackfillGrace,
 		"--sched-backfill-grace", "scheduler.backfill_grace", defaultBackfillGrace)
 	if err != nil {
-		return nil, err
+		return nil, DispatchPolicy{}, err
 	}
 	if grace < 0 {
-		return nil, fmt.Errorf("backfill_grace must be non-negative")
+		return nil, DispatchPolicy{}, fmt.Errorf("backfill_grace must be non-negative")
 	}
 
 	ageStep, err := resolveDuration(c.SchedPriorityAge, fileCfg.PriorityAgeStep,
 		"--sched-priority-age", "scheduler.priority_age_step", defaultPriorityAgeStep)
 	if err != nil {
-		return nil, err
+		return nil, DispatchPolicy{}, err
 	}
 	if ageStep < 0 {
-		return nil, fmt.Errorf("priority_age_step must be non-negative")
+		return nil, DispatchPolicy{}, fmt.Errorf("priority_age_step must be non-negative")
+	}
+
+	maxQueueWait, err := resolveDuration(c.SchedMaxQueueWait, fileCfg.MaxQueueWait,
+		"--sched-max-queue-wait", "scheduler.max_queue_wait", defaultMaxQueueWait)
+	if err != nil {
+		return nil, DispatchPolicy{}, err
+	}
+	if maxQueueWait < 0 {
+		return nil, DispatchPolicy{}, fmt.Errorf("max_queue_wait must be non-negative")
+	}
+
+	maxQueue := resolveCount(c.SchedMaxQueue, fileCfg.MaxQueue, defaultMaxQueue)
+	dispatch := DispatchPolicy{
+		MaxDispatched: maxQueue,
+		// The backlog ages a waiting job at the same rate the admission queue
+		// does, so a job's position is decided by one rule rather than by which
+		// side of dispatch it happens to be on.
+		PriorityAgeStep: ageStep,
+		MaxBacklog:      resolveCount(c.SchedMaxBacklog, fileCfg.MaxBacklog, defaultMaxBacklog),
+		MaxQueueWait:    maxQueueWait,
 	}
 
 	slog.Info("scheduler pool",
@@ -710,11 +777,17 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 		"disk_path", diskPath,
 		"backfill_grace", grace.String(),
 		"priority_age_step", ageStep.String(),
+		"max_queue", maxQueue,
+		"max_backlog", dispatch.MaxBacklog,
+		"max_queue_wait", maxQueueWait.String(),
 	)
 
 	return scheduler.New(scheduler.Options{
-		Total:          total,
-		MaxQueue:       resolveCount(c.SchedMaxQueue, fileCfg.MaxQueue, defaultMaxQueue),
+		Total: total,
+		// The dispatcher never pushes more than MaxDispatched into the
+		// pipeline, so this bound is a guard on that invariant rather than a
+		// limit submissions meet: backpressure is the backlog's job now.
+		MaxQueue:       maxQueue,
 		CPUOvercommit:  overcommit,
 		DiskOvercommit: diskOvercommit,
 		DiskPath:       diskPath,
@@ -730,7 +803,7 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 				Inner:   scheduler.Backfill{Grace: grace},
 			},
 		},
-	}), nil
+	}), dispatch, nil
 }
 
 // resolveCount applies CLI > file > built-in precedence to a bound expressed as

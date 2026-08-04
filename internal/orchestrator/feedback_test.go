@@ -335,8 +335,10 @@ var _ = Describe("SubmitFeedback", func() {
 
 	It("fails the run rather than pushing when the head moved underneath it", func() {
 		// The pre-push re-read reports a different tip than the one the run
-		// started from.
+		// started from: the head moves after the submission check and the
+		// dispatcher's context pack have both read it.
 		mockForgeInst.movedHeadSHA = "def456"
+		mockForgeInst.moveHeadAfterCall = 2
 
 		resp, err := submit("test-project", "42", "rename the helper")
 		Expect(err).NotTo(HaveOccurred())
