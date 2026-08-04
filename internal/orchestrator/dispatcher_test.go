@@ -88,6 +88,12 @@ func (c *gatedConversation) Summarize(_ context.Context) (*agent.Result, error) 
 
 func (c *gatedConversation) Close() error { return nil }
 
+// dispatchTimeout is the window these specs allow for a job to travel from the
+// backlog to wherever they assert about it. It is generous on purpose: the whole
+// suite runs alongside 40-odd others, so a job that normally lands in
+// milliseconds can be starved for far longer than Gomega's one-second default.
+const dispatchTimeout = 10 * time.Second
+
 var _ = Describe("Backlog dispatch", func() {
 	var (
 		store      session.Store
@@ -188,7 +194,7 @@ var _ = Describe("Backlog dispatch", func() {
 		build(orchestrator.DispatchPolicy{Interval: 20 * time.Millisecond})
 		close(ag.release)
 
-		Eventually(stateOf("interrupted")).Should(Equal(session.StateCompleted))
+		Eventually(stateOf("interrupted"), dispatchTimeout).Should(Equal(session.StateCompleted))
 		got, err := sessionMgr.Get(context.Background(), "interrupted")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got.Attempts).To(Equal(1))
@@ -199,7 +205,7 @@ var _ = Describe("Backlog dispatch", func() {
 
 		build(orchestrator.DispatchPolicy{Interval: 20 * time.Millisecond})
 
-		Eventually(stateOf("orphaned")).Should(Equal(session.StateFailed))
+		Eventually(stateOf("orphaned"), dispatchTimeout).Should(Equal(session.StateFailed))
 		got, err := sessionMgr.Get(context.Background(), "orphaned")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got.Error).To(ContainSubstring("gone"))
@@ -215,13 +221,13 @@ var _ = Describe("Backlog dispatch", func() {
 			MaxQueueWait: time.Hour,
 		})
 
-		Eventually(stateOf("stale")).Should(Equal(session.StateFailed))
+		Eventually(stateOf("stale"), dispatchTimeout).Should(Equal(session.StateFailed))
 		got, err := sessionMgr.Get(context.Background(), "stale")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got.Error).To(ContainSubstring("queued longer than"))
 
 		// The entry still inside the window runs as normal.
-		Eventually(stateOf("fresh")).Should(Equal(session.StateCompleted))
+		Eventually(stateOf("fresh"), dispatchTimeout).Should(Equal(session.StateCompleted))
 	})
 
 	It("holds the pipeline at its bound and admits the rest as slots free", func() {
@@ -233,12 +239,12 @@ var _ = Describe("Backlog dispatch", func() {
 		build(orchestrator.DispatchPolicy{MaxDispatched: 1, Interval: 20 * time.Millisecond})
 
 		// One job reaches the agent and the other two stay in the backlog.
-		Eventually(ag.total).Should(Equal(1))
+		Eventually(ag.total, dispatchTimeout).Should(Equal(1))
 		Consistently(ag.total, 200*time.Millisecond).Should(Equal(1))
 
 		close(ag.release)
 		for i := range 3 {
-			Eventually(stateOf(fmt.Sprintf("job%d", i))).Should(Equal(session.StateCompleted))
+			Eventually(stateOf(fmt.Sprintf("job%d", i)), dispatchTimeout).Should(Equal(session.StateCompleted))
 		}
 	})
 
@@ -257,9 +263,9 @@ var _ = Describe("Backlog dispatch", func() {
 
 		// Two projects want the pipeline, so each is capped at one of its two
 		// slots and beta starts without waiting for alpha's queue to drain.
-		Eventually(ag.byProject).Should(Equal(map[string]int{"alpha": 1, "beta": 1}))
+		Eventually(ag.byProject, dispatchTimeout).Should(Equal(map[string]int{"alpha": 1, "beta": 1}))
 
 		close(ag.release)
-		Eventually(stateOf("beta0")).Should(Equal(session.StateCompleted))
+		Eventually(stateOf("beta0"), dispatchTimeout).Should(Equal(session.StateCompleted))
 	})
 })
