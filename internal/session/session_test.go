@@ -3,6 +3,7 @@ package session_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -27,6 +28,24 @@ func drainClosed(ch <-chan session.WatchEvent, timeout time.Duration) ([]session
 		case <-deadline:
 			return out, false
 		}
+	}
+}
+
+// sessionIDOf reports the session an event belongs to, limited to the kinds the
+// tests emit. It lets a watcher's stream be checked for cross-session leakage.
+func sessionIDOf(e session.Event) string {
+	switch ev := e.(type) {
+	case session.StateChangeEvent:
+		if ev.Session == nil {
+			return ""
+		}
+		return ev.Session.ID
+	case session.AgentMessageEvent:
+		return ev.SessionID
+	case session.ConsoleOutputEvent:
+		return ev.SessionID
+	default:
+		return ""
 	}
 }
 
@@ -252,6 +271,59 @@ var _ = Describe("Manager", func() {
 				Expect(seqs[i]).To(Equal(seqs[i-1] + 1))
 			}
 			Expect(seqs[len(seqs)-1]).To(Equal(int64(n + 1)))
+		})
+
+		It("keeps each session's seqs contiguous while sessions append concurrently", func() {
+			// Sequencing is serialized per session rather than globally, so this
+			// covers what that split has to preserve: concurrent sessions must
+			// not interleave into each other's numbering or delivery order, and
+			// the live-only path running alongside must not disturb either.
+			const (
+				sessionCount = 8
+				perSession   = 20
+			)
+
+			ids := make([]string, 0, sessionCount)
+			channels := make([]<-chan session.WatchEvent, 0, sessionCount)
+			for i := 0; i < sessionCount; i++ {
+				sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "p", Mode: "auto"})
+				Expect(err).NotTo(HaveOccurred())
+				ch, err := mgr.Watch(ctx, sess.ID, 0)
+				Expect(err).NotTo(HaveOccurred())
+				ids = append(ids, sess.ID)
+				channels = append(channels, ch)
+			}
+
+			var wg sync.WaitGroup
+			for _, id := range ids {
+				wg.Add(1)
+				go func(id string) {
+					defer GinkgoRecover()
+					defer wg.Done()
+					for i := 0; i < perSession; i++ {
+						Expect(mgr.EmitEvent(ctx, id, session.ConsoleOutputEvent{SessionID: id, Output: "log"})).To(Succeed())
+						Expect(mgr.EmitEvent(ctx, id, session.AgentMessageEvent{SessionID: id, Text: "x"})).To(Succeed())
+					}
+					Expect(mgr.UpdateState(ctx, id, session.StateCompleted, "done")).To(Succeed())
+				}(id)
+			}
+			wg.Wait()
+
+			for i, ch := range channels {
+				events, closed := drainClosed(ch, 5*time.Second)
+				Expect(closed).To(BeTrue(), "watcher for session %s should close on terminal state", ids[i])
+				seqs := durableSeqs(events)
+				Expect(seqs).NotTo(BeEmpty())
+				Expect(seqs[0]).To(Equal(int64(1)))
+				for j := 1; j < len(seqs); j++ {
+					Expect(seqs[j]).To(Equal(seqs[j-1] + 1))
+				}
+				// Every durable event for this session and nothing from another.
+				Expect(seqs[len(seqs)-1]).To(Equal(int64(perSession + 1)))
+				for _, we := range events {
+					Expect(sessionIDOf(we.Event)).To(Equal(ids[i]))
+				}
+			}
 		})
 	})
 })

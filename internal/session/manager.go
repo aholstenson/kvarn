@@ -39,16 +39,45 @@ type subscriber struct {
 	closed  bool           // no further enqueues permitted
 }
 
+// hub.mu guards the subscriber map and every field marked as such on
+// subscriber. It is only ever held across in-memory work — never across a Store
+// call — so one session's durable append cannot stall another session's live
+// broadcast. Ordering against the store is the sequencing lock's job.
 type hub struct {
 	mu   sync.Mutex
 	subs map[string][]*subscriber
 }
+
+// seqStripes is the number of mutexes that serialize sequencing. A session
+// hashes to one stripe, so the ordering guarantee below holds per session while
+// unrelated sessions proceed in parallel. Two sessions sharing a stripe
+// serialize against each other, which costs a little false contention and never
+// correctness; the count is sized well above the concurrent-job ceiling so
+// collisions stay rare.
+const seqStripes = 64
 
 // manager owns the in-memory pub/sub hub and delegates all persistence to a
 // Store, layering replay + reconnect-from-cursor on top of the live stream.
 type manager struct {
 	store Store
 	hub   hub
+	seq   [seqStripes]sync.Mutex
+}
+
+// seqLock returns the mutex serializing sequencing for a session. Holding it
+// across "assign a seq, then enqueue to subscribers" is what makes the order
+// events reach watchers equal the order the store numbered them, and what stops
+// a registering Watch from snapshotting MaxSeq in the middle of an append and
+// missing the event on both the replay and the live side.
+func (m *manager) seqLock(id string) *sync.Mutex {
+	// FNV-1a, inlined to keep the hot path allocation-free. Session ids are
+	// random hex, so any cheap hash spreads them evenly.
+	h := uint32(2166136261)
+	for i := 0; i < len(id); i++ {
+		h ^= uint32(id[i])
+		h *= 16777619
+	}
+	return &m.seq[h%seqStripes]
 }
 
 // NewManager creates a session Manager backed by the given Store.
@@ -158,27 +187,31 @@ func (m *manager) SetPullRequest(ctx context.Context, id, url, ref, branch strin
 	})
 }
 
+// EmitEvent carries no existence check of its own. The high-volume kinds —
+// console output, step stdout/stderr, transfer/cache/dependency progress — are
+// live-only, and a pre-read would put a Store round trip on the one path that
+// otherwise touches no storage at all. Durable kinds still fail loudly on an
+// unknown session: AppendEvent rejects them, in SQLite through the
+// session_events → sessions foreign key.
 func (m *manager) EmitEvent(ctx context.Context, id string, event Event) error {
-	// Verify the session exists so callers get a clear error rather than a
-	// silently-dropped event.
-	if _, err := m.store.GetSession(ctx, id); err != nil {
-		return err
-	}
 	return m.persistAndBroadcast(ctx, id, event)
 }
 
 // persistAndBroadcast persists durable events and enqueues every event to live
-// subscribers. The store append and the enqueue happen under hub.mu so the seq
-// assigned by the store equals the seq broadcast, in order, with no
-// concurrently-registering Watch able to interleave.
+// subscribers, holding the session's seqLock across both so the seq the store
+// assigns equals the seq broadcast, in order. Ephemeral events take the same
+// lock: they carry seq 0 and so have nothing to order among themselves, but a
+// console line that overtook the agent message it followed would still be a
+// visible reordering to a watcher.
 func (m *manager) persistAndBroadcast(ctx context.Context, id string, e Event) error {
 	kind, payload, durable, err := encodeEvent(e)
 	if err != nil {
 		return fmt.Errorf("encode event: %w", err)
 	}
 
-	m.hub.mu.Lock()
-	defer m.hub.mu.Unlock()
+	seqLock := m.seqLock(id)
+	seqLock.Lock()
+	defer seqLock.Unlock()
 
 	seq := int64(0)
 	if durable {
@@ -188,6 +221,9 @@ func (m *manager) persistAndBroadcast(ctx context.Context, id string, e Event) e
 		}
 		seq = pe.Seq
 	}
+
+	m.hub.mu.Lock()
+	defer m.hub.mu.Unlock()
 	m.broadcastLocked(id, WatchEvent{Seq: seq, Event: e})
 	return nil
 }
@@ -238,10 +274,14 @@ func (m *manager) Watch(ctx context.Context, id string, fromSeq int64) (<-chan W
 	}
 	terminal := sess.State.IsTerminal()
 
-	m.hub.mu.Lock()
+	// Snapshot the backlog and register under the seqLock so no append can land
+	// between the two: such an event would be past the replay cutoff and absent
+	// from the live stream, a gap the client has no way to detect.
+	seqLock := m.seqLock(id)
+	seqLock.Lock()
 	backlogMax, err := m.store.MaxSeq(ctx, id)
 	if err != nil {
-		m.hub.mu.Unlock()
+		seqLock.Unlock()
 		return nil, err
 	}
 	sub := &subscriber{
@@ -253,9 +293,11 @@ func (m *manager) Watch(ctx context.Context, id string, fromSeq int64) (<-chan W
 		dead:    make(chan struct{}),
 	}
 	if !terminal {
+		m.hub.mu.Lock()
 		m.hub.subs[id] = append(m.hub.subs[id], sub)
+		m.hub.mu.Unlock()
 	}
-	m.hub.mu.Unlock()
+	seqLock.Unlock()
 
 	go m.feed(sub, fromSeq, backlogMax, terminal)
 	return sub.ch, nil
