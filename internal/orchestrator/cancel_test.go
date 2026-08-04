@@ -82,6 +82,17 @@ var _ = Describe("CancelJob", func() {
 		os.RemoveAll(tmpDir)
 	})
 
+	// backlogOnly builds a second service over its own session manager, with no
+	// project store behind it. Its dispatcher therefore stands down, which is
+	// what lets a spec place a session in a chosen state and assert on how
+	// CancelJob reads it rather than racing a dispatch pass for it.
+	backlogOnly := func() (*orchestrator.Service, session.Manager) {
+		mgr := session.NewManager(session.NewMemStore())
+		other := orchestrator.NewServiceWithOpts(orchestrator.ServiceOpts{SessionMgr: mgr})
+		DeferCleanup(func() { other.Shutdown(context.Background()) })
+		return other, mgr
+	}
+
 	startRunningJob := func() string {
 		resp, err := svc.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
 			Project: "test-project",
@@ -149,6 +160,8 @@ var _ = Describe("CancelJob", func() {
 	})
 
 	It("rejects a session that has already finished", func() {
+		svc, sessionMgr := backlogOnly()
+
 		sess, err := sessionMgr.Create(context.Background(), session.CreateParams{
 			ProjectName: "test-project", Prompt: "done", Mode: "auto",
 		})
@@ -163,6 +176,8 @@ var _ = Describe("CancelJob", func() {
 	})
 
 	It("rejects a mid-run session with no run behind it", func() {
+		svc, sessionMgr := backlogOnly()
+
 		sess, err := sessionMgr.Create(context.Background(), session.CreateParams{
 			ProjectName: "test-project", Prompt: "orphan", Mode: "auto",
 		})
@@ -180,6 +195,8 @@ var _ = Describe("CancelJob", func() {
 	})
 
 	It("cancels a job still waiting in the backlog", func() {
+		svc, sessionMgr := backlogOnly()
+
 		sess, err := sessionMgr.Create(context.Background(), session.CreateParams{
 			ProjectName: "test-project", Prompt: "queued", Mode: "auto",
 		})
