@@ -6,7 +6,9 @@ import (
 	"github.com/aholstenson/kvarn/internal/cmd/feedback"
 	imagecmd "github.com/aholstenson/kvarn/internal/cmd/image"
 	imagecachecmd "github.com/aholstenson/kvarn/internal/cmd/imagecache"
+	jobscmd "github.com/aholstenson/kvarn/internal/cmd/jobs"
 	"github.com/aholstenson/kvarn/internal/cmd/key"
+	queuecmd "github.com/aholstenson/kvarn/internal/cmd/queue"
 	repocmd "github.com/aholstenson/kvarn/internal/cmd/repo"
 	runcmd "github.com/aholstenson/kvarn/internal/cmd/run"
 	"github.com/aholstenson/kvarn/internal/cmd/secrets"
@@ -22,6 +24,8 @@ type CLI struct {
 	StartJob     startjob.Cmd      `cmd:"" name:"startjob" help:"Start a project-aware job."`
 	Feedback     feedback.Cmd      `cmd:"" help:"Continue work on an existing pull request."`
 	Cancel       cancelcmd.Cmd     `cmd:"" help:"Cancel a running job."`
+	Jobs         jobscmd.Cmd       `cmd:"" help:"List, inspect and manage jobs."`
+	Queue        queuecmd.Cmd      `cmd:"" help:"Inspect the job queue."`
 	Secrets      secrets.Cmd       `cmd:"" help:"Manage per-project secrets."`
 	Key          key.Cmd           `cmd:"" help:"Manage API keys."`
 	Run          runcmd.Cmd        `cmd:"" help:"Run the coding agent against the local working directory."`

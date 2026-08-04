@@ -15,12 +15,19 @@ type PersistedEvent struct {
 }
 
 // SessionFilter constrains a ListSessions query. The zero value matches every
-// session with no limit.
+// session with no limit; the fields are ANDed.
 type SessionFilter struct {
-	Project    string // "" = any
-	PRRef      string // "" = any; exact match on the session's pull request ref
-	ActiveOnly bool   // non-terminal only
-	Limit      int    // 0 = no limit
+	Project    string  // "" = any
+	PRRef      string  // "" = any; exact match on the session's pull request ref
+	Mode       string  // "" = any
+	States     []State // nil = any; exact match on the session's state
+	ActiveOnly bool    // non-terminal only, applied on top of States
+	// CreatedAfter bounds the listing to sessions created strictly after it.
+	// It is deliberately not part of the pagination cursor: that orders by
+	// (created_at DESC, id DESC) and walks backwards, while this is a floor the
+	// whole listing is held above.
+	CreatedAfter time.Time
+	Limit        int // 0 = no limit
 	// AfterCreatedAt / AfterID form a cursor for keyset pagination, ordered by
 	// (created_at DESC, id DESC). A zero AfterCreatedAt starts from the top.
 	AfterCreatedAt time.Time
@@ -42,6 +49,32 @@ type PendingQuery struct {
 	Now     time.Time
 	AgeStep time.Duration
 	Limit   int
+}
+
+// EffectivePriority returns the priority the backlog actually orders s by:
+// its configured priority plus one level per AgeStep waited, clamped to
+// ceiling. It is the Go statement of the rule the SQLite ORDER BY expresses,
+// and exists so a caller that has to *report* an entry's place — rather than
+// merely receive rows in order — reads it from the same definition.
+func (q PendingQuery) EffectivePriority(s *Session, ceiling int) int {
+	p := s.Priority
+	if q.AgeStep <= 0 {
+		return p
+	}
+	p += int(q.Now.Sub(s.QueuedAt) / q.AgeStep)
+	return min(p, ceiling)
+}
+
+// PendingCeiling is the clamp EffectivePriority applies: the highest configured
+// priority among the given backlog entries. Zero for an empty backlog.
+func PendingCeiling(sessions []*Session) int {
+	ceiling := 0
+	for i, s := range sessions {
+		if i == 0 || s.Priority > ceiling {
+			ceiling = s.Priority
+		}
+	}
+	return ceiling
 }
 
 // PendingTransition is the target of a TransitionPending call: the state to
@@ -105,6 +138,12 @@ type Store interface {
 	// which is how the dispatcher and a concurrent cancel settle their race:
 	// both attempt the move and exactly one of them wins.
 	TransitionPending(ctx context.Context, id string, to PendingTransition) (bool, PersistedEvent, error)
+	// UpdatePendingPriority reorders a backlog entry, returning the priority it
+	// replaced. It reports false without an error when the session is no longer
+	// pending: past dispatch the value orders nothing, since the admission
+	// queue already holds the request built from it, so silently rewriting the
+	// column would promise a reordering that never happens.
+	UpdatePendingPriority(ctx context.Context, id string, priority int) (previous int, ok bool, err error)
 	// ExpirePending fails backlog entries queued before cutoff. A separate
 	// sweep rather than a filter on ListPending because a low-priority entry
 	// may never reach the head of the dispatch order, and an entry nobody looks

@@ -47,6 +47,7 @@ import (
 	llms "github.com/aholstenson/llms-go"
 	"go.opentelemetry.io/otel/metric"
 	otelnoop "go.opentelemetry.io/otel/metric/noop"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // worklogEntry is one line in the per-job work log posted as a PR comment.
@@ -516,10 +517,21 @@ func (s *Service) authorizeProject(ctx context.Context, project, procedure strin
 	return nil
 }
 
-func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJobRequest]) (*connect.Response[v1.StartJobResponse], error) {
-	msg := req.Msg
+// startJobParams is one fresh-job submission: clone the base branch and open a
+// new pull request. It is the shared body of StartJob and of a retry that
+// resubmits such a job.
+type startJobParams struct {
+	project string
+	prompt  string
+	branch  string
+	mode    string
+	// procedure names the RPC on whose behalf the submission is authorized, for
+	// the audit log that records a denial.
+	procedure string
+}
 
-	if err := s.authorizeProject(ctx, msg.Project, req.Spec().Procedure); err != nil {
+func (s *Service) startJob(ctx context.Context, p startJobParams) (*session.Session, error) {
+	if err := s.authorizeProject(ctx, p.project, p.procedure); err != nil {
 		return nil, err
 	}
 
@@ -527,27 +539,27 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("project-aware jobs not configured"))
 	}
 
-	log := reqid.LoggerFrom(ctx).With("project", msg.Project, "mode", msg.Mode)
-	log.Info("starting job", "branch", msg.Branch)
+	log := reqid.LoggerFrom(ctx).With("project", p.project, "mode", p.mode)
+	log.Info("starting job", "branch", p.branch)
 
-	mode, err := coding.ModeByName(msg.Mode)
+	mode, err := coding.ModeByName(p.mode)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	proj, err := s.projectStore.Get(ctx, msg.Project)
+	proj, err := s.projectStore.Get(ctx, p.project)
 	if err != nil {
 		log.Error("project not found", "error", err)
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("project %q: %w", msg.Project, err))
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("project %q: %w", p.project, err))
 	}
 
-	if err := s.checkBacklogDepth(ctx, msg.Project); err != nil {
+	if err := s.checkBacklogDepth(ctx, p.project); err != nil {
 		return nil, err
 	}
 
 	log.Info("resolved project", "repo", proj.RepoURL, "forge", proj.Forge)
 
-	branch := msg.Branch
+	branch := p.branch
 	if branch == "" {
 		branch = proj.DefaultBranch
 	}
@@ -558,8 +570,8 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 	// is resolved here — the dispatcher reads the project, the forge and the
 	// credentials as they are when it actually starts the run.
 	sess, err := s.sessionMgr.Create(ctx, session.CreateParams{
-		ProjectName: msg.Project,
-		Prompt:      msg.Prompt,
+		ProjectName: p.project,
+		Prompt:      p.prompt,
 		Mode:        mode.ModeName(),
 		BaseBranch:  branch,
 		KeyID:       callerKeyID(ctx),
@@ -571,6 +583,23 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 
 	log.Info("job queued", "session_id", sess.ID, "branch", branch)
 	s.dispatcher.poke()
+
+	return sess, nil
+}
+
+func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJobRequest]) (*connect.Response[v1.StartJobResponse], error) {
+	msg := req.Msg
+
+	sess, err := s.startJob(ctx, startJobParams{
+		project:   msg.Project,
+		prompt:    msg.Prompt,
+		branch:    msg.Branch,
+		mode:      msg.Mode,
+		procedure: req.Spec().Procedure,
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	return connect.NewResponse(&v1.StartJobResponse{
 		SessionId: sess.ID,
@@ -1661,7 +1690,30 @@ func sessionToProto(sess *session.Session) *v1.GetSessionResponse {
 		HeadBranch:      sess.HeadBranch,
 		BaseBranch:      sess.BaseBranch,
 		ParentSessionId: sess.ParentSessionID,
+		CreatedAt:       timestamppb.New(sess.CreatedAt),
+		UpdatedAt:       timestamppb.New(sess.UpdatedAt),
+		QueuedAt:        timestamppb.New(sess.QueuedAt),
+		Priority:        int32(sess.Priority),
+		Attempts:        int32(sess.Attempts),
 	}
+}
+
+// parseStates resolves the state names on a filtering request. An unknown name
+// is refused rather than matched against nothing, so a misspelled state is a
+// visible error instead of an empty listing.
+func parseStates(names []string) ([]session.State, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	states := make([]session.State, 0, len(names))
+	for _, name := range names {
+		st, err := session.ParseState(name)
+		if err != nil {
+			return nil, err
+		}
+		states = append(states, st)
+	}
+	return states, nil
 }
 
 // Server-side bounds for ListSessions paging.
@@ -1688,6 +1740,16 @@ func (s *Service) ListSessions(ctx context.Context, req *connect.Request[v1.List
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("page_cursor: %w", err))
 	}
 
+	states, err := parseStates(req.Msg.States)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
+	var createdAfter time.Time
+	if ts := req.Msg.CreatedAfter; ts != nil {
+		createdAfter = ts.AsTime()
+	}
+
 	// When auth is enabled, restrict the listing to the projects the key
 	// covers. A missing identity (unreachable behind the interceptor) yields
 	// an empty list rather than an error.
@@ -1710,7 +1772,11 @@ func (s *Service) ListSessions(ctx context.Context, req *connect.Request[v1.List
 	for len(included) < limit {
 		batch, err := s.sessionMgr.List(ctx, session.SessionFilter{
 			Project:        req.Msg.Project,
+			PRRef:          req.Msg.PrRef,
+			Mode:           req.Msg.Mode,
+			States:         states,
 			ActiveOnly:     req.Msg.ActiveOnly,
+			CreatedAfter:   createdAfter,
 			Limit:          limit,
 			AfterCreatedAt: cursorTime,
 			AfterID:        cursorID,

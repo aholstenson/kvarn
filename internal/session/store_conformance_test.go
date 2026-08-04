@@ -145,6 +145,42 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 			Expect(all).To(HaveLen(4))
 		})
 
+		It("filters by state, mode and creation time", func() {
+			pending := makeSession("pending", "proj", session.StatePending, base.Add(1*time.Minute))
+			running := makeSession("running", "proj", session.StateRunning, base.Add(2*time.Minute))
+			failed := makeSession("failed", "proj", session.StateFailed, base.Add(3*time.Minute))
+			failed.Mode = "feedback"
+			for _, s := range []*session.Session{pending, running, failed} {
+				Expect(store.CreateSession(ctx, s)).To(Succeed())
+			}
+
+			byState, err := store.ListSessions(ctx, session.SessionFilter{
+				States: []session.State{session.StatePending, session.StateFailed},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(idsOf(byState)).To(Equal([]string{"failed", "pending"})) // newest first
+
+			// States and ActiveOnly are ANDed rather than one overriding the
+			// other, so a terminal state named explicitly still drops out.
+			activeOfThose, err := store.ListSessions(ctx, session.SessionFilter{
+				States:     []session.State{session.StatePending, session.StateFailed},
+				ActiveOnly: true,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(idsOf(activeOfThose)).To(Equal([]string{"pending"}))
+
+			byMode, err := store.ListSessions(ctx, session.SessionFilter{Mode: "feedback"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(idsOf(byMode)).To(Equal([]string{"failed"}))
+
+			// Strictly after: the session created exactly at the bound is out.
+			since, err := store.ListSessions(ctx, session.SessionFilter{
+				CreatedAfter: base.Add(2 * time.Minute),
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(idsOf(since)).To(Equal([]string{"failed"}))
+		})
+
 		It("returns not-found for an unknown session", func() {
 			_, err := store.GetSession(ctx, "missing")
 			Expect(err).To(MatchError(ContainSubstring("not found")))
@@ -372,6 +408,36 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 				got, err := store.ListPending(ctx, session.PendingQuery{Now: base, Limit: 2})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(got).To(HaveLen(2))
+			})
+
+			It("reorders a pending entry and refuses one that has been dispatched", func() {
+				Expect(store.CreateSession(ctx, queued("waiting", "p", 1, base))).To(Succeed())
+				Expect(store.CreateSession(ctx, queued("ahead", "p", 5, base))).To(Succeed())
+
+				previous, ok, err := store.UpdatePendingPriority(ctx, "waiting", 9)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(ok).To(BeTrue())
+				Expect(previous).To(Equal(1))
+
+				got, err := store.ListPending(ctx, session.PendingQuery{Now: base})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(idsOf(got)).To(Equal([]string{"waiting", "ahead"}))
+
+				// Once claimed the value orders nothing, so the write is
+				// refused rather than silently applied.
+				claimed, _, err := store.TransitionPending(ctx, "ahead", session.PendingTransition{
+					State: session.StateQueued,
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(claimed).To(BeTrue())
+
+				_, ok, err = store.UpdatePendingPriority(ctx, "ahead", 100)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(ok).To(BeFalse())
+
+				after, err := store.GetSession(ctx, "ahead")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(after.Priority).To(Equal(5))
 			})
 
 			It("lets exactly one caller transition a pending session", func() {

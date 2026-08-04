@@ -138,6 +138,13 @@ func (m *manager) CountPending(ctx context.Context) (int, error) {
 	return m.store.CountPending(ctx)
 }
 
+// UpdatePendingPriority reorders a backlog entry. No event is emitted: nothing
+// observable about the session changed, only where it sits among the others
+// waiting, which a watcher of this session cannot see anyway.
+func (m *manager) UpdatePendingPriority(ctx context.Context, id string, priority int) (int, bool, error) {
+	return m.store.UpdatePendingPriority(ctx, id, priority)
+}
+
 // TransitionPending moves a session out of the backlog and, when it wins the
 // move, broadcasts the state change the store persisted with it.
 //

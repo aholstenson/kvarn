@@ -14,16 +14,28 @@ import (
 	"github.com/aholstenson/kvarn/internal/session"
 )
 
-// SubmitFeedback continues work on an existing pull request. The agent runs
+// submitFeedbackParams is one continuation of an existing pull request. It is
+// the shared body of SubmitFeedback and of a retry that resubmits a feedback
+// run, so both meet the same preconditions — the PR still open, not a fork, and
+// nothing else running against it.
+type submitFeedbackParams struct {
+	project  string
+	prRef    string
+	feedback string
+	mode     string
+	// procedure names the RPC on whose behalf the submission is authorized, for
+	// the audit log that records a denial.
+	procedure string
+}
+
+// submitFeedback continues work on an existing pull request. The agent runs
 // against the PR's head branch with the feedback as its task and pushes a
 // follow-up commit to that same branch — no second PR is opened.
 //
 // Every rejection happens before a session is created, so a refused request
 // leaves no trace.
-func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.SubmitFeedbackRequest]) (*connect.Response[v1.SubmitFeedbackResponse], error) {
-	msg := req.Msg
-
-	if err := s.authorizeProject(ctx, msg.Project, req.Spec().Procedure); err != nil {
+func (s *Service) submitFeedback(ctx context.Context, p submitFeedbackParams) (*session.Session, error) {
+	if err := s.authorizeProject(ctx, p.project, p.procedure); err != nil {
 		return nil, err
 	}
 
@@ -31,15 +43,15 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.Su
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("project-aware jobs not configured"))
 	}
 
-	prRef := strings.TrimSpace(msg.PrRef)
+	prRef := strings.TrimSpace(p.prRef)
 	if prRef == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("pr_ref is required"))
 	}
-	if strings.TrimSpace(msg.Feedback) == "" {
+	if strings.TrimSpace(p.feedback) == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("feedback is required"))
 	}
 
-	modeName := msg.Mode
+	modeName := p.mode
 	if modeName == "" {
 		modeName = coding.ModeFeedback.Name
 	}
@@ -48,13 +60,13 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.Su
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	log := reqid.LoggerFrom(ctx).With("project", msg.Project, "pr_ref", prRef, "mode", mode.ModeName())
+	log := reqid.LoggerFrom(ctx).With("project", p.project, "pr_ref", prRef, "mode", mode.ModeName())
 	log.Info("submitting feedback")
 
-	proj, err := s.projectStore.Get(ctx, msg.Project)
+	proj, err := s.projectStore.Get(ctx, p.project)
 	if err != nil {
 		log.Error("project not found", "error", err)
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("project %q: %w", msg.Project, err))
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("project %q: %w", p.project, err))
 	}
 
 	fr, err := s.resolveForge(ctx, proj)
@@ -64,7 +76,7 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.Su
 	}
 	if fr.impl == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition,
-			fmt.Errorf("project %q has no forge configured; feedback runs need one to read and update the pull request", msg.Project))
+			fmt.Errorf("project %q has no forge configured; feedback runs need one to read and update the pull request", p.project))
 	}
 
 	getOpts := forge.GetPROpts{RepoURL: fr.cloneURL, PRRef: prRef, Credentials: fr.creds}
@@ -124,7 +136,7 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.Su
 	// diff that the pull request may outgrow while the run waits its turn.
 	sess, err := s.sessionMgr.Create(ctx, session.CreateParams{
 		ProjectName:     proj.Name,
-		Prompt:          msg.Feedback,
+		Prompt:          p.feedback,
 		Mode:            mode.ModeName(),
 		PRRef:           pr.Ref,
 		HeadBranch:      pr.HeadBranch,
@@ -144,6 +156,23 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.Su
 
 	log.Info("feedback run queued", "session_id", sess.ID, "head_branch", pr.HeadBranch, "parent_session_id", parentID)
 	s.dispatcher.poke()
+
+	return sess, nil
+}
+
+func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.SubmitFeedbackRequest]) (*connect.Response[v1.SubmitFeedbackResponse], error) {
+	msg := req.Msg
+
+	sess, err := s.submitFeedback(ctx, submitFeedbackParams{
+		project:   msg.Project,
+		prRef:     msg.PrRef,
+		feedback:  msg.Feedback,
+		mode:      msg.Mode,
+		procedure: req.Spec().Procedure,
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	return connect.NewResponse(&v1.SubmitFeedbackResponse{SessionId: sess.ID}), nil
 }

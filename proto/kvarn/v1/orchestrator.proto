@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package kvarn.v1;
 
+import "google/protobuf/timestamp.proto";
 import "kvarn/v1/bridge.proto";
 
 message StartJobRequest {
@@ -67,6 +68,18 @@ message GetSessionResponse {
   // Session this one continues from, when it was started as a feedback run.
   // Empty when there was no parent or the parent has been pruned.
   string parent_session_id = 13;
+  // When the submission was accepted, and when the session was last written.
+  google.protobuf.Timestamp created_at = 14;
+  google.protobuf.Timestamp updated_at = 15;
+  // When the job last entered the durable backlog. Equal to created_at for a
+  // fresh submission and moved forward by a requeue, so the wait a client
+  // should report is measured from here rather than from created_at.
+  google.protobuf.Timestamp queued_at = 16;
+  // Backlog ordering inputs: the priority captured from project config at
+  // submission, and how many times the job has been dispatched. Attempts above
+  // one means a restart returned it to the backlog.
+  int32 priority = 17;
+  int32 attempts = 18;
 }
 
 // CostReport carries accumulated LLM spend for a job: totals across all
@@ -107,13 +120,24 @@ enum CostUpdateKind {
 message ListSessionsRequest {
   // Filter to a single project; empty means any project the caller may access.
   string project = 1;
-  // When true, only non-terminal (active) sessions are returned.
+  // When true, only non-terminal (active) sessions are returned. Redundant
+  // with an explicit `states` list and applied on top of it.
   bool active_only = 2;
   // Maximum sessions to return; 0 lets the server pick a default.
   int32 limit = 3;
   // Opaque cursor from a previous response's next_page_cursor; empty starts
   // from the most recent session.
   string page_cursor = 4;
+  // Exact states to include; empty means every state. An unknown state is
+  // rejected rather than silently matching nothing.
+  repeated string states = 5;
+  // Agent mode to filter on; empty means any.
+  string mode = 6;
+  // Pull request the session works on, in the forge's own format; empty means
+  // any. Selects a PR's whole run history, original job and follow-ups alike.
+  string pr_ref = 7;
+  // Only sessions created strictly after this instant. Unset means no bound.
+  google.protobuf.Timestamp created_after = 8;
 }
 
 message ListSessionsResponse {
@@ -246,12 +270,156 @@ message PullRequestCreated {
   string ref = 4;
 }
 
+// CancelJobsRequest stops every job matching a filter. It exists because the
+// states worth cancelling in bulk — a backlog that built up behind a broken
+// project, a burst submitted by mistake — are exactly the ones a caller cannot
+// enumerate by session id up front.
+//
+// The filter fields are ANDed. A request that sets none of them cancels every
+// active job on the host and must therefore say so with `all`, so no
+// abbreviated command line can drain the queue by accident.
+message CancelJobsRequest {
+  string project = 1;
+  // States to cancel; empty means every non-terminal state.
+  repeated string states = 2;
+  string mode = 3;
+  string pr_ref = 4;
+  // Recorded on each cancelled session.
+  string reason = 5;
+  // Report what would be cancelled without cancelling it.
+  bool dry_run = 6;
+  // Required when no other filter field is set.
+  bool all = 7;
+  // Maximum jobs to cancel; 0 lets the server pick a default.
+  int32 limit = 8;
+}
+
+message CancelledJob {
+  string session_id = 1;
+  string project = 2;
+  // State the session was in when the cancellation was requested.
+  string previous_state = 3;
+  // Why this job could not be cancelled; empty when it was. A bulk cancel
+  // reports per-job failures rather than failing the whole call, since a job
+  // reaching a terminal state mid-sweep is expected rather than exceptional.
+  string error = 4;
+}
+
+message CancelJobsResponse {
+  repeated CancelledJob jobs = 1;
+}
+
+// RetryJobRequest resubmits the request a finished session was created from.
+// The original session is left untouched and a new one is returned: session
+// history is a record of what happened, and a retry is a new thing happening.
+message RetryJobRequest {
+  string session_id = 1;
+  // Replaces the original prompt (or feedback) when set.
+  string prompt = 2;
+}
+
+message RetryJobResponse {
+  string session_id = 1;
+}
+
+// SetJobPriorityRequest reorders a job that is still in the backlog. Once a job
+// has been dispatched its priority no longer orders anything — the admission
+// queue holds the request it was submitted with — so this is rejected for any
+// state other than pending.
+message SetJobPriorityRequest {
+  string session_id = 1;
+  int32 priority = 2;
+}
+
+message SetJobPriorityResponse {
+  int32 previous_priority = 1;
+}
+
+message GetQueueStatsRequest {}
+
+// Capacity is a three-dimensional resource bundle: CPU in millicpus
+// (1 vCPU = 1000), memory and disk in bytes.
+message Capacity {
+  uint64 cpu_millis = 1;
+  uint64 memory_bytes = 2;
+  uint64 disk_bytes = 3;
+}
+
+message QueueProjectStats {
+  string project = 1;
+  // Jobs waiting in the durable backlog for this project.
+  int32 backlog = 2;
+  // Jobs this project holds in the in-memory pipeline.
+  int32 dispatched = 3;
+}
+
+// GetQueueStatsResponse answers "is the host full, or is my job merely behind
+// others" — the question no per-session listing can. Backlog depth and pipeline
+// population come with the bounds they are measured against.
+message GetQueueStatsResponse {
+  // Sessions in the durable backlog.
+  int32 backlog = 1;
+  // Jobs occupying the in-memory pipeline: cloning, queued for capacity, or
+  // running.
+  int32 dispatched = 2;
+  // Configured bounds; 0 means unbounded.
+  int32 max_backlog = 3;
+  int32 max_dispatched = 4;
+  // Waiters inside the scheduler's admission queue, a subset of dispatched.
+  int32 admission_queue = 5;
+  // Resource pool: what running VMs hold and what is left.
+  Capacity used = 6;
+  Capacity free = 7;
+  // Per-project split of backlog and pipeline, restricted to the projects the
+  // caller may see.
+  repeated QueueProjectStats per_project = 8;
+  // Host disk guard: the last measured free space on the watched filesystem,
+  // the floor it is held against, and whether admission is currently allowed.
+  // measured is false until the first sample lands.
+  uint64 disk_available_bytes = 9;
+  uint64 disk_floor_bytes = 10;
+  bool disk_measured = 11;
+  bool disk_gate_open = 12;
+}
+
+message ListQueueRequest {
+  // Filter to a single project; empty means any project the caller may access.
+  string project = 1;
+  // Maximum entries to return; 0 lets the server pick a default.
+  int32 limit = 2;
+}
+
+message QueueEntry {
+  GetSessionResponse session = 1;
+  // 1-based place in dispatch order across the whole backlog, so a filtered
+  // listing still says where its entries sit among everything else waiting.
+  int32 position = 2;
+  // The priority the entry is actually ordered by: its configured priority
+  // plus one level per priority_age_step waited, clamped to the highest
+  // priority in the backlog.
+  int32 effective_priority = 3;
+}
+
+// ListQueueResponse returns the backlog in dispatch order, which is not the
+// order ListSessions uses and cannot be expressed as a flag on it.
+message ListQueueResponse {
+  repeated QueueEntry entries = 1;
+  // Total backlog depth, which is what the positions are relative to; it can
+  // exceed the number of entries returned.
+  int32 backlog = 2;
+}
+
 service OrchestratorService {
   rpc StartJob(StartJobRequest) returns (StartJobResponse);
   rpc SubmitFeedback(SubmitFeedbackRequest) returns (SubmitFeedbackResponse);
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  rpc CancelJobs(CancelJobsRequest) returns (CancelJobsResponse);
+  rpc RetryJob(RetryJobRequest) returns (RetryJobResponse);
+  rpc SetJobPriority(SetJobPriorityRequest) returns (SetJobPriorityResponse);
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc WatchSession(WatchSessionRequest) returns (stream SessionUpdate);
   rpc ListSessionEvents(ListSessionEventsRequest) returns (ListSessionEventsResponse);
+  rpc GetQueueStats(GetQueueStatsRequest) returns (GetQueueStatsResponse);
+  rpc ListQueue(ListQueueRequest) returns (ListQueueResponse);
 }

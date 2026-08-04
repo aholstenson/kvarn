@@ -172,6 +172,22 @@ func (s *Store) ListSessions(ctx context.Context, filter session.SessionFilter) 
 		where = append(where, "pr_ref = ?")
 		args = append(args, filter.PRRef)
 	}
+	if filter.Mode != "" {
+		where = append(where, "mode = ?")
+		args = append(args, filter.Mode)
+	}
+	if len(filter.States) > 0 {
+		placeholders := make([]string, len(filter.States))
+		for i, st := range filter.States {
+			placeholders[i] = "?"
+			args = append(args, string(st))
+		}
+		where = append(where, "state IN ("+strings.Join(placeholders, ", ")+")")
+	}
+	if !filter.CreatedAfter.IsZero() {
+		where = append(where, "created_at > ?")
+		args = append(args, session.ToMicros(filter.CreatedAfter))
+	}
 	if filter.ActiveOnly {
 		placeholders, stateArgs := terminalStates()
 		where = append(where, "state NOT IN ("+placeholders+")")
@@ -326,6 +342,52 @@ func (s *Store) CountPending(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("count pending: %w", err)
 	}
 	return n, nil
+}
+
+// UpdatePendingPriority rewrites the priority of a backlog entry. The state
+// predicate is what makes it safe to run against a live dispatcher: an entry
+// claimed between the caller's read and this write is left alone and reported
+// as no longer pending, rather than having its ordering column rewritten after
+// the ordering stopped mattering.
+func (s *Store) UpdatePendingPriority(ctx context.Context, id string, priority int) (int, bool, error) {
+	var (
+		previous int
+		updated  bool
+	)
+	err := retryBusy(func() error {
+		previous, updated = 0, false
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		// Read and write in one transaction so the priority reported as
+		// replaced is the one this update actually replaced.
+		err = tx.QueryRowContext(ctx,
+			`SELECT priority FROM sessions WHERE id = ? AND state = ?`,
+			id, string(session.StatePending)).Scan(&previous)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE sessions SET priority = ?, updated_at = ? WHERE id = ?`,
+			priority, session.ToMicros(time.Now()), id); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		updated = true
+		return nil
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("update pending priority: %w", err)
+	}
+	return previous, updated, nil
 }
 
 func (s *Store) TransitionPending(ctx context.Context, id string, to session.PendingTransition) (bool, session.PersistedEvent, error) {

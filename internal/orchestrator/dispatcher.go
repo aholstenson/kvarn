@@ -92,6 +92,25 @@ func (d *dispatcher) backlogBound() int {
 	return d.policy.MaxBacklog
 }
 
+// maxDispatched is the configured pipeline bound, nil-safe like backlogBound.
+func (d *dispatcher) maxDispatched() int {
+	if d == nil {
+		return 0
+	}
+	return d.policy.MaxDispatched
+}
+
+// ageStep is how much waiting earns a backlog entry one level of effective
+// priority. Callers that report an entry's place need the same value the
+// dispatcher orders by, so they read it from here rather than re-deriving it
+// from config.
+func (d *dispatcher) ageStep() time.Duration {
+	if d == nil {
+		return 0
+	}
+	return d.policy.PriorityAgeStep
+}
+
 // poke asks for a dispatch pass. It never blocks.
 func (d *dispatcher) poke() {
 	if d == nil {

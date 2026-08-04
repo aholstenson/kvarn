@@ -62,6 +62,61 @@ func (s *Service) failRun(termCtx, rootCtx context.Context, sessionID string, er
 	s.sessionMgr.Fail(termCtx, sessionID, err)
 }
 
+// cancelCause builds the cause recorded on a cancelled run. The sentinel is
+// what failRun matches on, so a reason must wrap it rather than replace it.
+func cancelCause(reason string) error {
+	if reason == "" {
+		return errJobCancelled
+	}
+	return fmt.Errorf("%w: %s", errJobCancelled, reason)
+}
+
+// cancelSession stops one run, whichever tier it is in. The caller has already
+// authorized the session's project.
+func (s *Service) cancelSession(ctx context.Context, sess *session.Session, cause error, reason string) error {
+	if sess.State.IsTerminal() {
+		return connect.NewError(connect.CodeFailedPrecondition,
+			fmt.Errorf("session %s has already finished (%s)", sess.ID, sess.State))
+	}
+
+	// A job still in the backlog has no context to cancel, so it is stopped
+	// where it lives: the same conditional move out of pending that the
+	// dispatcher uses to claim it. Whoever's move lands first wins, and a lost
+	// race falls through to the running path below — by then the dispatcher has
+	// registered the run, so the cancel finds it there.
+	if sess.State == session.StatePending {
+		cancelled, err := s.sessionMgr.TransitionPending(ctx, sess.ID, session.PendingTransition{
+			State:   session.StateCancelled,
+			Message: cause.Error(),
+		})
+		if err != nil {
+			return connect.NewError(connect.CodeInternal, err)
+		}
+		if cancelled {
+			reqid.LoggerFrom(ctx).Info("queued job cancelled",
+				"session_id", sess.ID, "project", sess.ProjectName, "reason", reason)
+			return nil
+		}
+	}
+
+	s.runningMu.Lock()
+	job, ok := s.running[sess.ID]
+	s.runningMu.Unlock()
+	if !ok {
+		// Non-terminal with no job behind it: the run belonged to a process that
+		// is gone. Startup reconciliation settles such sessions, so this is only
+		// reachable when a terminal write failed outright.
+		return connect.NewError(connect.CodeFailedPrecondition,
+			fmt.Errorf("session %s is not running on this orchestrator", sess.ID))
+	}
+
+	job.cancel(cause)
+
+	reqid.LoggerFrom(ctx).Info("job cancelled",
+		"session_id", sess.ID, "project", sess.ProjectName, "state", sess.State, "reason", reason)
+	return nil
+}
+
 // CancelJob stops an in-flight run. The job's context is cancelled, which
 // unwinds whatever it is doing — waiting in the scheduler queue, cloning,
 // running the agent — and its teardown tears the VM down on the way out. The
@@ -80,51 +135,92 @@ func (s *Service) CancelJob(ctx context.Context, req *connect.Request[v1.CancelJ
 		return nil, err
 	}
 
-	if sess.State.IsTerminal() {
-		return nil, connect.NewError(connect.CodeFailedPrecondition,
-			fmt.Errorf("session %s has already finished (%s)", sess.ID, sess.State))
+	if err := s.cancelSession(ctx, sess, cancelCause(req.Msg.Reason), req.Msg.Reason); err != nil {
+		return nil, err
 	}
-
-	cause := errJobCancelled
-	if reason := req.Msg.Reason; reason != "" {
-		cause = fmt.Errorf("%w: %s", errJobCancelled, reason)
-	}
-
-	// A job still in the backlog has no context to cancel, so it is stopped
-	// where it lives: the same conditional move out of pending that the
-	// dispatcher uses to claim it. Whoever's move lands first wins, and a lost
-	// race falls through to the running path below — by then the dispatcher has
-	// registered the run, so the cancel finds it there.
-	if sess.State == session.StatePending {
-		cancelled, err := s.sessionMgr.TransitionPending(ctx, sess.ID, session.PendingTransition{
-			State:   session.StateCancelled,
-			Message: cause.Error(),
-		})
-		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
-		}
-		if cancelled {
-			reqid.LoggerFrom(ctx).Info("queued job cancelled",
-				"session_id", sess.ID, "project", sess.ProjectName, "reason", req.Msg.Reason)
-			return connect.NewResponse(&v1.CancelJobResponse{PreviousState: string(sess.State)}), nil
-		}
-	}
-
-	s.runningMu.Lock()
-	job, ok := s.running[sess.ID]
-	s.runningMu.Unlock()
-	if !ok {
-		// Non-terminal with no job behind it: the run belonged to a process that
-		// is gone. Startup reconciliation settles such sessions, so this is only
-		// reachable when a terminal write failed outright.
-		return nil, connect.NewError(connect.CodeFailedPrecondition,
-			fmt.Errorf("session %s is not running on this orchestrator", sess.ID))
-	}
-
-	job.cancel(cause)
-
-	reqid.LoggerFrom(ctx).Info("job cancelled",
-		"session_id", sess.ID, "project", sess.ProjectName, "state", sess.State, "reason", req.Msg.Reason)
 
 	return connect.NewResponse(&v1.CancelJobResponse{PreviousState: string(sess.State)}), nil
+}
+
+// defaultCancelJobsLimit bounds one bulk cancel when the caller names no limit.
+// A sweep is an operator action taken against a queue whose size they have just
+// read, so this is a guard against a runaway command rather than a paging
+// mechanism: the response says what it cancelled, and running it again cancels
+// the next batch.
+const defaultCancelJobsLimit = 100
+
+// CancelJobs stops every job matching a filter. Per-job failures are reported
+// on their entry rather than failing the call, because the common one — a job
+// finishing between the listing and the cancel — is the sweep working as
+// intended, not an error the caller can act on.
+func (s *Service) CancelJobs(ctx context.Context, req *connect.Request[v1.CancelJobsRequest]) (*connect.Response[v1.CancelJobsResponse], error) {
+	if s.sessionMgr == nil {
+		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+	}
+	msg := req.Msg
+
+	states, err := parseStates(msg.States)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	for _, st := range states {
+		if st.IsTerminal() {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("state %q is terminal and has nothing to cancel", st))
+		}
+	}
+
+	// An unfiltered request cancels everything the caller can reach, which is a
+	// legitimate thing to want and a bad thing to do by accident.
+	if msg.Project == "" && len(states) == 0 && msg.Mode == "" && msg.PrRef == "" && !msg.All {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("cancelling every active job requires the all flag"))
+	}
+
+	limit := int(msg.Limit)
+	if limit <= 0 {
+		limit = defaultCancelJobsLimit
+	}
+
+	// ActiveOnly rather than an explicit non-terminal state list: it is derived
+	// from session.TerminalStates, so a new state is swept without being added
+	// here.
+	candidates, err := s.sessionMgr.List(ctx, session.SessionFilter{
+		Project:    msg.Project,
+		PRRef:      msg.PrRef,
+		Mode:       msg.Mode,
+		States:     states,
+		ActiveOnly: true,
+		Limit:      limit,
+	})
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+
+	cause := cancelCause(msg.Reason)
+	jobs := make([]*v1.CancelledJob, 0, len(candidates))
+	for _, sess := range candidates {
+		// Sessions the key does not cover are skipped rather than refused: the
+		// filter describes a set, and a bulk operation acts on the part of it
+		// the caller owns.
+		if err := s.authorizeProject(ctx, sess.ProjectName, req.Spec().Procedure); err != nil {
+			continue
+		}
+		entry := &v1.CancelledJob{
+			SessionId:     sess.ID,
+			Project:       sess.ProjectName,
+			PreviousState: string(sess.State),
+		}
+		if !msg.DryRun {
+			if err := s.cancelSession(ctx, sess, cause, msg.Reason); err != nil {
+				entry.Error = err.Error()
+			}
+		}
+		jobs = append(jobs, entry)
+	}
+
+	reqid.LoggerFrom(ctx).Info("bulk cancel",
+		"project", msg.Project, "matched", len(jobs), "dry_run", msg.DryRun, "reason", msg.Reason)
+
+	return connect.NewResponse(&v1.CancelJobsResponse{Jobs: jobs}), nil
 }

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"time"
 
@@ -33,6 +34,44 @@ const (
 	// StateFailed so a deliberate stop does not read as a broken job.
 	StateCancelled State = "cancelled"
 )
+
+// allStates is every state a session can be in, in lifecycle order. It backs
+// States and ParseState, so a caller that filters on a state — the queue RPCs,
+// the CLI that renders their help — validates against the same set the runtime
+// moves through, with no second list to keep aligned.
+var allStates = []State{
+	StatePending,
+	StateQueued,
+	StateCloning,
+	StateProvisioning,
+	StateTransferring,
+	StateInstallingDependencies,
+	StatePullingImage,
+	StateSetup,
+	StateRunning,
+	StateValidating,
+	StateSubmitting,
+	StateCompleted,
+	StateFailed,
+	StateCancelled,
+}
+
+// States returns every known state in lifecycle order.
+func States() []State {
+	return slices.Clone(allStates)
+}
+
+// ParseState resolves a state name, rejecting one that no session can ever be
+// in. Filtering on an unknown state is a typo rather than a request for an
+// empty result, and saying so is what stops `--state canceled` from reading as
+// "nothing is cancelled".
+func ParseState(name string) (State, error) {
+	st := State(name)
+	if !slices.Contains(allStates, st) {
+		return "", fmt.Errorf("unknown state %q", name)
+	}
+	return st, nil
+}
 
 // terminalStates is the single source of truth for which states are final:
 // IsTerminal answers from it, and stores that need the set in a query build it
@@ -355,6 +394,9 @@ type Manager interface {
 	// broadcasts the resulting state change, reporting false when the session
 	// had already left the backlog.
 	TransitionPending(ctx context.Context, id string, to PendingTransition) (bool, error)
+	// UpdatePendingPriority reorders a backlog entry, returning the priority it
+	// replaced and false when the session is no longer pending.
+	UpdatePendingPriority(ctx context.Context, id string, priority int) (int, bool, error)
 	// ExpirePending fails backlog entries queued before cutoff.
 	ExpirePending(ctx context.Context, cutoff time.Time, reason string) ([]string, error)
 }

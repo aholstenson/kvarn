@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -90,6 +91,11 @@ func (m *memStore) ListSessions(_ context.Context, filter SessionFilter) ([]*Ses
 		cursorMicros = ToMicros(filter.AfterCreatedAt)
 	}
 
+	var createdAfter int64
+	if !filter.CreatedAfter.IsZero() {
+		createdAfter = ToMicros(filter.CreatedAfter)
+	}
+
 	var out []*Session
 	for _, r := range rows {
 		if filter.Project != "" && r.ProjectName != filter.Project {
@@ -98,7 +104,16 @@ func (m *memStore) ListSessions(_ context.Context, filter SessionFilter) ([]*Ses
 		if filter.PRRef != "" && r.PRRef != filter.PRRef {
 			continue
 		}
+		if filter.Mode != "" && r.Mode != filter.Mode {
+			continue
+		}
+		if len(filter.States) > 0 && !slices.Contains(filter.States, State(r.State)) {
+			continue
+		}
 		if filter.ActiveOnly && State(r.State).IsTerminal() {
+			continue
+		}
+		if createdAfter != 0 && r.CreatedAt <= createdAfter {
 			continue
 		}
 		if hasCursor {
@@ -165,50 +180,47 @@ func (m *memStore) ListPending(_ context.Context, q PendingQuery) ([]*Session, e
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var pending []Row
-	ceiling := 0
+	var pending []*Session
 	for _, r := range m.sessions {
 		if State(r.State) != StatePending {
 			continue
 		}
-		if len(pending) == 0 || r.Priority > ceiling {
-			ceiling = r.Priority
-		}
-		pending = append(pending, r)
-	}
-
-	// Effective priority with the same aging and clamp as the SQLite store, so
-	// a test that exercises ordering here proves the same rule.
-	effective := func(r Row) int {
-		p := r.Priority
-		if q.AgeStep > 0 {
-			p += int(q.Now.Sub(FromMicros(r.QueuedAt)) / q.AgeStep)
-			if p > ceiling {
-				p = ceiling
-			}
-		}
-		return p
-	}
-	sort.SliceStable(pending, func(i, j int) bool {
-		pi, pj := effective(pending[i]), effective(pending[j])
-		if pi != pj {
-			return pi > pj
-		}
-		return pending[i].QueuedAt < pending[j].QueuedAt
-	})
-
-	var out []*Session
-	for _, r := range pending {
 		s, err := RowToSession(r)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, s)
-		if q.Limit > 0 && len(out) >= q.Limit {
-			break
-		}
+		pending = append(pending, s)
 	}
-	return out, nil
+
+	// Effective priority with the same aging and clamp as the SQLite store's
+	// ORDER BY, so a test that exercises ordering here proves the same rule.
+	ceiling := PendingCeiling(pending)
+	sort.SliceStable(pending, func(i, j int) bool {
+		pi, pj := q.EffectivePriority(pending[i], ceiling), q.EffectivePriority(pending[j], ceiling)
+		if pi != pj {
+			return pi > pj
+		}
+		return pending[i].QueuedAt.Before(pending[j].QueuedAt)
+	})
+
+	if q.Limit > 0 && len(pending) > q.Limit {
+		pending = pending[:q.Limit]
+	}
+	return pending, nil
+}
+
+func (m *memStore) UpdatePendingPriority(_ context.Context, id string, priority int) (int, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.sessions[id]
+	if !ok || State(row.State) != StatePending {
+		return 0, false, nil
+	}
+	previous := row.Priority
+	row.Priority = priority
+	row.UpdatedAt = ToMicros(time.Now())
+	m.sessions[id] = row
+	return previous, true, nil
 }
 
 func (m *memStore) CountPending(_ context.Context) (int, error) {
