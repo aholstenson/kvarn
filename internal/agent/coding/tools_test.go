@@ -229,7 +229,7 @@ var _ = Describe("CodingToolkit", func() {
 				},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			rendered := tools["edit_file"].ToString(result.(*coding.EditFileOutput))
+			rendered := tools["edit_file"].Render(result.(*coding.EditFileOutput)).Text
 			Expect(rendered).To(ContainSubstring("changed elsewhere"))
 		})
 
@@ -247,7 +247,7 @@ var _ = Describe("CodingToolkit", func() {
 			Expect(err).NotTo(HaveOccurred())
 			output := result.(*coding.EditFileOutput)
 			Expect(output.Failure).To(ContainSubstring("anchor_mismatch"))
-			rendered := tools["edit_file"].ToString(output)
+			rendered := tools["edit_file"].Render(output).Text
 			Expect(rendered).To(ContainSubstring("Re-read the file to get fresh anchors"))
 		})
 	})
@@ -412,31 +412,31 @@ var _ = Describe("CodingToolkit", func() {
 		})
 	})
 
-	Describe("ToString", func() {
+	Describe("Render", func() {
 		It("formats exec_command output", func() {
-			result := tools["exec_command"].ToString(&coding.ExecCommandOutput{
+			result := tools["exec_command"].Render(&coding.ExecCommandOutput{
 				ExitCode: 0,
 				Stdout:   "ok",
-			})
+			}).Text
 			Expect(result).To(ContainSubstring("ok"))
 			Expect(result).To(ContainSubstring("[exit code: 0]"))
 		})
 
 		It("formats edit_file success output", func() {
-			result := tools["edit_file"].ToString(&coding.EditFileOutput{
+			result := tools["edit_file"].Render(&coding.EditFileOutput{
 				Version:    "vnew",
 				TotalLines: 12,
 				Context: []coding.TaggedLineView{
 					{Line: 3, Hash: "cedar", Content: "x"},
 				},
-			})
+			}).Text
 			Expect(result).To(ContainSubstring("Edit applied"))
 			Expect(result).To(ContainSubstring("vnew"))
 			Expect(result).To(ContainSubstring("3:cedar|x"))
 		})
 
 		It("formats write_file success output", func() {
-			result := tools["write_file"].ToString(&coding.WriteFileOutput{Version: "vv", TotalLines: 3})
+			result := tools["write_file"].Render(&coding.WriteFileOutput{Version: "vv", TotalLines: 3}).Text
 			Expect(result).To(ContainSubstring("Wrote file"))
 			Expect(result).To(ContainSubstring("vv"))
 		})
@@ -445,7 +445,7 @@ var _ = Describe("CodingToolkit", func() {
 		It("starts with an empty list", func() {
 			result, err := tools["list_tasks"].Execute(ctx, &coding.ListTasksInput{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(tools["list_tasks"].ToString(result)).To(ContainSubstring("Internal task list is empty."))
+			Expect(tools["list_tasks"].Render(result).Text).To(ContainSubstring("Internal task list is empty."))
 		})
 
 		It("can add a task and list it", func() {
@@ -453,14 +453,14 @@ var _ = Describe("CodingToolkit", func() {
 				Description: "Fix the build script",
 			})
 			Expect(err).NotTo(HaveOccurred())
-			addStr := tools["add_task"].ToString(addResult)
+			addStr := tools["add_task"].Render(addResult).Text
 			Expect(addStr).To(ContainSubstring("Added task ID 1: \"Fix the build script\"."))
 			Expect(addStr).To(ContainSubstring("- [todo] ID 1: Fix the build script"))
 
 			// Now verify it shows up in list_tasks
 			listResult, err := tools["list_tasks"].Execute(ctx, &coding.ListTasksInput{})
 			Expect(err).NotTo(HaveOccurred())
-			listStr := tools["list_tasks"].ToString(listResult)
+			listStr := tools["list_tasks"].Render(listResult).Text
 			Expect(listStr).To(ContainSubstring("- [todo] ID 1: Fix the build script"))
 		})
 
@@ -477,7 +477,7 @@ var _ = Describe("CodingToolkit", func() {
 				Description: &newDesc,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			updateStr := tools["update_task"].ToString(updateResult)
+			updateStr := tools["update_task"].Render(updateResult).Text
 			Expect(updateStr).To(ContainSubstring("Updated task ID 1 to status \"in_progress\"."))
 			Expect(updateStr).To(ContainSubstring("- [in_progress] ID 1: Write robust tests"))
 
@@ -487,7 +487,7 @@ var _ = Describe("CodingToolkit", func() {
 				Status: "completed",
 			})
 			Expect(err).NotTo(HaveOccurred())
-			updateStr = tools["update_task"].ToString(updateResult)
+			updateStr = tools["update_task"].Render(updateResult).Text
 			Expect(updateStr).To(ContainSubstring("- [completed] ID 1: Write robust tests"))
 		})
 

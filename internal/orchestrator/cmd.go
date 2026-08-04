@@ -25,6 +25,7 @@ import (
 	forgegithub "github.com/aholstenson/kvarn/internal/forge/github"
 	imageproxy "github.com/aholstenson/kvarn/internal/imagecache/proxy"
 	imagestore "github.com/aholstenson/kvarn/internal/imagecache/store"
+	"github.com/aholstenson/kvarn/internal/llmauth"
 	"github.com/aholstenson/kvarn/internal/localsock"
 	"github.com/aholstenson/kvarn/internal/observability/metrics"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
@@ -193,10 +194,9 @@ func (c *Cmd) Run() error {
 	if projectsPath == "" {
 		projectsPath = projtoml.DefaultPath()
 	}
-	credentialsPath := c.CredentialsFile
-	if credentialsPath == "" {
-		credentialsPath = credtoml.DefaultPath()
-	}
+	// One store serves both the named forge credentials and the [llm] block
+	// of provider API keys.
+	credStore := credtoml.OpenDefault(c.CredentialsFile)
 	secretsPath := c.SecretsFile
 	if secretsPath == "" {
 		secretsPath = secrettoml.DefaultPath()
@@ -220,7 +220,10 @@ func (c *Cmd) Run() error {
 	}
 
 	logger := slog.Default()
-	mgr, err := llms.NewManager(llms.WithManagerLogger(logger))
+	mgr, err := llms.NewManager(
+		llms.WithManagerLogger(logger),
+		llms.WithManagerCredentials(llmauth.NewSource(credStore.LLM())),
+	)
 	if err != nil {
 		return fmt.Errorf("create llms manager: %w", err)
 	}
@@ -443,7 +446,7 @@ func (c *Cmd) Run() error {
 		Provider:           p,
 		CreateOpts:         vm.CreateOpts{Image: image, MaxLifetime: maxLifetime, Network: imageCacheNet},
 		ProjectStore:       projtoml.New(projectsPath),
-		CredentialStore:    credtoml.New(credentialsPath),
+		CredentialStore:    credStore,
 		SecretStore:        secrettoml.New(secretsPath),
 		ForgeConfigStore:   forgeStore,
 		ForgeDefaultsStore: forgeStore,

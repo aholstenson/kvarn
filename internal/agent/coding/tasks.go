@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	llms "github.com/aholstenson/llms-go"
 )
 
 // Task represents a single item on the agent's internal todo list.
@@ -113,8 +115,8 @@ func (t *addTaskTool) Execute(ctx context.Context, input *AddTaskInput) (*AddTas
 	msg := fmt.Sprintf("Added task ID %s: %q.\n\n%s", task.ID, task.Description, formatTaskList(t.toolkit.tasks.List()))
 	return &AddTaskOutput{Message: msg}, nil
 }
-func (t *addTaskTool) ToString(o *AddTaskOutput) string {
-	return o.Message
+func (t *addTaskTool) Render(o *AddTaskOutput) llms.ToolResult {
+	return llms.TextToolResult(o.Message)
 }
 
 // update_task tool
@@ -152,8 +154,8 @@ func (t *updateTaskTool) Execute(ctx context.Context, input *UpdateTaskInput) (*
 	msg := fmt.Sprintf("Updated task ID %s to status %q.\n\n%s", task.ID, task.Status, formatTaskList(t.toolkit.tasks.List()))
 	return &UpdateTaskOutput{Message: msg}, nil
 }
-func (t *updateTaskTool) ToString(o *UpdateTaskOutput) string {
-	return o.Message
+func (t *updateTaskTool) Render(o *UpdateTaskOutput) llms.ToolResult {
+	return llms.TextToolResult(o.Message)
 }
 
 // list_tasks tool
@@ -179,6 +181,6 @@ func (t *listTasksTool) Execute(ctx context.Context, input *ListTasksInput) (*Li
 	msg := formatTaskList(t.toolkit.tasks.List())
 	return &ListTasksOutput{Message: msg}, nil
 }
-func (t *listTasksTool) ToString(o *ListTasksOutput) string {
-	return o.Message
+func (t *listTasksTool) Render(o *ListTasksOutput) llms.ToolResult {
+	return llms.TextToolResult(o.Message)
 }

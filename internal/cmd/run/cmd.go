@@ -22,6 +22,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 	"github.com/aholstenson/kvarn/internal/cmd/imageutil"
+	credtoml "github.com/aholstenson/kvarn/internal/config/credential/tomlstore"
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 	modeltoml "github.com/aholstenson/kvarn/internal/config/model/tomlstore"
 	projectstore "github.com/aholstenson/kvarn/internal/config/project"
@@ -30,6 +31,7 @@ import (
 	secrettoml "github.com/aholstenson/kvarn/internal/config/secret/tomlstore"
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 	"github.com/aholstenson/kvarn/internal/linebuf"
+	"github.com/aholstenson/kvarn/internal/llmauth"
 	"github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
@@ -47,17 +49,18 @@ type Cmd struct {
 	Diff  bool `help:"Write a unified diff of all changes to stdout." xor:"output"`
 	Apply bool `help:"Copy changed files from the VM back onto the host working directory." xor:"output"`
 
-	DiskImagePath string `help:"Path to VM disk image. Auto-detected if not set."`
-	Dir           string `help:"Project directory." default:"." type:"existingdir"`
-	NoCache       bool   `help:"Disable cache persistence across runs." name:"no-cache"`
-	CacheQuota    string `help:"Per-project tool-cache size limit for the LRU sweep (e.g. 5G)." name:"cache-quota" default:"5G"`
-	Verbose       bool   `help:"Show all output, including from passing steps." short:"v"`
-	Logs          bool   `help:"Show log output." name:"logs"`
-	Project       string `help:"Project name for secret lookup. Falls back to git remote → project store if omitted." short:"p"`
-	SecretsFile   string `help:"Override path to secrets store (default: ~/.config/kvarn/secrets.toml)." name:"secrets-file"`
-	AgentsFile    string `help:"Override path to agents config (default: ~/.config/kvarn/agents.toml)." name:"agents-file"`
-	Model         string `help:"LLM model alias for the coding agent." default:"coding-agent"`
-	Mode          string `help:"Agent mode: auto, implement, fix, feedback, review, research." default:"auto"`
+	DiskImagePath   string `help:"Path to VM disk image. Auto-detected if not set."`
+	Dir             string `help:"Project directory." default:"." type:"existingdir"`
+	NoCache         bool   `help:"Disable cache persistence across runs." name:"no-cache"`
+	CacheQuota      string `help:"Per-project tool-cache size limit for the LRU sweep (e.g. 5G)." name:"cache-quota" default:"5G"`
+	Verbose         bool   `help:"Show all output, including from passing steps." short:"v"`
+	Logs            bool   `help:"Show log output." name:"logs"`
+	Project         string `help:"Project name for secret lookup. Falls back to git remote → project store if omitted." short:"p"`
+	SecretsFile     string `help:"Override path to secrets store (default: ~/.config/kvarn/secrets.toml)." name:"secrets-file"`
+	AgentsFile      string `help:"Override path to agents config (default: ~/.config/kvarn/agents.toml)." name:"agents-file"`
+	CredentialsFile string `help:"Override path to credentials store (default: ~/.config/kvarn/credentials.toml)." name:"credentials-file"`
+	Model           string `help:"LLM model alias for the coding agent." default:"coding-agent"`
+	Mode            string `help:"Agent mode: auto, implement, fix, feedback, review, research." default:"auto"`
 
 	MaxValidationRetries int `help:"Number of additional agent passes after a required validation failure. 0 disables retries." name:"max-validation-retries" default:"0"`
 }
@@ -86,7 +89,10 @@ func (c *Cmd) Run() error {
 
 	// Resolve the coding-agent model(s) up front so we fail fast on missing
 	// credentials before booting a VM.
-	mgr, err := llms.NewManager(llms.WithManagerLogger(slog.Default()))
+	mgr, err := llms.NewManager(
+		llms.WithManagerLogger(slog.Default()),
+		llms.WithManagerCredentials(llmauth.NewSource(credtoml.OpenDefault(c.CredentialsFile).LLM())),
+	)
 	if err != nil {
 		return fmt.Errorf("create llms manager: %w", err)
 	}

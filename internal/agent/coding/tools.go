@@ -98,7 +98,7 @@ func (t *CodingToolkit) withBudgetWarning(tools []llms.ToolDef) []llms.ToolDef {
 	return wrapped
 }
 
-// budgetWrappedTool decorates a ToolDef so that ToString optionally appends a
+// budgetWrappedTool decorates a ToolDef so that Render optionally appends a
 // one-shot budget warning. All other behavior is forwarded verbatim.
 type budgetWrappedTool struct {
 	inner   llms.ToolDef
@@ -112,15 +112,15 @@ func (w *budgetWrappedTool) Execute(ctx context.Context, in any) (any, error) {
 	return w.inner.Execute(ctx, in)
 }
 
-func (w *budgetWrappedTool) ToString(out any) string {
-	s := w.inner.ToString(out)
+func (w *budgetWrappedTool) Render(out any) llms.ToolResult {
+	res := w.inner.Render(out)
 	if note, ok := w.tracker.ConsumeWarning(); ok {
-		if s != "" {
-			s += "\n\n"
+		if res.Text != "" {
+			res.Text += "\n\n"
 		}
-		s += note
+		res.Text += note
 	}
-	return s
+	return res
 }
 
 func (t *CodingToolkit) Tools() []llms.ToolDef {
@@ -220,7 +220,7 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-func (t *execCommandTool) ToString(o *ExecCommandOutput) string {
+func (t *execCommandTool) Render(o *ExecCommandOutput) llms.ToolResult {
 	var sb strings.Builder
 	if o.Stdout != "" {
 		sb.WriteString(o.Stdout)
@@ -233,7 +233,7 @@ func (t *execCommandTool) ToString(o *ExecCommandOutput) string {
 		sb.WriteString(o.Stderr)
 	}
 	fmt.Fprintf(&sb, "\n[exit code: %d]", o.ExitCode)
-	return sb.String()
+	return llms.TextToolResult(sb.String())
 }
 
 // read_file
@@ -299,14 +299,14 @@ func (t *readFileTool) Execute(ctx context.Context, input *ReadFileInput) (*Read
 	return out, nil
 }
 
-func (t *readFileTool) ToString(o *ReadFileOutput) string {
+func (t *readFileTool) Render(o *ReadFileOutput) llms.ToolResult {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "version: %s\n", o.Version)
 	fmt.Fprintf(&sb, "total_lines: %d\n", o.TotalLines)
 	for _, l := range o.Lines {
 		fmt.Fprintf(&sb, "%d:%s|%s\n", l.Line, l.Hash, l.Content)
 	}
-	return sb.String()
+	return llms.TextToolResult(sb.String())
 }
 
 // edit_file
@@ -425,7 +425,7 @@ func (t *editFileTool) Execute(ctx context.Context, input *EditFileInput) (*Edit
 	return out, nil
 }
 
-func (t *editFileTool) ToString(o *EditFileOutput) string {
+func (t *editFileTool) Render(o *EditFileOutput) llms.ToolResult {
 	if o.Failure != "" {
 		var sb strings.Builder
 		sb.WriteString("edit_file failed: ")
@@ -437,7 +437,7 @@ func (t *editFileTool) ToString(o *EditFileOutput) string {
 				fmt.Fprintf(&sb, "%d:%s|%s\n", l.Line, l.Hash, l.Content)
 			}
 		}
-		return sb.String()
+		return llms.TextToolResult(sb.String())
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Edit applied. New version: %s (%d lines total)\n", o.Version, o.TotalLines)
@@ -447,7 +447,7 @@ func (t *editFileTool) ToString(o *EditFileOutput) string {
 	for _, l := range o.Context {
 		fmt.Fprintf(&sb, "%d:%s|%s\n", l.Line, l.Hash, l.Content)
 	}
-	return sb.String()
+	return llms.TextToolResult(sb.String())
 }
 
 func parseEditOp(s string) (v1.EditOp, error) {
@@ -534,7 +534,7 @@ func (t *writeFileTool) Execute(ctx context.Context, input *WriteFileInput) (*Wr
 	return &WriteFileOutput{Version: resp.Version, TotalLines: resp.TotalLines}, nil
 }
 
-func (t *writeFileTool) ToString(o *WriteFileOutput) string {
+func (t *writeFileTool) Render(o *WriteFileOutput) llms.ToolResult {
 	if o.Failure != "" {
 		var sb strings.Builder
 		sb.WriteString("write_file failed: ")
@@ -545,9 +545,9 @@ func (t *writeFileTool) ToString(o *WriteFileOutput) string {
 				fmt.Fprintf(&sb, "%d:%s|%s\n", l.Line, l.Hash, l.Content)
 			}
 		}
-		return sb.String()
+		return llms.TextToolResult(sb.String())
 	}
-	return fmt.Sprintf("Wrote file. Version: %s (%d lines)", o.Version, o.TotalLines)
+	return llms.TextToolResult(fmt.Sprintf("Wrote file. Version: %s (%d lines)", o.Version, o.TotalLines))
 }
 
 // list_files
@@ -600,8 +600,8 @@ func (t *listFilesTool) Execute(ctx context.Context, input *ListFilesInput) (*Li
 	return &ListFilesOutput{Output: output}, nil
 }
 
-func (t *listFilesTool) ToString(o *ListFilesOutput) string {
-	return o.Output
+func (t *listFilesTool) Render(o *ListFilesOutput) llms.ToolResult {
+	return llms.TextToolResult(o.Output)
 }
 
 // search_files
@@ -657,8 +657,8 @@ func (t *searchFilesTool) Execute(ctx context.Context, input *SearchFilesInput) 
 	return &SearchFilesOutput{Output: output}, nil
 }
 
-func (t *searchFilesTool) ToString(o *SearchFilesOutput) string {
-	return o.Output
+func (t *searchFilesTool) Render(o *SearchFilesOutput) llms.ToolResult {
+	return llms.TextToolResult(o.Output)
 }
 
 // activate_skill
@@ -709,8 +709,8 @@ func (t *activateSkillTool) Execute(_ context.Context, input *ActivateSkillInput
 	return &ActivateSkillOutput{Content: sb.String()}, nil
 }
 
-func (t *activateSkillTool) ToString(o *ActivateSkillOutput) string {
-	return o.Content
+func (t *activateSkillTool) Render(o *ActivateSkillOutput) llms.ToolResult {
+	return llms.TextToolResult(o.Content)
 }
 
 // spawn_agent
@@ -815,8 +815,8 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 	return &SpawnAgentOutput{Text: text}, nil
 }
 
-func (t *spawnAgentTool) ToString(o *SpawnAgentOutput) string {
-	return o.Text
+func (t *spawnAgentTool) Render(o *SpawnAgentOutput) llms.ToolResult {
+	return llms.TextToolResult(o.Text)
 }
 
 // newRunID returns a short random hex identifier for a sub-agent run.
