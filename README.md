@@ -14,10 +14,18 @@ Kvarn is a server that runs coding-agent jobs in isolated VMs. You host the orch
 - **Cost guardrails.** Live per-model token and USD tracking, a soft warning threshold, and a hard budget cap that stops the run before it overspends.
 - **From prompt to pull request.** Send the orchestrator a project name and a prompt; it clones the repository, runs the agent, validates the result, pushes a branch, and opens a PR on GitHub. (For local development, `kvarn run --diff` / `--apply` does the same against your working tree.)
 
+## Documentation
+
+This README is the overview. Task-oriented guides and the full configuration
+reference live in [`docs/`](docs/README.md):
+
+- [How-to guides](docs/README.md#how-to-guides) — running the orchestrator, connecting a forge, managing keys and secrets, tuning capacity and cost.
+- [Reference](docs/README.md#reference) — every field of `kvarn.yml`, `projects.toml`, `forges.toml`, `credentials.toml`, `agents.toml`, `orchestrator.toml`, `apikeys.toml`, and the CLI.
+
 ## Requirements
 
 - **macOS** (Apple Virtualization framework) or **Linux** (KVM/QEMU) to run the VM sandboxes. Other platforms are unsupported.
-- An API key for your model provider, in the environment. The default agent uses Anthropic, so export `ANTHROPIC_API_KEY`; `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, and `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) are also recognized.
+- An API key for your model provider, in `~/.config/kvarn/credentials.toml` or in the environment. The default agent uses Anthropic, so `[llm.anthropic] api_key` or `ANTHROPIC_API_KEY`; `openai`, `openrouter` and `google` (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY` / `GOOGLE_API_KEY`) are also recognized.
 
 ## Install
 
@@ -49,7 +57,14 @@ xattr -d com.apple.quarantine ./kvarn
 
 You run the orchestrator on a host with virtualization and send it jobs. Install `kvarn` first (see [Install](#install)); the VM disk image downloads automatically the first time the orchestrator needs it.
 
-Export your model-provider API key on the host that runs the orchestrator:
+Give the host that runs the orchestrator a model-provider API key, in `~/.config/kvarn/credentials.toml`:
+
+```toml
+[llm.anthropic]
+api_key = "sk-ant-..."
+```
+
+or in the environment:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -90,10 +105,10 @@ Start the orchestrator:
 kvarn orchestrator --addr :8080
 ```
 
-From any machine, send it a job and watch the session stream to completion:
+From any machine, send it a job. It prints a session ID and returns; add `--watch` to stream the session to your terminal until it finishes:
 
 ```sh
-kvarn startjob --addr http://localhost:8080 my-project "Fix the failing tests"
+kvarn jobs start --addr http://localhost:8080 my-project "Fix the failing tests" --watch
 ```
 
 It looks up the project, clones the repository, loads its `kvarn.yml`, runs setup, invokes the agent, validates the result, pushes a branch, and opens a PR when the forge supports it.
@@ -101,10 +116,43 @@ It looks up the project, clones the repository, loads its `kvarn.yml`, runs setu
 A run that turned out to be a mistake can be stopped without waiting for its cost cap:
 
 ```sh
-kvarn cancel <session-id> --reason "wrong branch"
+kvarn jobs cancel <session-id> --reason "wrong branch"
 ```
 
 The run unwinds wherever it is — queued, cloning, mid-agent — tears its VM down, and the session ends up `cancelled` rather than `failed`.
+
+### Managing jobs
+
+`kvarn jobs` is the view onto everything the orchestrator is holding, and `kvarn queue` onto the order it will run it in. Both take `--json` for scripting.
+
+```sh
+kvarn jobs list                                   # newest first
+kvarn jobs list --active --project my-project     # only what is still running
+kvarn jobs list --state pending,failed --since 24h
+kvarn jobs show <session-id>                      # one job in full
+kvarn jobs watch <session-id>                     # follow it live
+kvarn jobs events <session-id>                    # replay its recorded history
+```
+
+Jobs can be managed as well as read:
+
+```sh
+kvarn jobs retry <session-id>                     # resubmit a finished job
+kvarn jobs priority <session-id> 10               # promote one still in the backlog
+kvarn jobs cancel --project my-project --dry-run  # see what a sweep would stop
+kvarn jobs cancel --project my-project --state pending --reason "bad config"
+```
+
+A retry creates a new session and leaves the original as the record of what happened. A job that already opened a pull request is not retried — that would open a second one — so continue it with `kvarn feedback` instead.
+
+When a job is not starting, `kvarn queue` says whether the host is full or others are simply ahead of it:
+
+```sh
+kvarn queue status    # backlog depth, pipeline population, free capacity
+kvarn queue list      # the backlog in the order it will be dispatched
+```
+
+`queue list` shows each entry's place, its configured priority, and the effective priority it is actually ordered by — configured priority plus one level per `priority_age_step` waited.
 
 ### Local development
 
@@ -235,8 +283,8 @@ Important constraints:
 - `vm.cpus` defaults to `2`, `vm.memory` to `4G`, and `vm.disk` to `16G`. Set them only when a job needs more (or less) than the defaults.
 - `image` and `dependencies` are mutually exclusive.
 - `dependencies` keys may be `nixpkgs`, `nixpkgs/<channel>` (e.g. `nixpkgs/nixos-24.11`), `github:owner/repo`, `gitlab:owner/repo`, `git+https://…`, `git+ssh://…`, `https://…`, or `tarball+https://…`.
-- `network.allowed_hosts` entries are hostnames or IP addresses only; do not include a scheme, path, or port.
-- `cache.paths` entries must be absolute guest paths and must not be under `/home/kvarn/workspace` or `/nix`. The same rule applies to `cache.entries[*].path`.
+- `network.allowed_hosts` entries are hostnames, IP addresses, or a `*.domain` wildcard; do not include a scheme, path, or port.
+- `cache.paths` entries may be absolute guest paths, `~`-relative paths, or paths relative to the workspace. The workspace root itself and anything under `/nix` are rejected. The same rule applies to `cache.entries[*].path`.
 - `environment` keys and `secrets` names must be valid POSIX environment variable names.
 - Step `working_dir` values must be relative to the workspace root.
 - Step `timeout` accepts either seconds or a Go duration string such as `30s`, `10m`, or `1h30m`.
@@ -254,6 +302,7 @@ The orchestrator reads its configuration from `~/.config/kvarn/` by default. You
 | `forges.toml` | `--forges-file` | Named forge instances such as GitHub or plain Git. |
 | `agents.toml` | `--agents-file` | Model aliases for the coding agent. |
 | `apikeys.toml` | `--api-keys-file` | API keys that authenticate orchestrator clients. Mode `0600`; edit with `kvarn key`. |
+| `orchestrator.toml` | `--orchestrator-file` | Host-level settings: admission pool, per-tenant caps, caches, repository mirrors, session retention. |
 
 Common orchestrator flags:
 
@@ -261,8 +310,10 @@ Common orchestrator flags:
 - `--model`, default `coding-agent`, overrides the main coding-agent model alias.
 - `--disk-image-path` points at the VM disk image when auto-discovery is not enough.
 - `--no-auth` disables API-key authentication (local dev only — never expose an unauthenticated orchestrator to an untrusted network).
+- `--sessions-db` points at the session database (default `~/.config/kvarn/sessions.db`).
+- `--sched-*` size the admission pool; see [Tune host capacity](docs/how-to/tune-host-capacity.md).
 
-Once the orchestrator is running, the `startjob` command acts as a client that talks to it over HTTP at `--addr` (default `http://localhost:8080`), so it can run from anywhere that can reach the host. (`kvarn secrets` and `kvarn key` are separate — they edit the orchestrator's local TOML files, so they run on the host where those files live.)
+Once the orchestrator is running, the `jobs start` command acts as a client that talks to it over HTTP at `--addr` (default `http://localhost:8080`), so it can run from anywhere that can reach the host. (`kvarn secrets` and `kvarn key` are separate — they edit the orchestrator's local TOML files, so they run on the host where those files live.)
 
 ### Authentication
 
@@ -286,10 +337,10 @@ kvarn key disable <key-id>   # keep it on record but reject it
 kvarn key revoke <key-id>    # delete it entirely
 ```
 
-Pass the token to `startjob` with `--api-key` or the `KVARN_API_KEY` environment variable:
+Pass the token to `jobs start` with `--api-key` or the `KVARN_API_KEY` environment variable:
 
 ```sh
-KVARN_API_KEY=kvarn_… kvarn startjob myproj "fix the failing test"
+KVARN_API_KEY=kvarn_… kvarn jobs start myproj "fix the failing test"
 ```
 
 ### Projects and forges
@@ -317,7 +368,7 @@ report_cost_on_pr = true # post a cost summary on the opened PR
 max_cost_usd = 1.0       # override the cap for a specific mode
 ```
 
-The agent receives a soft warning as it approaches `max_cost_usd` and is cancelled once it reaches it. Omit these keys to leave spending unlimited.
+The agent receives a soft warning as it approaches `max_cost_usd` and is cancelled once it reaches it. Omitting these keys does not mean unlimited: a job falls back to the user-level `[defaults]` in `agents.toml` and then to the built-in cap of $5.00. See [Control job costs](docs/how-to/control-job-costs.md).
 
 Configure the referenced forge in `~/.config/kvarn/forges.toml`:
 

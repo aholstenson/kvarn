@@ -1,0 +1,111 @@
+# Follow up on a pull request
+
+A job that opened a pull request is finished, but the review that follows is
+not. `kvarn feedback` continues work on an **existing** PR: it clones that PR's
+head branch, runs the agent with your feedback as the task, pushes a follow-up
+commit to the same branch, and posts a comment. No second PR is opened and the
+title and body are left alone.
+
+```sh
+kvarn feedback my-project 1234 "Handle the empty-input case and add a test for it"
+```
+
+`kvarn jobs start` keeps its own meaning — clone the base branch, open a new PR.
+The two never share an entry point.
+
+## The PR reference
+
+The second argument is in the forge's own format. For GitHub that is the PR
+number; Kvarn itself treats it as opaque, and each forge interprets it.
+
+## What the agent is given
+
+The feedback run's task is a context pack: the original task (omitted if that
+session has been pruned), the current pull request, a best-effort diff (capped
+at 256 KiB), and your feedback. The session stores your raw feedback as its
+prompt, so `GetSession` shows what was actually asked rather than the assembled
+pack.
+
+Cost caps and validation retries come from the `feedback` mode like any other —
+see [Control job costs](control-job-costs.md):
+
+```toml
+[projects.my-project.jobs.feedback]
+max_cost_usd = 3.0
+```
+
+`--mode` overrides the mode if you want, say, a `review` pass over the PR
+instead.
+
+## What gets rejected, and why
+
+All of these are refused **before a session is created**, so a rejected request
+leaves no trace:
+
+| Rejection | Reason |
+| --- | --- |
+| No forge configured, or the ref is unreadable | Nothing to push to. |
+| The PR is not open | |
+| The PR head is in a fork | Pushing to a branch in another repository needs the maintainer-edit flag, which an org-scoped App installation token cannot use. |
+| Another feedback run is in flight for the same PR | Named in the error. One run per PR at a time. |
+
+Just before pushing, the PR head is re-read; if it moved underneath the run, the
+run fails rather than pushing over someone else's work.
+
+Startup reconciliation fails any session left non-terminal by a crash, so the
+one-run-per-PR lock can never be stuck.
+
+## Lineage
+
+A feedback run is a **new session** — terminal states stay terminal. It records
+`parent_session_id`, resolved by finding the oldest session on the same PR.
+Nothing depends on that session still existing; retention may have pruned it.
+
+## Watching a run
+
+Both `jobs start` and `feedback` print the session ID and return. Pass `--watch`
+to stream the session to your terminal until it reaches a terminal state.
+
+A session you did not follow at the time can be picked up later:
+`kvarn jobs watch <session-id>` attaches to a run in progress, and
+`kvarn jobs events <session-id>` replays the recorded history of one that has
+already finished. `kvarn jobs list --pr-ref <ref>` shows every run against one
+pull request, the original job and its follow-ups together.
+
+A watcher that falls behind is disconnected rather than silently dropped, and
+reconnects from the last sequence number it saw, replaying the gap from the
+durable event log. That is why a slow terminal cannot produce a session
+transcript with an invisible hole in it.
+
+## Cancelling
+
+```sh
+kvarn jobs cancel <session-id> --reason "superseded by a manual fix"
+```
+
+The call cancels the job's context and returns; the run unwinds wherever it is —
+queued, cloning, mid-agent — and its VM is torn down on the way out. You are not
+made to wait for a VM to stop.
+
+The outcome is `cancelled`, not `failed`, and the reason lands in the session's
+message with the error left empty — a cancelled session is not an error. A
+shutdown or a tripped cost cap stays a failure. A cancel that arrives after the
+PR was submitted loses the race and the run is reported `completed`, because the
+pull request exists.
+
+## Session history
+
+Sessions and their event logs are persisted by the orchestrator in SQLite at
+`~/.config/kvarn/sessions.db` (`--sessions-db` to override). Terminal sessions
+older than `[sessions].retention` — 30 days by default — are pruned at startup
+and hourly, and their events cascade:
+
+```toml
+[sessions]
+retention = "2160h"   # 90 days; "0" keeps them forever
+```
+
+Durable history covers state changes, agent messages and tool use, step results,
+cost, the created pull request, and VM info. High-volume telemetry — VM console
+output, step stdout/stderr, transfer and cache progress — is streamed live to
+watchers but not persisted.
