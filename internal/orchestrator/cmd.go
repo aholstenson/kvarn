@@ -61,6 +61,8 @@ type Cmd struct {
 	SchedDiskFloor      string  `help:"Real free space the VM disk filesystem must keep (e.g. 20G); admission pauses below it. 0 disables. Empty = file / 10% of the pool." env:"KVARN_SCHED_DISK_FLOOR" default:""`
 	SchedBackfillGrace  string  `help:"How long a queued job may be skipped by ones that fit before it holds the line (e.g. 1m). 0 = strict FIFO. Empty = file / built-in default." env:"KVARN_SCHED_BACKFILL_GRACE" default:""`
 	SchedPriorityAge    string  `help:"How long a queued job waits to gain one level of priority (e.g. 5m). 0 disables aging. Empty = file / built-in default." env:"KVARN_SCHED_PRIORITY_AGE_STEP" default:""`
+	SchedMaxQueue       int     `help:"Max jobs waiting for capacity; further jobs are refused. -1 = unbounded. 0 = file / built-in default." env:"KVARN_SCHED_MAX_QUEUE" default:"0"`
+	SchedMaxClones      int     `help:"Max jobs cloning at once before admission. -1 = unbounded. 0 = file / built-in default." env:"KVARN_SCHED_MAX_CLONES" default:"0"`
 	SchedMaxVMLifetime  string  `help:"Host-wide per-VM wall-time failsafe (e.g. 4h). Empty = file / built-in default." env:"KVARN_SCHED_MAX_VM_LIFETIME" default:""`
 
 	OtelMetricsEnabled   bool   `help:"Enable OpenTelemetry metrics export." env:"KVARN_OTEL_METRICS_ENABLED"`
@@ -98,6 +100,17 @@ const defaultBackfillGrace = time.Minute
 // job passed over by higher-priority work catches up within a few jobs'
 // runtime rather than a shift.
 const defaultPriorityAgeStep = 5 * time.Minute
+
+// defaultMaxQueue bounds the admission queue when the operator sets none. It is
+// generous — a queue this deep is a backlog, not a burst — because its job is
+// to stop an unbounded accumulation of clones, not to shape traffic.
+const defaultMaxQueue = 64
+
+// defaultMaxConcurrentClones bounds the work that happens before admission.
+// Clones are I/O bound and mostly served from local mirrors, so a handful
+// saturates the disk; the point is that queue depth must not translate into
+// that many simultaneous clones.
+const defaultMaxConcurrentClones = 4
 
 // defaultMaxVMLifetime is the built-in failsafe applied when no operator
 // override is configured. 24h is well above any expected job runtime but
@@ -344,12 +357,19 @@ func (c *Cmd) Run() error {
 			return int64(len(ss)), nil
 		},
 		func() metrics.SchedulerSample {
-			used, free, _ := sched.Snapshot()
+			used, free, queued := sched.Snapshot()
+			hostFree, _, measured, open := sched.DiskGuard()
 			return metrics.SchedulerSample{
-				CPUMillisUsed:  int64(used.CPUMillis),
-				CPUMillisTotal: int64(used.CPUMillis + free.CPUMillis),
-				MemBytesUsed:   int64(used.MemBytes),
-				MemBytesTotal:  int64(used.MemBytes + free.MemBytes),
+				CPUMillisUsed:     int64(used.CPUMillis),
+				CPUMillisTotal:    int64(used.CPUMillis + free.CPUMillis),
+				MemBytesUsed:      int64(used.MemBytes),
+				MemBytesTotal:     int64(used.MemBytes + free.MemBytes),
+				DiskBytesUsed:     int64(used.DiskBytes),
+				DiskBytesTotal:    int64(used.DiskBytes + free.DiskBytes),
+				QueueDepth:        int64(queued),
+				HostDiskFreeBytes: int64(hostFree),
+				HostDiskMeasured:  measured,
+				AdmissionPaused:   !open,
 			}
 		},
 	)
@@ -371,21 +391,22 @@ func (c *Cmd) Run() error {
 			"github": forgegithub.New(),
 			"git":    forgegit.New(),
 		},
-		SessionMgr:     sessionMgr,
-		Agent:          coding.NewCodingAgent(models, configs),
-		Transferer:     &transfer.StreamingTransferer{},
-		DefaultsStore:  agentsStore,
-		PricingManager: llms.NewPricingManager(logger),
-		APIKeyStore:    apiKeyStore,
-		AuthEnabled:    !c.NoAuth,
-		Scheduler:      sched,
-		TenantLimits:   tenantLimits,
-		CacheProvider:  cacheProvider,
-		CacheQuota:     cacheQuota,
-		RepoMirror:     repoMirror,
-		RepoPolicy:     reposCfg.Policy,
-		Meter:          meter,
-		Instruments:    instruments,
+		SessionMgr:          sessionMgr,
+		Agent:               coding.NewCodingAgent(models, configs),
+		Transferer:          &transfer.StreamingTransferer{},
+		DefaultsStore:       agentsStore,
+		PricingManager:      llms.NewPricingManager(logger),
+		APIKeyStore:         apiKeyStore,
+		AuthEnabled:         !c.NoAuth,
+		Scheduler:           sched,
+		TenantLimits:        tenantLimits,
+		MaxConcurrentClones: resolveCount(c.SchedMaxClones, orchFile.Scheduler.MaxConcurrentClones, defaultMaxConcurrentClones),
+		CacheProvider:       cacheProvider,
+		CacheQuota:          cacheQuota,
+		RepoMirror:          repoMirror,
+		RepoPolicy:          reposCfg.Policy,
+		Meter:               meter,
+		Instruments:         instruments,
 	})
 }
 
@@ -693,6 +714,7 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 
 	return scheduler.New(scheduler.Options{
 		Total:          total,
+		MaxQueue:       resolveCount(c.SchedMaxQueue, fileCfg.MaxQueue, defaultMaxQueue),
 		CPUOvercommit:  overcommit,
 		DiskOvercommit: diskOvercommit,
 		DiskPath:       diskPath,
@@ -709,6 +731,25 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 			},
 		},
 	}), nil
+}
+
+// resolveCount applies CLI > file > built-in precedence to a bound expressed as
+// a count. Zero means "unset" on both inputs so the default can be reached, and
+// a negative value is how an operator asks for no bound at all — a distinction
+// the value itself cannot carry, since zero is already the encoding for
+// unbounded in the field being set.
+func resolveCount(flagVal int, fileVal *int, def int) int {
+	v := def
+	if fileVal != nil {
+		v = *fileVal
+	}
+	if flagVal != 0 {
+		v = flagVal
+	}
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 // resolveDuration applies CLI > file > built-in precedence to a duration field.

@@ -18,11 +18,18 @@ type Instruments struct {
 	JobsCompleted   metric.Int64Counter
 	JobDuration     metric.Float64Histogram
 	AuthAttempts    metric.Int64Counter
-	sessionsActive metric.Int64ObservableGauge
+	AdmissionWait   metric.Float64Histogram
+	AdmissionDenies metric.Int64Counter
+	sessionsActive  metric.Int64ObservableGauge
 	schedCPUUsed    metric.Int64ObservableGauge
 	schedCPUAvail   metric.Int64ObservableGauge
 	schedMemUsed    metric.Int64ObservableGauge
 	schedMemAvail   metric.Int64ObservableGauge
+	schedDiskUsed   metric.Int64ObservableGauge
+	schedDiskAvail  metric.Int64ObservableGauge
+	schedQueue      metric.Int64ObservableGauge
+	schedHostDisk   metric.Int64ObservableGauge
+	schedPaused     metric.Int64ObservableGauge
 
 	regs []metric.Registration
 }
@@ -38,6 +45,18 @@ type SchedulerSampler func() SchedulerSample
 type SchedulerSample struct {
 	CPUMillisUsed, CPUMillisTotal int64
 	MemBytesUsed, MemBytesTotal   int64
+	DiskBytesUsed, DiskBytesTotal int64
+	// QueueDepth is how many jobs are waiting for capacity.
+	QueueDepth int64
+	// HostDiskFreeBytes is the disk guard's last measurement of real free
+	// space, and HostDiskMeasured says whether one has been taken yet. The
+	// pool's disk accounting is overcommitted, so this is the number that says
+	// whether the host is actually filling up.
+	HostDiskFreeBytes int64
+	HostDiskMeasured  bool
+	// AdmissionPaused reports the guard holding admission closed, which looks
+	// from every other metric like a queue that stopped moving for no reason.
+	AdmissionPaused bool
 }
 
 // NewInstruments constructs the orchestrator instrument set against m. A nil
@@ -65,6 +84,15 @@ func NewInstruments(m metric.Meter, sessions SessionCounter, sched SchedulerSamp
 	if ins.AuthAttempts, err = m.Int64Counter("kvarn.auth.attempts",
 		metric.WithDescription("API key authentication attempts")); err != nil {
 		return nil, fmt.Errorf("auth.attempts: %w", err)
+	}
+	if ins.AdmissionWait, err = m.Float64Histogram("kvarn.scheduler.admission_wait_seconds",
+		metric.WithDescription("Time a job spent queued for capacity before starting"),
+		metric.WithUnit("s")); err != nil {
+		return nil, fmt.Errorf("scheduler.admission_wait: %w", err)
+	}
+	if ins.AdmissionDenies, err = m.Int64Counter("kvarn.scheduler.admission_denied",
+		metric.WithDescription("Jobs refused admission, by reason")); err != nil {
+		return nil, fmt.Errorf("scheduler.admission_denied: %w", err)
 	}
 
 	if sessions != nil {
@@ -103,14 +131,50 @@ func NewInstruments(m metric.Meter, sessions SessionCounter, sched SchedulerSamp
 			metric.WithDescription("Memory bytes available in the admission pool")); err != nil {
 			return nil, fmt.Errorf("scheduler.memory_available: %w", err)
 		}
+		if ins.schedDiskUsed, err = m.Int64ObservableGauge("kvarn.scheduler.disk_used",
+			metric.WithDescription("Disk bytes in use in the admission pool")); err != nil {
+			return nil, fmt.Errorf("scheduler.disk_used: %w", err)
+		}
+		if ins.schedDiskAvail, err = m.Int64ObservableGauge("kvarn.scheduler.disk_available",
+			metric.WithDescription("Disk bytes available in the admission pool")); err != nil {
+			return nil, fmt.Errorf("scheduler.disk_available: %w", err)
+		}
+		if ins.schedQueue, err = m.Int64ObservableGauge("kvarn.scheduler.queue_depth",
+			metric.WithDescription("Jobs waiting for admission")); err != nil {
+			return nil, fmt.Errorf("scheduler.queue_depth: %w", err)
+		}
+		if ins.schedHostDisk, err = m.Int64ObservableGauge("kvarn.scheduler.host_disk_free",
+			metric.WithDescription("Measured free space on the filesystem VM disks are allocated on")); err != nil {
+			return nil, fmt.Errorf("scheduler.host_disk_free: %w", err)
+		}
+		if ins.schedPaused, err = m.Int64ObservableGauge("kvarn.scheduler.admission_paused",
+			metric.WithDescription("1 while the host disk guard is holding admission closed")); err != nil {
+			return nil, fmt.Errorf("scheduler.admission_paused: %w", err)
+		}
+		observed := []metric.Observable{
+			ins.schedCPUUsed, ins.schedCPUAvail,
+			ins.schedMemUsed, ins.schedMemAvail,
+			ins.schedDiskUsed, ins.schedDiskAvail,
+			ins.schedQueue, ins.schedPaused,
+			ins.schedHostDisk,
+		}
 		reg, err := m.RegisterCallback(func(_ context.Context, obs metric.Observer) error {
 			s := sched()
 			obs.ObserveInt64(ins.schedCPUUsed, s.CPUMillisUsed)
 			obs.ObserveInt64(ins.schedCPUAvail, s.CPUMillisTotal-s.CPUMillisUsed)
 			obs.ObserveInt64(ins.schedMemUsed, s.MemBytesUsed)
 			obs.ObserveInt64(ins.schedMemAvail, s.MemBytesTotal-s.MemBytesUsed)
+			obs.ObserveInt64(ins.schedDiskUsed, s.DiskBytesUsed)
+			obs.ObserveInt64(ins.schedDiskAvail, s.DiskBytesTotal-s.DiskBytesUsed)
+			obs.ObserveInt64(ins.schedQueue, s.QueueDepth)
+			obs.ObserveInt64(ins.schedPaused, boolGauge(s.AdmissionPaused))
+			// Reporting a zero before the first sample would read as a full
+			// disk, which is the one thing this gauge is watched for.
+			if s.HostDiskMeasured {
+				obs.ObserveInt64(ins.schedHostDisk, s.HostDiskFreeBytes)
+			}
 			return nil
-		}, ins.schedCPUUsed, ins.schedCPUAvail, ins.schedMemUsed, ins.schedMemAvail)
+		}, observed...)
 		if err != nil {
 			return nil, fmt.Errorf("register scheduler callback: %w", err)
 		}
@@ -150,6 +214,33 @@ func (i *Instruments) RecordAuth(ctx context.Context, outcome, reason string) {
 	i.AuthAttempts.Add(ctx, 1, metric.WithAttributes(
 		attrStr("outcome", outcome), attrStr("reason", reason),
 	))
+}
+
+// RecordAdmissionWait records how long a job waited for capacity; nil-safe.
+func (i *Instruments) RecordAdmissionWait(ctx context.Context, project, mode string, seconds float64) {
+	if i == nil {
+		return
+	}
+	i.AdmissionWait.Record(ctx, seconds, metric.WithAttributes(
+		attrStr("project", project), attrStr("mode", mode),
+	))
+}
+
+// RecordAdmissionDenied bumps kvarn.scheduler.admission_denied; nil-safe.
+func (i *Instruments) RecordAdmissionDenied(ctx context.Context, project, reason string) {
+	if i == nil {
+		return
+	}
+	i.AdmissionDenies.Add(ctx, 1, metric.WithAttributes(
+		attrStr("project", project), attrStr("reason", reason),
+	))
+}
+
+func boolGauge(v bool) int64 {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 // Close unregisters observable callbacks. Safe to call multiple times.

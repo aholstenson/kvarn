@@ -107,6 +107,17 @@ type Scheduler struct {
 	// stream of high-priority ones (e.g. "5m"). "0" disables aging and lets
 	// priority strictly dominate. Empty falls through to the built-in default.
 	PriorityAgeStep string `toml:"priority_age_step,omitempty"`
+	// MaxQueue bounds how many jobs may wait for capacity at once. A waiting
+	// job holds a goroutine and a clone already on disk, so an unbounded queue
+	// quietly consumes the same filesystem the pool is sized from. Jobs beyond
+	// it are refused rather than queued. 0 is unbounded; empty takes the
+	// default.
+	MaxQueue *int `toml:"max_queue,omitempty"`
+	// MaxConcurrentClones bounds how many jobs may be cloning and reading
+	// their kvarn.yml at once — the work that happens *before* admission and
+	// is therefore not covered by the pool. 0 is unbounded; empty takes the
+	// default.
+	MaxConcurrentClones *int `toml:"max_concurrent_clones,omitempty"`
 	// PerProject and PerKey cap what any one project or API key may hold at
 	// once, and are the defaults a project or key overrides in its own file.
 	// Unset means uncapped, which is the right default for a single-tenant

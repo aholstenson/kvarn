@@ -268,6 +268,7 @@ type Service struct {
 	apiKeyStore      apikey.Store           // API keys for request authentication
 	authEnabled      bool                   // when true, project-scoped RPCs require an authorized key
 	scheduler        *scheduler.Scheduler   // resource admission; never nil (defaults to unbounded)
+	staging          *staging               // bounds concurrent clones; nil is unbounded
 	tenantLimits     TenantLimitDefaults    // host-wide per-project/per-key caps; zero means uncapped
 	meter            metric.Meter           // never nil; no-op when metrics disabled
 	instruments      *metrics.Instruments   // optional; nil-safe at all call sites
@@ -294,33 +295,34 @@ type Service struct {
 }
 
 type ServiceOpts struct {
-	Provider           vm.Provider
-	CreateOpts         vm.CreateOpts
-	ProjectStore       project.Store
-	CredentialStore    credential.Store
-	SecretStore        secret.Store
-	ForgeConfigStore   forgeconfig.Store
-	ForgeDefaultsStore forgeconfig.DefaultsStore // optional; nil means built-in fallbacks only
-	ForgeTypes         map[string]forge.Forge
-	SessionMgr         session.Manager
-	Agent              agent.Agent
-	Transferer         transfer.Transferer
-	WorkspaceDir       string                 // VM workspace path; defaults to "/home/kvarn/workspace"
-	RegistryMirrors    []string               // Docker registry mirrors (infrastructure config)
-	CacheProvider      cache.Provider         // optional cache provider
-	CacheQuota         cache.Quota            // LRU sweep limits; zero fields = unbounded
-	Namespace          string                 // cache namespace; "" is the shared pool
-	RepoMirror         *mirror.Store          // optional; nil clones straight from the forge
-	RepoPolicy         RepoPolicy             // mirror maintenance knobs; ignored when RepoMirror is nil
-	SandboxFactory     SandboxFactory         // optional; nil uses defaultSandboxFactory
-	DefaultsStore      modelcfg.DefaultsStore // optional; nil means no user defaults (built-ins only)
-	PricingManager     *llms.PricingManager   // optional; nil disables USD computation
-	APIKeyStore        apikey.Store           // API keys for request authentication
-	AuthEnabled        bool                   // when true, project-scoped RPCs require an authorized key
-	Scheduler          *scheduler.Scheduler   // optional; nil means unbounded (no admission control)
-	TenantLimits       TenantLimitDefaults    // host-wide per-project/per-key caps a project or key overrides
-	Meter              metric.Meter           // optional; nil uses an otel no-op meter
-	Instruments        *metrics.Instruments   // optional; nil disables job/auth/scheduler instrumentation
+	Provider            vm.Provider
+	CreateOpts          vm.CreateOpts
+	ProjectStore        project.Store
+	CredentialStore     credential.Store
+	SecretStore         secret.Store
+	ForgeConfigStore    forgeconfig.Store
+	ForgeDefaultsStore  forgeconfig.DefaultsStore // optional; nil means built-in fallbacks only
+	ForgeTypes          map[string]forge.Forge
+	SessionMgr          session.Manager
+	Agent               agent.Agent
+	Transferer          transfer.Transferer
+	WorkspaceDir        string                 // VM workspace path; defaults to "/home/kvarn/workspace"
+	RegistryMirrors     []string               // Docker registry mirrors (infrastructure config)
+	CacheProvider       cache.Provider         // optional cache provider
+	CacheQuota          cache.Quota            // LRU sweep limits; zero fields = unbounded
+	Namespace           string                 // cache namespace; "" is the shared pool
+	RepoMirror          *mirror.Store          // optional; nil clones straight from the forge
+	RepoPolicy          RepoPolicy             // mirror maintenance knobs; ignored when RepoMirror is nil
+	SandboxFactory      SandboxFactory         // optional; nil uses defaultSandboxFactory
+	DefaultsStore       modelcfg.DefaultsStore // optional; nil means no user defaults (built-ins only)
+	PricingManager      *llms.PricingManager   // optional; nil disables USD computation
+	APIKeyStore         apikey.Store           // API keys for request authentication
+	AuthEnabled         bool                   // when true, project-scoped RPCs require an authorized key
+	Scheduler           *scheduler.Scheduler   // optional; nil means unbounded (no admission control)
+	MaxConcurrentClones int                    // optional; 0 means unbounded
+	TenantLimits        TenantLimitDefaults    // host-wide per-project/per-key caps a project or key overrides
+	Meter               metric.Meter           // optional; nil uses an otel no-op meter
+	Instruments         *metrics.Instruments   // optional; nil disables job/auth/scheduler instrumentation
 }
 
 func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
@@ -381,6 +383,7 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		apiKeyStore:      opts.APIKeyStore,
 		authEnabled:      opts.AuthEnabled,
 		scheduler:        sched,
+		staging:          newStaging(opts.MaxConcurrentClones),
 		tenantLimits:     opts.TenantLimits,
 		meter:            meter,
 		instruments:      opts.Instruments,
@@ -409,6 +412,20 @@ func (s *Service) Shutdown(ctx context.Context) {
 	case <-ctx.Done():
 		slog.Warn("shutdown deadline reached; some jobs may still be running")
 	}
+}
+
+// checkQueueDepth refuses a submission while the admission queue is at its
+// bound. The authoritative check happens at Acquire, but by then the job owns a
+// session and a clone: turning it away here costs the caller nothing and tells
+// it something it can act on, which a failed session buried in the log does
+// not. It is a hint, so a job accepted here may still meet a full queue later.
+func (s *Service) checkQueueDepth(ctx context.Context, project string) error {
+	if !s.scheduler.QueueFull() {
+		return nil
+	}
+	s.instruments.RecordAdmissionDenied(ctx, project, "queue_full")
+	return connect.NewError(connect.CodeResourceExhausted,
+		errors.New("admission queue is full; retry when the host has caught up"))
 }
 
 // callerKeyID returns the API key behind ctx, or "" when auth is disabled and
@@ -470,6 +487,10 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 	if err != nil {
 		log.Error("project not found", "error", err)
 		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("project %q: %w", msg.Project, err))
+	}
+
+	if err := s.checkQueueDepth(ctx, msg.Project); err != nil {
+		return nil, err
 	}
 
 	log.Info("resolved project", "repo", proj.RepoURL, "forge", proj.Forge)
@@ -709,6 +730,17 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	}
 	defer os.RemoveAll(cloneDir)
 
+	// The clone and the kvarn.yml read that follows it are bounded separately
+	// from the capacity pool, which cannot account for them: the footprint
+	// they resolve is the very thing the pool admits against.
+	releaseStaging, err := s.enterStaging(ctx, sessionID, log)
+	if err != nil {
+		log.Error("staging failed", "error", err)
+		s.failRun(termCtx, rootCtx, sessionID, err)
+		return
+	}
+	defer releaseStaging()
+
 	log.Info("cloning repository", "url", gitscm.RedactURL(cloneURL), "branch", branch, "destination", cloneDir)
 	s.sessionMgr.UpdateState(ctx, sessionID, session.StateCloning, "Cloning repository")
 	cloneStart := time.Now()
@@ -752,6 +784,12 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("load project config: %w", err))
 		return
 	}
+
+	// The footprint is known, so the clone permit has done its job. Handing it
+	// back here rather than at the end of the run is the whole point: held
+	// across the wait for capacity, the number of permits would cap the queue
+	// instead of the clones.
+	releaseStaging()
 
 	// Reserve capacity before booting the VM. The footprint matches what
 	// sandbox.Start will request, so the scheduler accounts for what actually
@@ -806,10 +844,12 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 				fmt.Sprintf("Position %d in queue; %s", e.Position, need))
 		},
 	}
+	admitStart := time.Now()
 	lease, err := s.scheduler.Acquire(ctx, admitReq)
 	if err != nil {
 		if errors.Is(err, scheduler.ErrTooLarge) {
 			log.Error("job exceeds scheduler capacity", "error", err)
+			s.instruments.RecordAdmissionDenied(ctx, proj.Name, "too_large")
 			s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("scheduler: job %d vCPU / %s memory / %s disk exceeds host capacity",
 				cpuCount, formatBytes(memBytes), formatBytes(uint64(diskBytes))))
 			return
@@ -818,9 +858,19 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 			// Queueing would hide a misconfiguration behind a job that never
 			// starts, so this fails now and names the limit.
 			log.Error("job exceeds a configured tenant limit", "error", err)
+			s.instruments.RecordAdmissionDenied(ctx, proj.Name, "exceeds_limit")
 			s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf(
 				"scheduler: job %d vCPU / %s memory / %s disk exceeds a configured limit: %w",
 				cpuCount, formatBytes(memBytes), formatBytes(uint64(diskBytes)), err))
+			return
+		}
+		if errors.Is(err, scheduler.ErrQueueFull) {
+			// Backpressure, not a bad job: the same request would be taken
+			// against a shorter queue, so the message says to retry.
+			log.Warn("admission queue full", "error", err)
+			s.instruments.RecordAdmissionDenied(ctx, proj.Name, "queue_full")
+			s.failRun(termCtx, rootCtx, sessionID,
+				errors.New("scheduler: admission queue is full; retry when the host has caught up"))
 			return
 		}
 		log.Error("admission failed", "error", err)
@@ -828,6 +878,15 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		return
 	}
 	defer lease.Release()
+
+	waited := time.Since(admitStart)
+	s.instruments.RecordAdmissionWait(ctx, proj.Name, mode.ModeName(), waited.Seconds())
+	// The histogram gets every job; the log line is only for a wait an
+	// operator would be looking into by hand — "why did this one take so long
+	// to start" — which matches how every other wait here is logged.
+	if waited > time.Second {
+		log.Info("admitted after waiting for capacity", "duration", logging.Elapsed(admitStart))
+	}
 
 	// Load repo context (instructions + skills). Non-fatal on error.
 	rc, err := repocontext.Load(cloneDir)

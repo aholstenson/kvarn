@@ -23,6 +23,12 @@ import (
 // scheduler's total capacity in any dimension. The request is never queued.
 var ErrTooLarge = errors.New("scheduler: request exceeds total capacity")
 
+// ErrQueueFull is returned by Acquire when the queue is at MaxQueue and the
+// request cannot be admitted right away. It is backpressure, not a failure of
+// the request: the same request submitted against a shorter queue would be
+// accepted.
+var ErrQueueFull = errors.New("scheduler: admission queue is full")
+
 // Options configures a new Scheduler. Total has CPU and disk overcommit already
 // applied; the multipliers are retained for reporting.
 type Options struct {
@@ -36,6 +42,10 @@ type Options struct {
 	// While measured free space is below it no request is admitted, whatever
 	// the accounting pool says. Zero disables the guard.
 	DiskFloorBytes uint64
+	// MaxQueue bounds how many requests may wait at once. Zero is unbounded.
+	// A queue is not free to hold: every waiter is a goroutine and, in the
+	// orchestrator, a clone already on disk.
+	MaxQueue int
 	// Policy chooses which queued request is admitted next. Nil means FIFO.
 	Policy Policy
 	// Now overrides the clock used to stamp and compare queue wait times.
@@ -52,6 +62,7 @@ type Scheduler struct {
 	used      Capacity
 	running   map[Tenant]Usage
 	queue     []*waiter
+	maxQueue  int
 	policy    Policy
 	now       func() time.Time
 	cpuOC     float64
@@ -88,6 +99,7 @@ func New(opts Options) *Scheduler {
 	return &Scheduler{
 		total:     opts.Total,
 		running:   make(map[Tenant]Usage),
+		maxQueue:  opts.MaxQueue,
 		policy:    p,
 		now:       clock,
 		cpuOC:     opts.CPUOvercommit,
@@ -146,6 +158,19 @@ func (s *Scheduler) Acquire(ctx context.Context, req Request) (Lease, error) {
 		fireNotifications(notes)
 		return s.newLease(req), nil
 	}
+	// The cap is checked only once the request is known to need a place in
+	// line. Checking before the admission attempt would turn away a request
+	// the pool could have run immediately — backfill admits past a full queue
+	// whenever a small job fits — which is the opposite of what a queue bound
+	// is for.
+	// Our waiter is still the last entry: it was appended above, and any
+	// admission since then removed only entries ahead of it.
+	if s.maxQueue > 0 && len(s.queue) > s.maxQueue {
+		s.queue = s.queue[:len(s.queue)-1]
+		s.mu.Unlock()
+		fireNotifications(notes)
+		return nil, ErrQueueFull
+	}
 	if notes == nil {
 		// Nothing moved, so tell the new arrival where it landed.
 		notes = s.collectNotificationsLocked()
@@ -190,6 +215,18 @@ func (s *Scheduler) Snapshot() (used, free Capacity, queueLen int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.used, s.freeLocked(), len(s.queue)
+}
+
+// QueueFull reports whether the queue is at its bound. It is a hint for
+// callers that can refuse work before doing expensive setup — the authoritative
+// answer is ErrQueueFull from Acquire, since the queue moves in between.
+func (s *Scheduler) QueueFull() bool {
+	if s.unbounded || s.maxQueue <= 0 {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.queue) >= s.maxQueue
 }
 
 // TenantUsage returns a copy of what each tenant currently holds. Only tenants

@@ -87,6 +87,10 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *connect.Request[v1.Su
 			fmt.Errorf("pull request %s comes from a fork (%s); its head branch cannot be pushed to", prRef, pr.HeadRepo))
 	}
 
+	if err := s.checkQueueDepth(ctx, proj.Name); err != nil {
+		return nil, err
+	}
+
 	// Diff is context, not a requirement: a run without it is still useful.
 	diff, err := fr.impl.GetPullRequestDiff(ctx, getOpts)
 	if err != nil {
