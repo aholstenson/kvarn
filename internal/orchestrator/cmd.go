@@ -53,7 +53,7 @@ type Cmd struct {
 	Model            string `help:"LLM model alias for the coding agent." default:"coding-agent"`
 	OrchestratorFile string `help:"Path to orchestrator TOML file (host-level settings, e.g. scheduler pool)." default:""`
 
-	SchedCPUs           uint    `help:"Total vCPUs in the admission pool. 0 = file / runtime.NumCPU()." env:"KVARN_SCHED_CPUS" default:"0"`
+	SchedCPUs           uint    `name:"sched-cpus" help:"Total vCPUs in the admission pool. 0 = file / runtime.NumCPU()." env:"KVARN_SCHED_CPUS" default:"0"`
 	SchedMemory         string  `help:"Total admission-pool memory (e.g. 32G). Empty = file / 75% of host total." env:"KVARN_SCHED_MEMORY" default:""`
 	SchedDisk           string  `help:"Total admission-pool disk (e.g. 200G). Empty = file / 75% of free space on the image cache filesystem." env:"KVARN_SCHED_DISK" default:""`
 	SchedCPUOvercommit  float64 `help:"CPU overcommit multiplier (>=1.0). 0 = file / built-in default." env:"KVARN_SCHED_CPU_OVERCOMMIT" default:"0"`

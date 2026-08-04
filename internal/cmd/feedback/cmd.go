@@ -18,7 +18,7 @@ type Cmd struct {
 	PRRef    string `arg:"" name:"pr-ref" help:"Pull request reference, in the forge's own format (GitHub: the PR number)."`
 	Feedback string `arg:"" help:"Feedback for the agent to address."`
 	Mode     string `help:"Agent mode; defaults to feedback." default:""`
-	Watch    bool   `help:"Watch session until completion." default:"true"`
+	Watch    bool   `help:"Stream the session until it reaches a terminal state." negatable:""`
 	APIKey   string `help:"API key for the orchestrator." env:"KVARN_API_KEY" default:""`
 }
 

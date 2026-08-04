@@ -16,7 +16,7 @@ type Cmd struct {
 	Prompt  string `arg:"" help:"Prompt for the agent."`
 	Branch  string `help:"Branch override." default:""`
 	Mode    string `help:"Agent mode: auto, implement, fix, feedback, review, research." default:"auto"`
-	Watch   bool   `help:"Watch session until completion." default:"true"`
+	Watch   bool   `help:"Stream the session until it reaches a terminal state." negatable:""`
 	APIKey  string `help:"API key for the orchestrator." env:"KVARN_API_KEY" default:""`
 }
 
