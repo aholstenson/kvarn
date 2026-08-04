@@ -85,6 +85,23 @@ func (s *Service) resolveJobLimits(ctx context.Context, proj *project.Project, k
 	return pl, kl, nil
 }
 
+// jobPriority resolves the scheduling priority for one job: the project's
+// per-mode override, then the project's own value, then zero. It mirrors how
+// the cost cap resolves, so a project's config reads the same way whichever
+// knob is being set.
+func jobPriority(p *project.Project, mode string) int {
+	if p == nil {
+		return 0
+	}
+	if j, ok := p.Jobs[mode]; ok && j.Priority != nil {
+		return *j.Priority
+	}
+	if p.Priority != nil {
+		return *p.Priority
+	}
+	return 0
+}
+
 // buildLimits parses one scope's raw fields, inheriting def field by field
 // rather than all-or-nothing: a project that caps only its job count still
 // inherits the host's memory cap.

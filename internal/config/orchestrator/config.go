@@ -102,6 +102,11 @@ type Scheduler struct {
 	// it (e.g. "1m"). "0" is strict FIFO: a job that does not fit stalls every
 	// job behind it. Empty falls through to the built-in default.
 	BackfillGrace string `toml:"backfill_grace,omitempty"`
+	// PriorityAgeStep is how long a queued job waits to gain one level of
+	// effective priority, so a low-priority project is never starved by a
+	// stream of high-priority ones (e.g. "5m"). "0" disables aging and lets
+	// priority strictly dominate. Empty falls through to the built-in default.
+	PriorityAgeStep string `toml:"priority_age_step,omitempty"`
 	// PerProject and PerKey cap what any one project or API key may hold at
 	// once, and are the defaults a project or key overrides in its own file.
 	// Unset means uncapped, which is the right default for a single-tenant

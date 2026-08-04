@@ -92,6 +92,34 @@ var _ = Describe("Tenant limits", func() {
 		})
 	})
 
+	Describe("jobPriority", func() {
+		It("is zero when nothing is configured", func() {
+			Expect(jobPriority(&project.Project{Name: "alpha"}, "implement")).To(Equal(0))
+			Expect(jobPriority(nil, "implement")).To(Equal(0))
+		})
+
+		It("uses the project's value", func() {
+			Expect(jobPriority(&project.Project{Priority: intp(3)}, "implement")).To(Equal(3))
+		})
+
+		It("prefers the per-mode override", func() {
+			p := &project.Project{
+				Priority: intp(3),
+				Jobs:     map[string]project.JobLimits{"feedback": {Priority: intp(9)}},
+			}
+			Expect(jobPriority(p, "feedback")).To(Equal(9))
+			Expect(jobPriority(p, "implement")).To(Equal(3), "another mode still takes the project's value")
+		})
+
+		It("falls back to the project when the mode block sets no priority", func() {
+			p := &project.Project{
+				Priority: intp(3),
+				Jobs:     map[string]project.JobLimits{"feedback": {MaxValidationRetries: intp(1)}},
+			}
+			Expect(jobPriority(p, "feedback")).To(Equal(3))
+		})
+	})
+
 	Describe("keyLimits", func() {
 		It("overrides the host default per field", func() {
 			out, err := keyLimits(&apikey.APIKey{Name: "ci", MaxCPUs: uintp(2)}, hostDefaults)

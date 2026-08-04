@@ -60,6 +60,7 @@ type Cmd struct {
 	SchedDiskOvercommit float64 `help:"Disk overcommit multiplier (>=1.0); VM disks are thin. 0 = file / built-in default." env:"KVARN_SCHED_DISK_OVERCOMMIT" default:"0"`
 	SchedDiskFloor      string  `help:"Real free space the VM disk filesystem must keep (e.g. 20G); admission pauses below it. 0 disables. Empty = file / 10% of the pool." env:"KVARN_SCHED_DISK_FLOOR" default:""`
 	SchedBackfillGrace  string  `help:"How long a queued job may be skipped by ones that fit before it holds the line (e.g. 1m). 0 = strict FIFO. Empty = file / built-in default." env:"KVARN_SCHED_BACKFILL_GRACE" default:""`
+	SchedPriorityAge    string  `help:"How long a queued job waits to gain one level of priority (e.g. 5m). 0 disables aging. Empty = file / built-in default." env:"KVARN_SCHED_PRIORITY_AGE_STEP" default:""`
 	SchedMaxVMLifetime  string  `help:"Host-wide per-VM wall-time failsafe (e.g. 4h). Empty = file / built-in default." env:"KVARN_SCHED_MAX_VM_LIFETIME" default:""`
 
 	OtelMetricsEnabled   bool   `help:"Enable OpenTelemetry metrics export." env:"KVARN_OTEL_METRICS_ENABLED"`
@@ -91,6 +92,12 @@ const defaultDiskFloorFraction = 0.10
 // jobs through costs a large job little, while a job stuck behind an
 // indefinite stream of small ones is the failure this bounds.
 const defaultBackfillGrace = time.Minute
+
+// defaultPriorityAgeStep is the built-in aging rate. It is long enough that a
+// priority difference still decides the common case, and short enough that a
+// job passed over by higher-priority work catches up within a few jobs'
+// runtime rather than a shift.
+const defaultPriorityAgeStep = 5 * time.Minute
 
 // defaultMaxVMLifetime is the built-in failsafe applied when no operator
 // override is configured. 24h is well above any expected job runtime but
@@ -663,6 +670,15 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 		return nil, fmt.Errorf("backfill_grace must be non-negative")
 	}
 
+	ageStep, err := resolveDuration(c.SchedPriorityAge, fileCfg.PriorityAgeStep,
+		"--sched-priority-age", "scheduler.priority_age_step", defaultPriorityAgeStep)
+	if err != nil {
+		return nil, err
+	}
+	if ageStep < 0 {
+		return nil, fmt.Errorf("priority_age_step must be non-negative")
+	}
+
 	slog.Info("scheduler pool",
 		"cpu_millis", total.CPUMillis,
 		"mem_bytes", total.MemBytes,
@@ -672,6 +688,7 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 		"disk_floor_bytes", diskFloor,
 		"disk_path", diskPath,
 		"backfill_grace", grace.String(),
+		"priority_age_step", ageStep.String(),
 	)
 
 	return scheduler.New(scheduler.Options{
@@ -680,11 +697,17 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 		DiskOvercommit: diskOvercommit,
 		DiskPath:       diskPath,
 		DiskFloorBytes: diskFloor,
-		// Both wrappers are wired unconditionally. With no limits configured
-		// Capped hides nobody, and with a zero grace Backfill is exactly FIFO,
-		// so there is no configuration under which skipping either would
-		// behave differently.
-		Policy: scheduler.Capped{Inner: scheduler.Backfill{Grace: grace}},
+		// The three wrappers each do one thing — Capped hides who may not run,
+		// Fair decides who deserves the host next, Backfill picks the first of
+		// those that fits — and all are wired unconditionally: with nothing
+		// configured Capped hides nobody, Fair ties every waiter and falls back
+		// to arrival order, and a zero grace makes Backfill exactly FIFO.
+		Policy: scheduler.Capped{
+			Inner: scheduler.Fair{
+				AgeStep: ageStep,
+				Inner:   scheduler.Backfill{Grace: grace},
+			},
+		},
 	}), nil
 }
 

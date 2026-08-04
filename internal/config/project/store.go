@@ -8,6 +8,9 @@ import "context"
 type JobLimits struct {
 	MaxCostUSD           *float64
 	MaxValidationRetries *int
+	// Priority overrides the project's scheduling priority for this job mode.
+	// Nil inherits the project's own value.
+	Priority *int
 }
 
 // Project represents a configured project with its repository details.
@@ -60,6 +63,12 @@ type Project struct {
 	MaxCPUs   *uint
 	MaxMemory string
 	MaxDisk   string
+	// Priority ranks this project's queued jobs against other projects',
+	// higher first. Nil is the default of zero. It orders the queue and never
+	// reserves capacity, and a waiting job gains priority over time, so a
+	// high-priority project cannot starve a low-priority one. Per-job-mode
+	// overrides live in Jobs.
+	Priority *int
 }
 
 // Store provides CRUD operations for projects. Get and Delete return

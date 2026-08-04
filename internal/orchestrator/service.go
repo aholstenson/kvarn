@@ -788,6 +788,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		MemBytes:      memBytes,
 		DiskBytes:     uint64(diskBytes),
 		Tenant:        scheduler.Tenant{Project: proj.Name, KeyID: spec.keyID},
+		Priority:      jobPriority(proj, mode.ModeName()),
 		ProjectLimits: projLimits,
 		KeyLimits:     keyLim,
 		OnWait: func(e scheduler.WaitEvent) {

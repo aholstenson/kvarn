@@ -29,6 +29,11 @@ type Request struct {
 	// Policy can weigh what one project or key already holds. Optional: an
 	// unset Tenant is accounted under the zero value.
 	Tenant Tenant
+	// Priority ranks this request against others waiting, higher first. It is
+	// a relative ordering only — a priority is never a claim on capacity, and
+	// aging lets a lower one overtake in time — so the absolute values matter
+	// no more than their differences. Zero is the default for everything.
+	Priority int
 	// ProjectLimits and KeyLimits cap what the request's project and API key
 	// may hold at once. They travel with the request so a Policy can enforce
 	// them without reading config from inside the scheduler's lock; the

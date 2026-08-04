@@ -16,6 +16,7 @@ type fileData struct {
 type jobEntry struct {
 	MaxCostUSD           *float64 `toml:"max_cost_usd,omitempty"`
 	MaxValidationRetries *int     `toml:"max_validation_retries,omitempty"`
+	Priority             *int     `toml:"priority,omitempty"`
 }
 
 type projectEntry struct {
@@ -36,6 +37,7 @@ type projectEntry struct {
 	MaxCPUs              *uint               `toml:"max_cpu,omitempty"`
 	MaxMemory            string              `toml:"max_memory,omitempty"`
 	MaxDisk              string              `toml:"max_disk,omitempty"`
+	Priority             *int                `toml:"priority,omitempty"`
 }
 
 // Store is a TOML file-backed project store.
@@ -97,6 +99,7 @@ func entryToProject(name string, entry *projectEntry) (*project.Project, error) 
 			jobs[mode] = project.JobLimits{
 				MaxCostUSD:           j.MaxCostUSD,
 				MaxValidationRetries: j.MaxValidationRetries,
+				Priority:             j.Priority,
 			}
 		}
 	}
@@ -121,6 +124,7 @@ func entryToProject(name string, entry *projectEntry) (*project.Project, error) 
 		MaxCPUs:              entry.MaxCPUs,
 		MaxMemory:            entry.MaxMemory,
 		MaxDisk:              entry.MaxDisk,
+		Priority:             entry.Priority,
 	}, nil
 }
 
@@ -132,6 +136,7 @@ func projectToEntry(p *project.Project) (string, *projectEntry) {
 			jobs[mode] = jobEntry{
 				MaxCostUSD:           j.MaxCostUSD,
 				MaxValidationRetries: j.MaxValidationRetries,
+				Priority:             j.Priority,
 			}
 		}
 	}
@@ -153,6 +158,7 @@ func projectToEntry(p *project.Project) (string, *projectEntry) {
 		MaxCPUs:              p.MaxCPUs,
 		MaxMemory:            p.MaxMemory,
 		MaxDisk:              p.MaxDisk,
+		Priority:             p.Priority,
 	}
 }
 
