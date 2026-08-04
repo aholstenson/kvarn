@@ -13,7 +13,7 @@ import (
 )
 
 type Cmd struct {
-	Addr     string `help:"Orchestrator address." default:"http://localhost:8080"`
+	Addr     string `help:"Orchestrator address. Empty = the host-local socket if present, else http://localhost:8080." env:"KVARN_ADDR" default:""`
 	Project  string `arg:"" help:"Project name."`
 	PRRef    string `arg:"" name:"pr-ref" help:"Pull request reference, in the forge's own format (GitHub: the PR number)."`
 	Feedback string `arg:"" help:"Feedback for the agent to address."`
@@ -23,7 +23,7 @@ type Cmd struct {
 }
 
 func (c *Cmd) Run() error {
-	oc := client.NewOrchestrator(c.Addr, c.APIKey)
+	oc := client.NewOrchestrator(client.Resolve(c.Addr), c.APIKey)
 
 	resp, err := oc.SubmitFeedback(context.Background(), connect.NewRequest(&v1.SubmitFeedbackRequest{
 		Project:  c.Project,

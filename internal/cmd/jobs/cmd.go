@@ -20,6 +20,7 @@ import (
 
 // Cmd is the parent command for `kvarn jobs <subcommand>`.
 type Cmd struct {
+	Start    StartCmd    `cmd:"" help:"Start a project-aware job."`
 	List     ListCmd     `cmd:"" help:"List jobs, newest first."`
 	Show     ShowCmd     `cmd:"" help:"Show one job in full."`
 	Watch    WatchCmd    `cmd:"" help:"Stream a job's events until it finishes."`

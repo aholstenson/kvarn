@@ -7,6 +7,7 @@ package reqid
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -79,10 +80,21 @@ func (*Interceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 		id := resolve(req.Header())
 		ctx = WithRequestID(ctx, id)
 		resp, err := next(ctx, req)
-		if resp != nil {
-			resp.Header().Set(HeaderName, id)
+		if err != nil {
+			// A handler that fails returns a typed-nil response, which boxes
+			// into a non-nil AnyResponse — reading its header would panic, and
+			// there is no response for the caller to read it off anyway. The ID
+			// goes on the error's metadata instead, which is where connect-go
+			// puts headers for an error reply, and is exactly when a caller
+			// most wants something to correlate against.
+			var cerr *connect.Error
+			if errors.As(err, &cerr) {
+				cerr.Meta().Set(HeaderName, id)
+			}
+			return nil, err
 		}
-		return resp, err
+		resp.Header().Set(HeaderName, id)
+		return resp, nil
 	}
 }
 

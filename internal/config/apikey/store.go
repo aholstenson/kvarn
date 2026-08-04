@@ -19,6 +19,10 @@ type APIKey struct {
 	Created  time.Time
 	Expires  *time.Time // nil means the key never expires
 	Disabled bool
+	// Capabilities are the host-level actions this key may take, a separate
+	// axis from Projects; see capability.go. Empty is the common case — most
+	// keys submit and watch work and never act on the orchestrator itself.
+	Capabilities []Capability
 	// The following cap what this key may hold *at once*, summed across the
 	// jobs it has running, so one client cannot take the whole host. Each is
 	// nil/empty to inherit the [scheduler.per_key] default, and an explicit

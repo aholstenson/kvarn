@@ -25,6 +25,7 @@ import (
 	forgegithub "github.com/aholstenson/kvarn/internal/forge/github"
 	imageproxy "github.com/aholstenson/kvarn/internal/imagecache/proxy"
 	imagestore "github.com/aholstenson/kvarn/internal/imagecache/store"
+	"github.com/aholstenson/kvarn/internal/localsock"
 	"github.com/aholstenson/kvarn/internal/observability/metrics"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
@@ -50,6 +51,8 @@ type Cmd struct {
 	APIKeysFile      string `help:"Path to API keys TOML file." default:""`
 	SessionsDB       string `help:"Path to the persistent sessions SQLite database. Defaults to ~/.config/kvarn/sessions.db." default:""`
 	NoAuth           bool   `help:"Disable API-key auth (local dev only)." env:"KVARN_NO_AUTH"`
+	LocalSocket      string `help:"Path to the host-local control socket. Empty = ~/.config/kvarn/orchestrator.sock." env:"KVARN_LOCAL_SOCKET" default:""`
+	NoLocalSocket    bool   `help:"Do not serve the host-local control socket." env:"KVARN_NO_LOCAL_SOCKET"`
 	Model            string `help:"LLM model alias for the coding agent." default:"coding-agent"`
 	OrchestratorFile string `help:"Path to orchestrator TOML file (host-level settings, e.g. scheduler pool)." default:""`
 
@@ -136,6 +139,21 @@ const defaultMaxConcurrentClones = 4
 // override is configured. 24h is well above any expected job runtime but
 // guarantees a hung VM is reaped within a day.
 const defaultMaxVMLifetime = 24 * time.Hour
+
+// localSocketPath resolves where the host-local control socket should live, or
+// "" when the operator has turned it off. It is on by default because the
+// alternative is that stopping your own orchestrator requires minting a key
+// first — the socket is what keeps the host's operator from needing a
+// credential to operate the host they already own.
+func (c *Cmd) localSocketPath() string {
+	if c.NoLocalSocket {
+		return ""
+	}
+	if c.LocalSocket != "" {
+		return c.LocalSocket
+	}
+	return localsock.DefaultPath()
+}
 
 func (c *Cmd) Run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -421,7 +439,7 @@ func (c *Cmd) Run() error {
 	}
 	defer instruments.Close()
 
-	return run(ctx, c.Addr, ServiceOpts{
+	return run(ctx, serveOpts{Addr: c.Addr, LocalSocket: c.localSocketPath()}, ServiceOpts{
 		Provider:           p,
 		CreateOpts:         vm.CreateOpts{Image: image, MaxLifetime: maxLifetime, Network: imageCacheNet},
 		ProjectStore:       projtoml.New(projectsPath),

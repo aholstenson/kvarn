@@ -97,7 +97,13 @@ func (i *Interceptor) authenticate(header http.Header) (*Identity, string, strin
 		return nil, keyID, reasonExpired, errAuthFailed
 	}
 
-	return &Identity{KeyID: keyID, KeyName: key.Name, Projects: key.Projects}, keyID, "", nil
+	return &Identity{
+		Source:       SourceAPIKey,
+		KeyID:        keyID,
+		KeyName:      key.Name,
+		Projects:     key.Projects,
+		Capabilities: key.Capabilities,
+	}, keyID, "", nil
 }
 
 // errAuthFailed is the single opaque error returned for every authentication
@@ -105,21 +111,32 @@ func (i *Interceptor) authenticate(header http.Header) (*Identity, string, strin
 var errAuthFailed = connect.NewError(connect.CodeUnauthenticated, errors.New("authentication failed"))
 
 // logSuccess emits the audit event after a successful authentication.
-func (i *Interceptor) logSuccess(ctx context.Context, id *Identity, keyID, procedure, remote string) {
-	slog.LogAttrs(ctx, slog.LevelInfo, "api_key_used",
+func (i *Interceptor) logSuccess(ctx context.Context, id *Identity, procedure, remote string) {
+	slog.LogAttrs(ctx, slog.LevelInfo, "api_key_used", AuditAttrs(ctx, id, procedure, remote)...)
+}
+
+// AuditAttrs builds the attribute set every authentication audit line carries.
+// Both interceptors go through it so a keyed caller and a local one are
+// described the same way — one audit query answers "who did this" regardless of
+// which listener the request arrived on.
+func AuditAttrs(ctx context.Context, id *Identity, procedure, remote string) []slog.Attr {
+	return []slog.Attr{
 		slog.Bool("audit", true),
+		slog.String("auth_source", id.Source),
 		slog.String("key_name", id.KeyName),
-		slog.String("key_id", keyID),
+		slog.String("key_id", id.KeyID),
+		slog.String("peer", id.Peer),
 		slog.String("method", procedure),
 		slog.String("request_id", reqIDOrEmpty(ctx)),
 		slog.String("remote_addr", remote),
-	)
+	}
 }
 
 // logFailure emits the audit event after a rejected authentication.
 func (i *Interceptor) logFailure(ctx context.Context, keyID, reason, procedure, remote string) {
 	slog.LogAttrs(ctx, slog.LevelWarn, "api_key_auth_failed",
 		slog.Bool("audit", true),
+		slog.String("auth_source", SourceAPIKey),
 		slog.String("reason", reason),
 		slog.String("key_id", keyID),
 		slog.String("method", procedure),
@@ -149,7 +166,7 @@ func (i *Interceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 			}
 			return nil, err
 		}
-		i.logSuccess(ctx, id, keyID, procedure, remote)
+		i.logSuccess(ctx, id, procedure, remote)
 		if i.metrics != nil {
 			i.metrics.RecordAuth(ctx, "success", "")
 		}
@@ -176,7 +193,7 @@ func (i *Interceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) co
 			}
 			return err
 		}
-		i.logSuccess(ctx, id, keyID, procedure, remote)
+		i.logSuccess(ctx, id, procedure, remote)
 		if i.metrics != nil {
 			i.metrics.RecordAuth(ctx, "success", "")
 		}

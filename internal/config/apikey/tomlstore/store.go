@@ -16,12 +16,13 @@ import (
 // RFC3339 string rather than *time.Time because go-toml/v2 marshals a pointer
 // time as a quoted string it then refuses to decode back.
 type apiKeyEntry struct {
-	Name     string    `toml:"name"`
-	Hash     string    `toml:"hash"`
-	Projects []string  `toml:"projects"`
-	Created  time.Time `toml:"created"`
-	Expires  string    `toml:"expires,omitempty"`
-	Disabled bool      `toml:"disabled,omitempty"`
+	Name         string    `toml:"name"`
+	Hash         string    `toml:"hash"`
+	Projects     []string  `toml:"projects"`
+	Capabilities []string  `toml:"capabilities,omitempty"`
+	Created      time.Time `toml:"created"`
+	Expires      string    `toml:"expires,omitempty"`
+	Disabled     bool      `toml:"disabled,omitempty"`
 
 	MaxJobs   *int   `toml:"max_jobs,omitempty"`
 	MaxCPUs   *uint  `toml:"max_cpu,omitempty"`
@@ -102,14 +103,28 @@ func entryToKey(keyID string, e apiKeyEntry) (*apikey.APIKey, error) {
 		}
 		expires = &t
 	}
+	// An unrecognized capability fails the read rather than being dropped. It
+	// is the same fail-closed reasoning as a bad expiry: a key that quietly
+	// lost the authority its file says it has would only reveal that at the
+	// moment an operator needed it.
+	var caps []apikey.Capability
+	for _, name := range e.Capabilities {
+		c, err := apikey.ParseCapability(name)
+		if err != nil {
+			return nil, fmt.Errorf("key %q: %w", keyID, err)
+		}
+		caps = append(caps, c)
+	}
+
 	return &apikey.APIKey{
-		KeyID:    keyID,
-		Name:     e.Name,
-		Hash:     e.Hash,
-		Projects: projects,
-		Created:  e.Created,
-		Expires:  expires,
-		Disabled: e.Disabled,
+		KeyID:        keyID,
+		Name:         e.Name,
+		Hash:         e.Hash,
+		Projects:     projects,
+		Capabilities: caps,
+		Created:      e.Created,
+		Expires:      expires,
+		Disabled:     e.Disabled,
 
 		MaxJobs:   e.MaxJobs,
 		MaxCPUs:   e.MaxCPUs,
@@ -125,13 +140,18 @@ func keyToEntry(k *apikey.APIKey) (string, apiKeyEntry) {
 	if k.Expires != nil {
 		expires = k.Expires.UTC().Format(time.RFC3339)
 	}
+	var caps []string
+	for _, c := range k.Capabilities {
+		caps = append(caps, string(c))
+	}
 	return k.KeyID, apiKeyEntry{
-		Name:     k.Name,
-		Hash:     k.Hash,
-		Projects: projects,
-		Created:  k.Created,
-		Expires:  expires,
-		Disabled: k.Disabled,
+		Name:         k.Name,
+		Hash:         k.Hash,
+		Projects:     projects,
+		Capabilities: caps,
+		Created:      k.Created,
+		Expires:      expires,
+		Disabled:     k.Disabled,
 
 		MaxJobs:   k.MaxJobs,
 		MaxCPUs:   k.MaxCPUs,

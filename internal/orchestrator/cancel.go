@@ -177,6 +177,18 @@ func (s *Service) CancelJobs(ctx context.Context, req *connect.Request[v1.Cancel
 			errors.New("cancelling every active job requires the all flag"))
 	}
 
+	// A sweep that names no project reaches every job the caller can see. For a
+	// key scoped to named projects that is still only its own work, so it claims
+	// nothing new. For a wildcard key it is every job on the host — authority
+	// over the orchestrator rather than over a project, which is exactly what
+	// the host capability is for. The all flag is a separate question: it guards
+	// against an abbreviated command line, not against a caller's reach.
+	if msg.Project == "" && s.callerIsWildcard(ctx) {
+		if err := s.authorizeHost(ctx, req.Spec().Procedure); err != nil {
+			return nil, err
+		}
+	}
+
 	limit := int(msg.Limit)
 	if limit <= 0 {
 		limit = defaultCancelJobsLimit

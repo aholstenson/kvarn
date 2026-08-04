@@ -517,6 +517,51 @@ func (s *Service) authorizeProject(ctx context.Context, project, procedure strin
 	return nil
 }
 
+// callerIsWildcard reports whether the caller's project scope is unbounded, so
+// a request that names no project reaches the whole host rather than the
+// caller's own corner of it. With auth disabled every caller is unbounded,
+// since there is no scope to bound them by.
+func (s *Service) callerIsWildcard(ctx context.Context) bool {
+	if !s.authEnabled {
+		return true
+	}
+	id, ok := auth.IdentityFrom(ctx)
+	return ok && id.IsWildcard()
+}
+
+// authorizeHost enforces that the caller may act on the orchestrator itself
+// rather than on one project. It is the check for requests that have no project
+// to scope them to, and it is deliberately not satisfied by the project
+// wildcard: `*` says a key may reach every project, which is what a CI bot
+// needs, and says nothing about whether it speaks for the host.
+//
+// Like authorizeProject it is a no-op with auth disabled, so --no-auth stays
+// one flag that opens everything rather than two half-open doors.
+func (s *Service) authorizeHost(ctx context.Context, procedure string) error {
+	if !s.authEnabled {
+		return nil
+	}
+	id, ok := auth.IdentityFrom(ctx)
+	if !ok {
+		return connect.NewError(connect.CodeUnauthenticated, errors.New("missing identity"))
+	}
+	if !id.Allows(apikey.CapabilityHost) {
+		slog.LogAttrs(ctx, slog.LevelWarn, "capability_denied",
+			slog.Bool("audit", true),
+			slog.String("auth_source", id.Source),
+			slog.String("key_name", id.KeyName),
+			slog.String("key_id", id.KeyID),
+			slog.String("peer", id.Peer),
+			slog.String("capability", string(apikey.CapabilityHost)),
+			slog.String("method", procedure),
+		)
+		return connect.NewError(connect.CodePermissionDenied,
+			fmt.Errorf("%q lacks the %q capability, which this request needs because it acts on the orchestrator rather than on a project",
+				id.KeyName, apikey.CapabilityHost))
+	}
+	return nil
+}
+
 // startJobParams is one fresh-job submission: clone the base branch and open a
 // new pull request. It is the shared body of StartJob and of a retry that
 // resubmits such a job.

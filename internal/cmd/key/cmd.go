@@ -28,10 +28,11 @@ func openStore(path string) apikey.Store {
 
 // CreateCmd mints a key and prints the full token once.
 type CreateCmd struct {
-	APIKeysFile string   `help:"Path to API keys TOML file." default:""`
-	Name        string   `help:"Human-readable name for the key." required:""`
-	Projects    []string `help:"Projects this key may access; repeat or comma-separate. Use '*' for all." default:"*"`
-	Expires     string   `help:"Optional expiry: RFC3339 timestamp or Go duration (e.g. 720h)." default:""`
+	APIKeysFile  string   `help:"Path to API keys TOML file." default:""`
+	Name         string   `help:"Human-readable name for the key." required:""`
+	Projects     []string `help:"Projects this key may access; repeat or comma-separate. Use '*' for all." default:"*"`
+	Capabilities []string `name:"capability" help:"Host-level actions this key may take (e.g. 'host'). Repeat or comma-separate. Not implied by a '*' project scope." default:""`
+	Expires      string   `help:"Optional expiry: RFC3339 timestamp or Go duration (e.g. 720h)." default:""`
 }
 
 func (c *CreateCmd) Run() error {
@@ -44,6 +45,11 @@ func (c *CreateCmd) Run() error {
 		expires = &t
 	}
 
+	caps, err := parseCapabilities(c.Capabilities)
+	if err != nil {
+		return err
+	}
+
 	token, keyID, hash, err := apikey.GenerateToken()
 	if err != nil {
 		return fmt.Errorf("generate token: %w", err)
@@ -51,20 +57,50 @@ func (c *CreateCmd) Run() error {
 
 	store := openStore(c.APIKeysFile)
 	if err := store.Put(context.Background(), &apikey.APIKey{
-		KeyID:    keyID,
-		Name:     c.Name,
-		Hash:     hash,
-		Projects: c.Projects,
-		Created:  time.Now().UTC(),
-		Expires:  expires,
+		KeyID:        keyID,
+		Name:         c.Name,
+		Hash:         hash,
+		Projects:     c.Projects,
+		Capabilities: caps,
+		Created:      time.Now().UTC(),
+		Expires:      expires,
 	}); err != nil {
 		return fmt.Errorf("put api key: %w", err)
 	}
 
-	fmt.Fprintf(os.Stdout, "Created API key %q (id: %s, projects: %s)\n",
-		c.Name, keyID, strings.Join(c.Projects, ","))
+	fmt.Fprintf(os.Stdout, "Created API key %q (id: %s, projects: %s, capabilities: %s)\n",
+		c.Name, keyID, strings.Join(c.Projects, ","), capabilitiesOrDash(caps))
 	fmt.Fprintf(os.Stdout, "\nToken — store it now, it will not be shown again:\n\n  %s\n\n", token)
 	return nil
+}
+
+// parseCapabilities validates the --capability values. Empty entries are
+// dropped so `--capability=""` (Kong's default) and an omitted flag mean the
+// same thing: a key with no host authority, which is what almost every key
+// should be.
+func parseCapabilities(names []string) ([]apikey.Capability, error) {
+	var out []apikey.Capability
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		c, err := apikey.ParseCapability(name)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// capabilitiesOrDash renders a capability list for a terminal, where an empty
+// column reads as a formatting bug rather than as "none".
+func capabilitiesOrDash(caps []apikey.Capability) string {
+	if len(caps) == 0 {
+		return "-"
+	}
+	return apikey.JoinCapabilities(caps)
 }
 
 // parseExpiry accepts either a Go duration relative to now or an absolute
@@ -97,14 +133,14 @@ func (c *ListCmd) Run() error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "KEY ID\tNAME\tPROJECTS\tCREATED\tEXPIRES\tDISABLED")
+	fmt.Fprintln(tw, "KEY ID\tNAME\tPROJECTS\tCAPABILITIES\tCREATED\tEXPIRES\tDISABLED")
 	for _, k := range keys {
 		expires := "-"
 		if k.Expires != nil {
 			expires = k.Expires.Format(time.RFC3339)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%t\n",
-			k.KeyID, k.Name, strings.Join(k.Projects, ","),
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%t\n",
+			k.KeyID, k.Name, strings.Join(k.Projects, ","), capabilitiesOrDash(k.Capabilities),
 			k.Created.Format(time.RFC3339), expires, k.Disabled)
 	}
 	return tw.Flush()

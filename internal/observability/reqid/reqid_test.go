@@ -2,6 +2,7 @@ package reqid_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"connectrpc.com/connect"
@@ -18,11 +19,11 @@ type fakeRequest struct {
 	peer connect.Peer
 }
 
-func (r *fakeRequest) Any() any              { return nil }
-func (r *fakeRequest) Spec() connect.Spec    { return r.spec }
-func (r *fakeRequest) Peer() connect.Peer    { return r.peer }
-func (r *fakeRequest) Header() http.Header   { return r.hdr }
-func (r *fakeRequest) HTTPMethod() string    { return http.MethodPost }
+func (r *fakeRequest) Any() any            { return nil }
+func (r *fakeRequest) Spec() connect.Spec  { return r.spec }
+func (r *fakeRequest) Peer() connect.Peer  { return r.peer }
+func (r *fakeRequest) Header() http.Header { return r.hdr }
+func (r *fakeRequest) HTTPMethod() string  { return http.MethodPost }
 
 // fakeResponse captures headers set by the interceptor.
 type fakeResponse struct {
@@ -82,6 +83,35 @@ var _ = Describe("Interceptor", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(seenID).To(Equal("from-caller"))
 		Expect(resp.Header().Get(reqid.HeaderName)).To(Equal("from-caller"))
+	})
+
+	// A failing handler hands back a typed-nil *connect.Response, which boxes
+	// into a non-nil AnyResponse. Reading a header off it panics, which took
+	// down the connection instead of returning the error the handler chose.
+	It("survives a handler that returns an error with a typed-nil response", func() {
+		want := connect.NewError(connect.CodePermissionDenied, errors.New("denied"))
+		next := connect.UnaryFunc(func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
+			var nilResp *connect.Response[struct{}]
+			return nilResp, want
+		})
+
+		resp, err := interceptor.WrapUnary(next)(context.Background(), req)
+		Expect(resp).To(BeNil())
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
+	})
+
+	It("echoes the request ID on an error's metadata", func() {
+		req.hdr.Set(reqid.HeaderName, "from-caller")
+		cerr := connect.NewError(connect.CodeNotFound, errors.New("nope"))
+		next := connect.UnaryFunc(func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
+			return nil, cerr
+		})
+
+		_, err := interceptor.WrapUnary(next)(context.Background(), req)
+		Expect(err).To(HaveOccurred())
+		var got *connect.Error
+		Expect(errors.As(err, &got)).To(BeTrue())
+		Expect(got.Meta().Get(reqid.HeaderName)).To(Equal("from-caller"))
 	})
 
 	It("LoggerFrom returns a usable logger even without a request_id", func() {
