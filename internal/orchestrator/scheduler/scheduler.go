@@ -107,6 +107,15 @@ func (s *Scheduler) Acquire(ctx context.Context, req Request) (Lease, error) {
 		}}, nil
 	}
 
+	// Both checks below reject rather than queue, for the same reason: a
+	// request they catch could not be admitted by an idle host, so waiting
+	// would only postpone the failure until the caller gave up.
+	if p, ok := s.policy.(Precheck); ok {
+		if err := p.Precheck(req); err != nil {
+			return nil, err
+		}
+	}
+
 	s.mu.Lock()
 	if req.CPUMillis > s.total.CPUMillis ||
 		req.MemBytes > s.total.MemBytes ||

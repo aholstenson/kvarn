@@ -268,6 +268,7 @@ type Service struct {
 	apiKeyStore      apikey.Store           // API keys for request authentication
 	authEnabled      bool                   // when true, project-scoped RPCs require an authorized key
 	scheduler        *scheduler.Scheduler   // resource admission; never nil (defaults to unbounded)
+	tenantLimits     TenantLimitDefaults    // host-wide per-project/per-key caps; zero means uncapped
 	meter            metric.Meter           // never nil; no-op when metrics disabled
 	instruments      *metrics.Instruments   // optional; nil-safe at all call sites
 
@@ -317,6 +318,7 @@ type ServiceOpts struct {
 	APIKeyStore        apikey.Store           // API keys for request authentication
 	AuthEnabled        bool                   // when true, project-scoped RPCs require an authorized key
 	Scheduler          *scheduler.Scheduler   // optional; nil means unbounded (no admission control)
+	TenantLimits       TenantLimitDefaults    // host-wide per-project/per-key caps a project or key overrides
 	Meter              metric.Meter           // optional; nil uses an otel no-op meter
 	Instruments        *metrics.Instruments   // optional; nil disables job/auth/scheduler instrumentation
 }
@@ -379,6 +381,7 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		apiKeyStore:      opts.APIKeyStore,
 		authEnabled:      opts.AuthEnabled,
 		scheduler:        sched,
+		tenantLimits:     opts.TenantLimits,
 		meter:            meter,
 		instruments:      opts.Instruments,
 		shutdownCtx:      shutdownCtx,
@@ -770,11 +773,23 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	if diskBytes == 0 {
 		diskBytes = projconfig.DefaultDiskSize
 	}
+	// Caps are read here, per job, so an operator's edit applies to the next
+	// job without a restart — the same hot-reload the stores give everything
+	// else. They then travel with the request, keeping the scheduler's policy
+	// free of config reads while it holds its lock.
+	projLimits, keyLim, err := s.resolveJobLimits(ctx, proj, spec.keyID)
+	if err != nil {
+		log.Error("failed to resolve tenant limits", "error", err)
+		s.failRun(termCtx, rootCtx, sessionID, err)
+		return
+	}
 	admitReq := scheduler.Request{
-		CPUMillis: uint64(cpuCount) * 1000,
-		MemBytes:  memBytes,
-		DiskBytes: uint64(diskBytes),
-		Tenant:    scheduler.Tenant{Project: proj.Name, KeyID: spec.keyID},
+		CPUMillis:     uint64(cpuCount) * 1000,
+		MemBytes:      memBytes,
+		DiskBytes:     uint64(diskBytes),
+		Tenant:        scheduler.Tenant{Project: proj.Name, KeyID: spec.keyID},
+		ProjectLimits: projLimits,
+		KeyLimits:     keyLim,
 		OnWait: func(e scheduler.WaitEvent) {
 			need := fmt.Sprintf("need %d vCPU / %s memory / %s disk",
 				cpuCount, formatBytes(memBytes), formatBytes(uint64(diskBytes)))
@@ -796,6 +811,15 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 			log.Error("job exceeds scheduler capacity", "error", err)
 			s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("scheduler: job %d vCPU / %s memory / %s disk exceeds host capacity",
 				cpuCount, formatBytes(memBytes), formatBytes(uint64(diskBytes))))
+			return
+		}
+		if errors.Is(err, scheduler.ErrExceedsLimit) {
+			// Queueing would hide a misconfiguration behind a job that never
+			// starts, so this fails now and names the limit.
+			log.Error("job exceeds a configured tenant limit", "error", err)
+			s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf(
+				"scheduler: job %d vCPU / %s memory / %s disk exceeds a configured limit: %w",
+				cpuCount, formatBytes(memBytes), formatBytes(uint64(diskBytes)), err))
 			return
 		}
 		log.Error("admission failed", "error", err)

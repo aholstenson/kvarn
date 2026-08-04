@@ -32,6 +32,10 @@ type projectEntry struct {
 	CommitAuthorEmail    string              `toml:"commit_author_email,omitempty"`
 	CloneDepth           *int                `toml:"clone_depth,omitempty"`
 	MirrorDepth          *int                `toml:"mirror_depth,omitempty"`
+	MaxJobs              *int                `toml:"max_jobs,omitempty"`
+	MaxCPUs              *uint               `toml:"max_cpu,omitempty"`
+	MaxMemory            string              `toml:"max_memory,omitempty"`
+	MaxDisk              string              `toml:"max_disk,omitempty"`
 }
 
 // Store is a TOML file-backed project store.
@@ -113,6 +117,10 @@ func entryToProject(name string, entry *projectEntry) (*project.Project, error) 
 		CommitAuthorEmail:    entry.CommitAuthorEmail,
 		CloneDepth:           entry.CloneDepth,
 		MirrorDepth:          entry.MirrorDepth,
+		MaxJobs:              entry.MaxJobs,
+		MaxCPUs:              entry.MaxCPUs,
+		MaxMemory:            entry.MaxMemory,
+		MaxDisk:              entry.MaxDisk,
 	}, nil
 }
 
@@ -141,6 +149,10 @@ func projectToEntry(p *project.Project) (string, *projectEntry) {
 		CommitAuthorEmail:    p.CommitAuthorEmail,
 		CloneDepth:           p.CloneDepth,
 		MirrorDepth:          p.MirrorDepth,
+		MaxJobs:              p.MaxJobs,
+		MaxCPUs:              p.MaxCPUs,
+		MaxMemory:            p.MaxMemory,
+		MaxDisk:              p.MaxDisk,
 	}
 }
 

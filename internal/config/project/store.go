@@ -51,6 +51,15 @@ type Project struct {
 	// bounds what the host caches on their behalf. A mirror shallower than
 	// CloneDepth cannot serve it, so the mirror is deepened to match.
 	MirrorDepth *int
+	// The following cap what this project may hold *at once*, summed across
+	// its running jobs, so one busy project cannot take the whole host. Each
+	// is nil/empty to inherit the [scheduler.per_project] default, and an
+	// explicit zero to mean unlimited even when a default is set. A job over
+	// the cap waits without blocking other projects.
+	MaxJobs   *int
+	MaxCPUs   *uint
+	MaxMemory string
+	MaxDisk   string
 }
 
 // Store provides CRUD operations for projects. Get and Delete return

@@ -193,6 +193,11 @@ func (c *Cmd) Run() error {
 		return fmt.Errorf("scheduler: %w", err)
 	}
 
+	tenantLimits, err := resolveTenantLimits(orchFile.Scheduler)
+	if err != nil {
+		return fmt.Errorf("scheduler: %w", err)
+	}
+
 	cacheProvider, err := cache.DefaultFileCache()
 	if err != nil {
 		return fmt.Errorf("set up cache: %w", err)
@@ -359,6 +364,7 @@ func (c *Cmd) Run() error {
 		APIKeyStore:    apiKeyStore,
 		AuthEnabled:    !c.NoAuth,
 		Scheduler:      sched,
+		TenantLimits:   tenantLimits,
 		CacheProvider:  cacheProvider,
 		CacheQuota:     cacheQuota,
 		RepoMirror:     repoMirror,
@@ -656,6 +662,10 @@ func (c *Cmd) buildScheduler(fileCfg orchcfg.Scheduler) (*scheduler.Scheduler, e
 		DiskOvercommit: diskOvercommit,
 		DiskPath:       diskPath,
 		DiskFloorBytes: diskFloor,
+		// Capped is wired unconditionally: with no limits configured anywhere
+		// it hides nobody and the order is exactly FIFO's, so there is no
+		// configuration under which skipping it would behave differently.
+		Policy: scheduler.Capped{Inner: scheduler.FIFO{}},
 	}), nil
 }
 

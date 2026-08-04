@@ -29,7 +29,15 @@ type Request struct {
 	// Policy can weigh what one project or key already holds. Optional: an
 	// unset Tenant is accounted under the zero value.
 	Tenant Tenant
-	OnWait func(WaitEvent)
+	// ProjectLimits and KeyLimits cap what the request's project and API key
+	// may hold at once. They travel with the request so a Policy can enforce
+	// them without reading config from inside the scheduler's lock; the
+	// consequence is that they are the limits in force when the job was
+	// submitted, so raising a cap applies to jobs submitted after the change,
+	// not to ones already queued.
+	ProjectLimits Limits
+	KeyLimits     Limits
+	OnWait        func(WaitEvent)
 }
 
 // capacity is the footprint the request occupies once admitted.

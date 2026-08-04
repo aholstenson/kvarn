@@ -22,6 +22,11 @@ type apiKeyEntry struct {
 	Created  time.Time `toml:"created"`
 	Expires  string    `toml:"expires,omitempty"`
 	Disabled bool      `toml:"disabled,omitempty"`
+
+	MaxJobs   *int   `toml:"max_jobs,omitempty"`
+	MaxCPUs   *uint  `toml:"max_cpu,omitempty"`
+	MaxMemory string `toml:"max_memory,omitempty"`
+	MaxDisk   string `toml:"max_disk,omitempty"`
 }
 
 // fileData mirrors the [keyid] table-per-key TOML layout.
@@ -105,6 +110,11 @@ func entryToKey(keyID string, e apiKeyEntry) (*apikey.APIKey, error) {
 		Created:  e.Created,
 		Expires:  expires,
 		Disabled: e.Disabled,
+
+		MaxJobs:   e.MaxJobs,
+		MaxCPUs:   e.MaxCPUs,
+		MaxMemory: e.MaxMemory,
+		MaxDisk:   e.MaxDisk,
 	}, nil
 }
 
@@ -122,6 +132,11 @@ func keyToEntry(k *apikey.APIKey) (string, apiKeyEntry) {
 		Created:  k.Created,
 		Expires:  expires,
 		Disabled: k.Disabled,
+
+		MaxJobs:   k.MaxJobs,
+		MaxCPUs:   k.MaxCPUs,
+		MaxMemory: k.MaxMemory,
+		MaxDisk:   k.MaxDisk,
 	}
 }
 

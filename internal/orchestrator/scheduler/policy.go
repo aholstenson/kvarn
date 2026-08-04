@@ -59,6 +59,17 @@ type Policy interface {
 	Next(st State) int
 }
 
+// Precheck is an optional interface a Policy may implement to reject a request
+// it could never admit — one whose own footprint breaks a rule the policy
+// enforces, so that no amount of waiting would help. Acquire fails such a
+// request instead of queueing it until its caller gives up.
+//
+// It is deliberately not part of Policy: a policy that only decides an order
+// has nothing to say here, and should not have to say it.
+type Precheck interface {
+	Precheck(req Request) error
+}
+
 // FIFO admits the oldest waiter as soon as it fits and nothing else until then.
 // The head of the queue therefore blocks every later request even when a later
 // one would fit in the capacity available right now.

@@ -97,6 +97,23 @@ type Scheduler struct {
 	// MaxVMLifetime is a host-wide failsafe upper bound on per-VM wall time
 	// (e.g. "4h", "1d"). Empty falls through to the built-in default.
 	MaxVMLifetime string `toml:"max_vm_lifetime,omitempty"`
+	// PerProject and PerKey cap what any one project or API key may hold at
+	// once, and are the defaults a project or key overrides in its own file.
+	// Unset means uncapped, which is the right default for a single-tenant
+	// host: a cap is worth configuring once several tenants share one.
+	PerProject TenantLimits `toml:"per_project,omitempty"`
+	PerKey     TenantLimits `toml:"per_key,omitempty"`
+}
+
+// TenantLimits mirrors a [scheduler.per_project] / [scheduler.per_key] table:
+// how much one scope may run concurrently. Every field is optional, and an
+// unset field caps that dimension not at all. Sizes are human-readable
+// ("32G"); max_cpu counts whole vCPUs.
+type TenantLimits struct {
+	MaxJobs   *int   `toml:"max_jobs,omitempty"`
+	MaxCPUs   *uint  `toml:"max_cpu,omitempty"`
+	MaxMemory string `toml:"max_memory,omitempty"`
+	MaxDisk   string `toml:"max_disk,omitempty"`
 }
 
 // DefaultPath returns the standard orchestrator.toml location, mirroring the

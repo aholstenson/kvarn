@@ -19,6 +19,15 @@ type APIKey struct {
 	Created  time.Time
 	Expires  *time.Time // nil means the key never expires
 	Disabled bool
+	// The following cap what this key may hold *at once*, summed across the
+	// jobs it has running, so one client cannot take the whole host. Each is
+	// nil/empty to inherit the [scheduler.per_key] default, and an explicit
+	// zero to mean unlimited even when a default is set. The cap is per key,
+	// not per project: a key driving ten projects is still held to one total.
+	MaxJobs   *int
+	MaxCPUs   *uint
+	MaxMemory string
+	MaxDisk   string
 }
 
 // AllowsProject reports whether the key is scoped to the named project, either
