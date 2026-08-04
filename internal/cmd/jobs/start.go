@@ -1,4 +1,4 @@
-package startjob
+package jobs
 
 import (
 	"context"
@@ -10,20 +10,22 @@ import (
 	"github.com/aholstenson/kvarn/internal/cmd/client"
 )
 
-type Cmd struct {
-	Addr    string `help:"Orchestrator address." default:"http://localhost:8080"`
+// StartCmd submits a new project-aware job to the orchestrator.
+type StartCmd struct {
+	connectFlags
+
 	Project string `arg:"" help:"Project name."`
 	Prompt  string `arg:"" help:"Prompt for the agent."`
 	Branch  string `help:"Branch override." default:""`
 	Mode    string `help:"Agent mode: auto, implement, fix, feedback, review, research." default:"auto"`
 	Watch   bool   `help:"Stream the session until it reaches a terminal state." negatable:""`
-	APIKey  string `help:"API key for the orchestrator." env:"KVARN_API_KEY" default:""`
 }
 
-func (c *Cmd) Run() error {
-	oc := client.NewOrchestrator(c.Addr, c.APIKey)
+func (c *StartCmd) Run() error {
+	ctx := context.Background()
+	oc := c.client()
 
-	resp, err := oc.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+	resp, err := oc.StartJob(ctx, connect.NewRequest(&v1.StartJobRequest{
 		Project: c.Project,
 		Prompt:  c.Prompt,
 		Branch:  c.Branch,
@@ -40,5 +42,5 @@ func (c *Cmd) Run() error {
 		return nil
 	}
 
-	return client.WatchSession(context.Background(), oc, sessionID)
+	return client.WatchSession(ctx, oc, sessionID)
 }

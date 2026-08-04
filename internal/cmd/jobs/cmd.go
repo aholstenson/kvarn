@@ -33,12 +33,12 @@ type Cmd struct {
 // Embedded rather than declared on the parent so each subcommand's help lists
 // them, matching the rest of the CLI.
 type connectFlags struct {
-	Addr   string `help:"Orchestrator address." default:"http://localhost:8080"`
+	Addr   string `help:"Orchestrator address. Empty = the host-local socket if present, else http://localhost:8080." env:"KVARN_ADDR" default:""`
 	APIKey string `help:"API key for the orchestrator." env:"KVARN_API_KEY" default:""`
 }
 
 func (c connectFlags) client() kvarnv1connect.OrchestratorServiceClient {
-	return client.NewOrchestrator(c.Addr, c.APIKey)
+	return client.NewOrchestrator(client.Resolve(c.Addr), c.APIKey)
 }
 
 // PrintJSON writes a protobuf message as indented JSON. Proto field names are

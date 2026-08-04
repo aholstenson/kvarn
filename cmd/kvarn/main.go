@@ -2,7 +2,6 @@ package main
 
 import (
 	cachecmd "github.com/aholstenson/kvarn/internal/cmd/cache"
-	cancelcmd "github.com/aholstenson/kvarn/internal/cmd/cancel"
 	"github.com/aholstenson/kvarn/internal/cmd/feedback"
 	imagecmd "github.com/aholstenson/kvarn/internal/cmd/image"
 	imagecachecmd "github.com/aholstenson/kvarn/internal/cmd/imagecache"
@@ -12,7 +11,6 @@ import (
 	repocmd "github.com/aholstenson/kvarn/internal/cmd/repo"
 	runcmd "github.com/aholstenson/kvarn/internal/cmd/run"
 	"github.com/aholstenson/kvarn/internal/cmd/secrets"
-	"github.com/aholstenson/kvarn/internal/cmd/startjob"
 	testcmd "github.com/aholstenson/kvarn/internal/cmd/test"
 	"github.com/aholstenson/kvarn/internal/logging"
 	"github.com/aholstenson/kvarn/internal/orchestrator"
@@ -21,10 +19,8 @@ import (
 
 type CLI struct {
 	Orchestrator orchestrator.Cmd  `cmd:"" help:"Run the orchestrator."`
-	StartJob     startjob.Cmd      `cmd:"" name:"startjob" help:"Start a project-aware job."`
 	Feedback     feedback.Cmd      `cmd:"" help:"Continue work on an existing pull request."`
-	Cancel       cancelcmd.Cmd     `cmd:"" help:"Cancel a running job."`
-	Jobs         jobscmd.Cmd       `cmd:"" help:"List, inspect and manage jobs."`
+	Jobs         jobscmd.Cmd       `cmd:"" help:"Start, list, inspect and manage jobs."`
 	Queue        queuecmd.Cmd      `cmd:"" help:"Inspect the job queue."`
 	Secrets      secrets.Cmd       `cmd:"" help:"Manage per-project secrets."`
 	Key          key.Cmd           `cmd:"" help:"Manage API keys."`
@@ -40,7 +36,11 @@ func main() {
 	logging.Setup()
 
 	var cli CLI
-	ctx := kong.Parse(&cli, kong.UsageOnError())
+	ctx := kong.Parse(&cli, kong.UsageOnError(), kong.ConfigureHelp(kong.HelpOptions{
+		Compact:             true,
+		Summary:             true,
+		NoExpandSubcommands: true,
+	}))
 	err := ctx.Run()
 	ctx.FatalIfErrorf(err)
 }
