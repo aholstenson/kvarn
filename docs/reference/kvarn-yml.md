@@ -25,6 +25,7 @@ The home directory is `/home/kvarn`.
 | `secrets` | list | Runtime secrets the project needs. |
 | `setup` | object | Steps and health checks run before the agent. |
 | `validation` | object | Steps run after the agent. |
+| `modes` | map | Agent modes this repository defines, beside the built-in ones. |
 
 All keys are optional; a repository with no `kvarn.yml` gets a bare VM with no
 setup and no validation.
@@ -221,6 +222,104 @@ Runs after the agent finishes. Every step runs regardless of individual
 failures. A failing `required` step fails the job (and may trigger a retry
 pass — see [Control job costs](../how-to/control-job-costs.md)); a failing
 `advisory` step is reported but does not affect the outcome.
+
+## `modes`
+
+```yaml
+modes:
+  review-pr:
+    description: Review an open pull request and post the review as a comment.
+    extends: review
+    start: pull-request
+    deliver:
+      - pr-comment
+    context:
+      - pr-metadata
+      - pr-diff
+    prompt: |
+      Hold the change to the house style: tests in the project's framework,
+      comments that explain why rather than what changed.
+```
+
+Declares agent modes for this repository, keyed by the name a job selects with
+`--mode`. They sit beside the six built-in modes (`auto`, `implement`, `fix`,
+`feedback`, `review`, `research`) rather than replacing one: a definition
+inherits from a mode via `extends` and overrides only the axes it names. Run
+`kvarn modes list` in a checkout to see the resolved set.
+
+A mode is a point in seven axes:
+
+| Field | Purpose |
+| --- | --- |
+| `description` | One-line summary shown by `kvarn modes list`. |
+| `extends` | Mode to inherit from — a built-in, or another mode in this file. Defaults to `auto`. |
+| `prompt` | Instructions appended to the inherited prompt. It adds to the inherited guidance; there is no way to replace it. |
+| `workspace` | `read-only` withholds the file-editing tools; `read-write` gives the full toolkit. Inherited. |
+| `validation` | `skip`, `run`, or `require`. Defaults to `run` for a read-write mode and `skip` otherwise. |
+| `deliver` | Where the result goes: `none`, `pr-comment`, `follow-up-commit`, `new-pull-request`. Inherited. |
+| `start` | Where a run may begin: `branch`, `pull-request`, or `any`. Inherited. |
+| `context` | Sections prepended to the task message: `none`, `original-task`, `pr-metadata`, `pr-diff`. Inherited. |
+
+Every axis is inherited, so a mode extending `feedback` starts where `feedback`
+starts — on a pull request — rather than widening to `any`. Narrow or widen it
+by naming `start` explicitly. `validation` is the exception: it follows the
+resolved `workspace` unless named, so overriding the workspace alone does not
+leave a read-only mode running a write mode's validation policy.
+
+`validation: run` feeds a failing required step back to the agent to fix, up to
+the configured retry budget, and fails the job if it is still red. In a
+read-only mode there is nothing to fix, so `run` records the outcome and lets
+the run finish. `validation: require` fails the job on the first failing
+required step with no retry — which is what makes a read-only "test this pull
+request" mode report an honest verdict rather than a green one. A failing
+`require` run still delivers to `pr-comment` before it fails, so the verdict
+reaches the pull request; it does not deliver commits, since the run has just
+established that what it produced does not pass.
+
+Validation steps that declare `paths` are gated on the run's own diff. A
+read-only mode has no diff, so every step runs: gating them on an empty diff
+would skip each path-scoped step and report the pass those skips add up to.
+
+`deliver` accepts more than one sink. They fire in a fixed order —
+`new-pull-request`, then `follow-up-commit`, then `pr-comment` — so a comment
+lands on the pull request the same run just opened. A commit sink already posts
+its own comment carrying the summary and work log, so an explicit `pr-comment`
+alongside one is skipped rather than posted twice. A delivery that fails, fails
+the job: work that never left the host is not a success.
+
+`new-pull-request` in a run started against an existing pull request commits
+onto that pull request instead. Naming one asks for the work to land there, and
+a second pull request would only target the first one's head branch.
+
+A mode with `deliver: [none]` leaves its output in the session, where
+`kvarn jobs result <session-id>` reads it. `context: [none]` is the same idea
+for the context pack. Write those rather than an empty list: `deliver: []` is
+rejected, because a definition supplied with a request cannot tell an empty list
+from an absent one, and an absent one inherits.
+
+Rejected at load time: a name that shadows a built-in, an `extends` that names
+nothing, a cycle of `extends`, a value outside an axis's vocabulary, an empty
+`deliver` or `context` list, `none` combined with another sink or block, both
+commit sinks together, a commit sink in a read-only mode, and `follow-up-commit`
+in a mode that can only start from a branch. Names must be lowercase
+alphanumerics separated by single hyphens.
+
+Rejected at submission, or as soon as the run resolves a mode the repository
+defines: a mode that cannot deliver from where the run begins. A mode that
+delivers a follow-up commit or a comment needs a pull request to act on, so
+submitting one without a pull request reference is refused up front rather than
+after a clone, a VM boot and a full agent run.
+
+A mode definition is read from the repository the run works on, which for a job
+continuing a pull request is that pull request's head branch. A branch can
+therefore change what a mode it is reviewed under is allowed to do. This is the
+same trust boundary `setup.steps` already sits on — both execute what the branch
+says — so treat a named mode as a property of the branch under review, not a
+guarantee the reviewer controls.
+
+A caller that needs a mode this file does not define can supply one with the
+request instead; see `kvarn jobs start --mode-spec` in
+[CLI reference](cli.md).
 
 ## Step fields
 

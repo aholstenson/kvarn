@@ -111,7 +111,11 @@ func RunSetup(ctx context.Context, runner RunnerProxy, cfg *project.Config, sess
 
 // RunValidation executes required and advisory validation steps.
 // Required steps all run even if one fails. Advisory steps always run.
-// Steps with paths filters are skipped if no changed files match.
+//
+// changedFiles gates the steps that declare paths. A nil list means the caller
+// has no diff to gate on — a read-only run that was never going to write one,
+// or `kvarn test` running the suite outright — and every step runs. An empty
+// non-nil list is a real "nothing changed", which skips them.
 func RunValidation(ctx context.Context, runner RunnerProxy, cfg *project.Config, sessionID string, changedFiles []string, onDone OnStepDone, onOutput OnOutput) (*ValidationResult, error) {
 	result := &ValidationResult{
 		RequiredPassed: true,
@@ -163,7 +167,10 @@ func RunValidation(ctx context.Context, runner RunnerProxy, cfg *project.Config,
 	return result, nil
 }
 
-// ChangedFiles runs `git diff --name-only HEAD` on the VM and returns the list of changed file paths.
+// ChangedFiles runs `git diff --name-only HEAD` on the VM and returns the list
+// of changed file paths. The list is never nil: a run that changed nothing has
+// answered the question, which is not the same as not being asked, and only the
+// second means "run every step" to shouldRun.
 func ChangedFiles(ctx context.Context, runner RunnerProxy, workspaceDir string) ([]string, error) {
 	resp, err := runner.Exec(ctx, &v1.ExecRequest{
 		Command:    "git",
@@ -178,10 +185,13 @@ func ChangedFiles(ctx context.Context, runner RunnerProxy, workspaceDir string) 
 }
 
 // shouldRun returns true if the step should execute given the changed files.
-// If step.Paths is empty, always returns true. Otherwise returns true if any
-// changed file matches any of the step's doublestar glob patterns.
+// A step that declares no paths always runs, and so does every step when there
+// is no diff to gate on: a nil changedFiles is "the caller cannot say", and
+// silently skipping the path-scoped steps there would report a green result for
+// a suite that never ran. Otherwise the step runs when any changed file matches
+// one of its doublestar patterns.
 func shouldRun(s project.Step, changedFiles []string) bool {
-	if len(s.Paths) == 0 {
+	if len(s.Paths) == 0 || changedFiles == nil {
 		return true
 	}
 
@@ -518,7 +528,7 @@ func resolveDest(destDir string, rel string) (string, error) {
 }
 
 func parseFileList(output string) []string {
-	var files []string
+	files := []string{}
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {

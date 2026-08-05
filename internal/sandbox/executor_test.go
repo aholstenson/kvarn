@@ -415,6 +415,37 @@ var _ = Describe("RunValidation", func() {
 		Expect(runner.sessionExecCalls).To(HaveLen(1))
 	})
 
+	It("runs a path-scoped step when there is no diff to gate on", func() {
+		cfg := &project.Config{
+			Validation: project.Validation{
+				Required: []project.Step{
+					{Name: "Backend tests", Run: "phpunit", Paths: []string{"backend/**"}},
+				},
+			},
+		}
+
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", nil, nil, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.Required[0].Skipped).To(BeFalse(),
+			"a nil list is the caller having no diff, not a diff that touched nothing")
+		Expect(runner.sessionExecCalls).To(HaveLen(1))
+	})
+
+	It("skips a path-scoped step when a diff was taken and touched nothing", func() {
+		cfg := &project.Config{
+			Validation: project.Validation{
+				Required: []project.Step{
+					{Name: "Backend tests", Run: "phpunit", Paths: []string{"backend/**"}},
+				},
+			},
+		}
+
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{}, nil, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.Required[0].Skipped).To(BeTrue())
+		Expect(runner.sessionExecCalls).To(BeEmpty())
+	})
+
 	It("returns success immediately for empty config", func() {
 		cfg := &project.Config{}
 		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", nil, nil, nil)
@@ -532,6 +563,8 @@ var _ = Describe("ChangedFiles", func() {
 		files, err := sandbox.ChangedFiles(context.Background(), runner, "/home/kvarn/workspace")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(files).To(BeEmpty())
+		Expect(files).NotTo(BeNil(),
+			"nil is reserved for a caller that never asked, which runs every step")
 	})
 
 	It("returns error when exec fails", func() {

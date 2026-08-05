@@ -47,6 +47,8 @@ type Row struct {
 	ProjectName     string
 	Prompt          string
 	Mode            string
+	ModeSpecJSON    string
+	Result          string
 	State           string
 	Message         string
 	Error           string
@@ -80,6 +82,8 @@ func SessionToRow(s *Session) (Row, error) {
 		ProjectName:     s.ProjectName,
 		Prompt:          s.Prompt,
 		Mode:            s.Mode,
+		ModeSpecJSON:    s.ModeSpecJSON,
+		Result:          s.Result,
 		State:           string(s.State),
 		Message:         s.Message,
 		Error:           s.Error,
@@ -114,6 +118,8 @@ func RowToSession(r Row) (*Session, error) {
 		ProjectName:     r.ProjectName,
 		Prompt:          r.Prompt,
 		Mode:            r.Mode,
+		ModeSpecJSON:    r.ModeSpecJSON,
+		Result:          r.Result,
 		State:           State(r.State),
 		Message:         r.Message,
 		Error:           r.Error,

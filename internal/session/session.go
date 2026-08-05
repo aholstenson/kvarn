@@ -132,11 +132,21 @@ func RestartableStates() []State {
 
 // Session tracks the lifecycle of a job execution.
 type Session struct {
-	ID             string
-	ProjectName    string
-	Prompt         string
-	Mode           string
-	State          State
+	ID          string
+	ProjectName string
+	Prompt      string
+	Mode        string
+	State       State
+	// ModeSpecJSON is the inline mode definition the submission carried, as
+	// JSON, or empty when it named a mode instead of defining one. It is opaque
+	// here: the orchestrator owns the vocabulary, and the session store's job is
+	// to hold what was asked for until the run resolves it.
+	ModeSpecJSON string
+	// Result is what the run produced in writing — a read-only mode's final
+	// answer, or the summary that became the commit message. Empty until the
+	// agent has produced one.
+	Result string
+
 	Message        string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
@@ -364,9 +374,13 @@ type WatchEvent struct {
 // always set; the PR fields are populated for a feedback run, which knows its
 // pull request up front, and left empty for a fresh job.
 type CreateParams struct {
-	ProjectName     string
-	Prompt          string
-	Mode            string
+	ProjectName string
+	Prompt      string
+	Mode        string
+	// ModeSpecJSON is the inline mode definition the submission carried; see
+	// the field of the same name on Session. Empty for a submission that named
+	// a mode instead of defining one.
+	ModeSpecJSON    string
 	PRRef           string
 	HeadBranch      string
 	BaseBranch      string
@@ -399,6 +413,10 @@ type Manager interface {
 	// SetPullRequest persists the PR URL, ref and head branch on the session
 	// and broadcasts a PullRequestEvent.
 	SetPullRequest(ctx context.Context, id, url, ref, branch string) error
+	// SetResult persists what the run produced in writing. It is the durable
+	// copy of an answer that a mode delivering nowhere would otherwise leave
+	// only in the event log.
+	SetResult(ctx context.Context, id, result string) error
 	Fail(ctx context.Context, id string, err error) error
 	// EmitEvent persists the event when its kind is durable and broadcasts it to
 	// watchers; ephemeral kinds are broadcast live-only with Seq 0.

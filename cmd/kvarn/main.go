@@ -6,6 +6,7 @@ import (
 	imagecachecmd "github.com/aholstenson/kvarn/internal/cmd/imagecache"
 	jobscmd "github.com/aholstenson/kvarn/internal/cmd/jobs"
 	"github.com/aholstenson/kvarn/internal/cmd/key"
+	modescmd "github.com/aholstenson/kvarn/internal/cmd/modes"
 	queuecmd "github.com/aholstenson/kvarn/internal/cmd/queue"
 	repocmd "github.com/aholstenson/kvarn/internal/cmd/repo"
 	runcmd "github.com/aholstenson/kvarn/internal/cmd/run"
@@ -20,6 +21,7 @@ type CLI struct {
 	Orchestrator orchestrator.Cmd  `cmd:"" help:"Run the orchestrator."`
 	Jobs         jobscmd.Cmd       `cmd:"" help:"Start, list, inspect and manage jobs."`
 	Queue        queuecmd.Cmd      `cmd:"" help:"Inspect the job queue."`
+	Modes        modescmd.Cmd      `cmd:"" help:"List the agent modes a job can run in."`
 	Secrets      secrets.Cmd       `cmd:"" help:"Manage per-project secrets."`
 	Key          key.Cmd           `cmd:"" help:"Manage API keys."`
 	Run          runcmd.Cmd        `cmd:"" help:"Run the coding agent against the local working directory."`

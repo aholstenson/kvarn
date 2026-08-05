@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"connectrpc.com/connect"
-	"github.com/aholstenson/kvarn/internal/agent/coding"
 	"github.com/aholstenson/kvarn/internal/config/project"
 	"github.com/aholstenson/kvarn/internal/forge"
 	"github.com/aholstenson/kvarn/internal/session"
@@ -25,7 +23,8 @@ func (s *Service) startContinuation(
 	ctx context.Context,
 	p startJobParams,
 	proj *project.Project,
-	mode *coding.Mode,
+	choice modeChoice,
+	specJSON string,
 	log *slog.Logger,
 ) (*submissionResult, error) {
 	prRef := p.prRef
@@ -54,12 +53,14 @@ func (s *Service) startContinuation(
 		return nil, connect.NewError(connect.CodeFailedPrecondition,
 			fmt.Errorf("pull request %s is %s; only open pull requests can be continued", prRef, pr.State))
 	}
-	// Pushing to a head branch in another repository requires the
-	// maintainer-edit flag and is impossible with an installation token scoped
-	// to a single org, so fork PRs are out of scope.
-	if pr.HeadRepo == "" || pr.HeadRepo != pr.BaseRepo {
+	// Fork pull requests are out of scope for every mode, not only the ones
+	// that push. The head branch lives in another repository, so it is not
+	// reachable through the project's own clone URL at all — a read-only run
+	// would fail at the clone rather than at the push. Working on one needs a
+	// refs/pull/<n>/head fetch, which the branch-shaped mirror does not do.
+	if isForkPR(pr) {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("pull request %s comes from a fork (%s); its head branch cannot be pushed to", prRef, pr.HeadRepo))
+			fmt.Errorf("pull request %s comes from a fork (%s); its head branch is not in this repository", prRef, pr.HeadRepo))
 	}
 
 	if err := s.checkBacklogDepth(ctx, proj.Name); err != nil {
@@ -76,7 +77,7 @@ func (s *Service) startContinuation(
 	// request started is still active, so the check would refuse the retry with
 	// "already running" instead of handing back the session it is asking about.
 	replay := func(claimed *session.Session) (*submissionResult, error) {
-		if err := sameSubmission(claimed, p.prompt, mode.ModeName(), pr.Ref, claimed.PRRef); err != nil {
+		if err := sameSubmission(claimed, p.prompt, choice.name, specJSON, pr.Ref, claimed.PRRef); err != nil {
 			return nil, err
 		}
 		log.Info("idempotent replay", "session_id", claimed.ID)
@@ -92,16 +93,25 @@ func (s *Service) startContinuation(
 		}
 	}
 
+	// Single-flight applies to modes that push, and only to those: two
+	// follow-up commits racing on one branch is the problem, whereas two
+	// concurrent reviews of one pull request are simply two reviews. A mode
+	// that cannot be resolved yet is treated as pushing, because the cheap
+	// mistake here is refusing a review and the expensive one is letting two
+	// runs fight over a branch.
+	modeKnown, modePushes := choice.pushes()
 	prFilter := session.SessionFilter{Project: proj.Name, PRRef: pr.Ref}
-	activeFilter := prFilter
-	activeFilter.ActiveOnly = true
-	active, err := s.sessionMgr.List(ctx, activeFilter)
-	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("check running sessions: %w", err))
-	}
-	if len(active) > 0 {
-		return nil, connect.NewError(connect.CodeFailedPrecondition,
-			fmt.Errorf("session %s is already running for pull request %s", active[0].ID, pr.Ref))
+	if !modeKnown || modePushes {
+		activeFilter := prFilter
+		activeFilter.ActiveOnly = true
+		active, err := s.sessionMgr.List(ctx, activeFilter)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("check running sessions: %w", err))
+		}
+		if len(active) > 0 {
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				fmt.Errorf("session %s is already running for pull request %s", active[0].ID, pr.Ref))
+		}
 	}
 
 	// Lineage, best-effort: the oldest session on this PR carries the task the
@@ -121,14 +131,15 @@ func (s *Service) startContinuation(
 	sess, err := s.sessionMgr.Create(ctx, session.CreateParams{
 		ProjectName:     proj.Name,
 		Prompt:          p.prompt,
-		Mode:            mode.ModeName(),
+		Mode:            choice.name,
+		ModeSpecJSON:    specJSON,
 		PRRef:           pr.Ref,
 		HeadBranch:      pr.HeadBranch,
 		BaseBranch:      pr.BaseBranch,
 		ParentSessionID: parentID,
 		Continuation:    true,
 		KeyID:           callerKeyID(ctx),
-		Priority:        jobPriority(proj, mode.ModeName()),
+		Priority:        jobPriority(proj, choice.name),
 		IdempotencyKey:  p.idempotencyKey,
 	})
 	// continuationMu serializes this against another request in the same process, so
@@ -159,36 +170,10 @@ func (s *Service) startContinuation(
 	return &submissionResult{session: sess}, nil
 }
 
-// buildFeedbackPrompt assembles the task message for a continuation: what the
-// pull request set out to do, what it currently contains, and the feedback to
-// act on. Sections whose content is unavailable are left out rather than
-// emitted empty — originalTask is missing when retention has pruned the
-// originating session, and diff when the forge call failed.
-func buildFeedbackPrompt(originalTask string, pr *forge.PullRequestDetails, diff, feedback string) string {
-	var sb strings.Builder
-
-	if t := strings.TrimSpace(originalTask); t != "" {
-		sb.WriteString("## Original task\n\n")
-		sb.WriteString(t)
-		sb.WriteString("\n\n")
-	}
-
-	sb.WriteString("## Current pull request\n\n")
-	fmt.Fprintf(&sb, "%s\n", strings.TrimSpace(pr.Title))
-	if body := strings.TrimSpace(pr.Body); body != "" {
-		sb.WriteString("\n")
-		sb.WriteString(body)
-		sb.WriteString("\n")
-	}
-
-	if d := strings.TrimSpace(diff); d != "" {
-		sb.WriteString("\n## Diff\n\n```diff\n")
-		sb.WriteString(d)
-		sb.WriteString("\n```\n")
-	}
-
-	sb.WriteString("\n## Feedback to address\n\n")
-	sb.WriteString(strings.TrimSpace(feedback))
-
-	return sb.String()
+// isForkPR reports whether the pull request's head branch lives in another
+// repository — which puts it out of reach of a clone of the project's own
+// repository, and out of reach of a push with an installation token scoped to
+// one org.
+func isForkPR(pr *forge.PullRequestDetails) bool {
+	return pr.HeadRepo == "" || pr.HeadRepo != pr.BaseRepo
 }

@@ -58,10 +58,47 @@ land on, so passing both is an error. See
 | `--addr` | local socket, else `http://localhost:8080` | Orchestrator address. Env: `KVARN_ADDR`. |
 | `--branch` | project default | Branch to start from. |
 | `--pr-ref` | — | Continue this pull request instead of opening one, in the forge's own format — for GitHub, the PR number. |
-| `--mode` | `feedback` with `--pr-ref`, else `auto` | `auto`, `implement`, `fix`, `feedback`, `review`, `research`. |
+| `--mode` | `feedback` with `--pr-ref`, else `auto` | A built-in mode or one the project's `kvarn.yml` defines. See `kvarn modes list`. |
+| `--mode-spec` | — | Path to a YAML or JSON mode definition to run with, or `-` for stdin. |
 | `--watch` | off | Stream the session until it reaches a terminal state. Without it the session ID is printed and the command returns. |
 | `--idempotency-key` | — | Makes the submission safe to retry; see below. |
 | `--api-key` | — | API key. Env: `KVARN_API_KEY`. |
+
+A mode name the orchestrator does not recognise is accepted rather than
+refused: a project defines its own modes in its `kvarn.yml`, which the
+orchestrator cannot read until the run has cloned the repository. A name that
+still means nothing then fails that job, listing what the project does define.
+
+`--mode-spec` supplies a definition with the request, for a run whose shape no
+repository defines. The file holds the same fields a `modes:` entry does plus a
+`name`, and it may `extends` a built-in or one of the project's own modes:
+
+```yaml
+name: audit
+extends: review
+start: pull-request
+deliver: [pr-comment]
+context: [pr-metadata, pr-diff]
+prompt: |
+  Audit this change for credential handling and egress.
+```
+
+Because the definition travels with the request, it is checked when the request
+arrives — unless it extends a mode only the repository defines, which waits for
+the clone like any other. That check covers where the run begins as well as the
+definition's own syntax: a mode that delivers a follow-up commit or a comment
+needs a pull request, so submitting it without `--pr-ref` is refused up front.
+The definition is also stored on the session, so a `retry` runs the same mode and
+an idempotency key reused for a different definition is refused rather than
+collapsed into the first job.
+
+Omit `deliver` or `context` to inherit the extended mode's; write `[none]` to
+clear one. An empty list is refused, because a repeated field on the wire cannot
+tell an empty list from an absent one and an absent one inherits.
+
+`--pr-ref` with a mode that delivers `new-pull-request` — `auto`, `implement`
+and `fix` among them — commits onto the named pull request rather than opening a
+second one.
 
 Without an idempotency key, a client that resends a submission after a network
 timeout gets a second job — a second VM, and a second pull request or a
@@ -88,6 +125,7 @@ down. Either way the session ends `cancelled`, not `failed`.
 | `start <project> <prompt>` | Start a job, from a branch or from a pull request; flags are listed above. |
 | `list` | Jobs newest first. Filters: `--project`, `--state` (repeatable/comma-separated), `--active`, `--mode`, `--pr-ref`, `--since 24h`, `--limit`, `--all` to follow pagination. |
 | `show <session-id>` | One job in full, including its priority, attempt count and cost. |
+| `result <session-id>` | What the job produced in writing, on stdout. `--json` for the session id and state alongside it. |
 | `watch <session-id>` | Stream events until the job finishes. `--from` resumes after an event sequence. |
 | `events <session-id>` | Replay recorded history and return. `--after`, `--limit`. |
 | `cancel [<session-id>]` | Cancel one job, or every job matching `--project`/`--state`/`--mode`/`--pr-ref`. `--dry-run` reports without stopping anything; an unfiltered sweep requires `--all`. |
@@ -99,6 +137,26 @@ where the original started: a job submitted against a pull request is retried
 against that same pull request. A job that started from a branch and went on to
 open a pull request is refused — resubmitting it would open a second one — so
 continue it with `kvarn jobs start --pr-ref` instead.
+
+`result` is how a run in a mode that delivers nowhere is read: a review, a
+research answer, or anything with `deliver: none`. For a mode that produced
+changes it is the summary that became the commit message. The bare form writes
+the text alone to stdout so it pipes; a job that has produced nothing says so on
+stderr and exits zero.
+
+## `kvarn modes`
+
+Lists the agent modes a job can run in. It talks to no orchestrator: the
+built-in modes are compiled into the CLI, and a repository's own modes live in
+its `kvarn.yml`.
+
+| Subcommand | Purpose |
+| --- | --- |
+| `list` | Every mode, resolved: its source, workspace, validation policy, starting point and delivery. `--dir` selects the repository whose `kvarn.yml` is read (default `.`), `--json` for scripting. |
+
+A mode defined in `kvarn.yml` shows up here exactly as a run will resolve it —
+inheritance applied — so this is the way to check what `extends` actually
+produced. See [`kvarn.yml`](kvarn-yml.md#modes).
 
 ## `kvarn queue`
 
@@ -133,7 +191,7 @@ orchestrator, project, or forge. Write-capable modes require exactly one of
 | `--diff` | — | Write a unified diff of all changes to stdout. |
 | `--apply` | — | Copy changed files from the VM back onto the working directory. |
 | `--dir` | `.` | Project directory. |
-| `--mode` | `auto` | Agent mode. |
+| `--mode` | `auto` | Built-in agent mode. Modes a repository defines are for orchestrator jobs; a local run has no forge to deliver to. |
 | `--model` | `coding-agent` | Model alias. |
 | `--max-validation-retries` | `0` | Additional agent passes after a required validation failure. |
 | `--no-cache` | off | Disable cache persistence for this run. |

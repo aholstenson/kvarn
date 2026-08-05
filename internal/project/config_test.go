@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/aholstenson/kvarn/internal/agent/coding"
 	"github.com/aholstenson/kvarn/internal/project"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -149,6 +150,19 @@ validation:
       run: npm run lint
       paths:
         - "frontend/**"
+
+modes:
+  review-pr:
+    description: Review an open pull request.
+    extends: review
+    start: pull-request
+    deliver:
+      - pr-comment
+    context:
+      - pr-metadata
+      - pr-diff
+    prompt: |
+      Hold the change to the house style.
 `)
 		cfg, err := project.Load(dir)
 		Expect(err).NotTo(HaveOccurred())
@@ -169,6 +183,13 @@ validation:
 		Expect(cfg.Validation.Advisory).To(HaveLen(1))
 		Expect(cfg.Validation.Advisory[0].Name).To(Equal("Lint"))
 		Expect(cfg.Validation.Advisory[0].Paths).To(Equal([]string{"frontend/**"}))
+
+		Expect(cfg.Modes).To(HaveLen(1))
+		Expect(cfg.Modes["review-pr"].Extends).To(Equal("review"))
+		Expect(cfg.Modes["review-pr"].Start).To(Equal("pull-request"))
+		Expect(cfg.Modes["review-pr"].Deliver).To(Equal([]string{"pr-comment"}))
+		Expect(cfg.Modes["review-pr"].Context).To(Equal([]string{"pr-metadata", "pr-diff"}))
+		Expect(cfg.Modes["review-pr"].Prompt).To(ContainSubstring("Hold the change to the house style"))
 	})
 })
 
@@ -1168,6 +1189,166 @@ setup:
 		_, err := project.Load(dir)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("overlaps with environment"))
+	})
+})
+
+var _ = Describe("Modes config", func() {
+	var dir string
+
+	BeforeEach(func() {
+		var err error
+		dir, err = os.MkdirTemp("", "projectconfig-test-*")
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	AfterEach(func() {
+		os.RemoveAll(dir)
+	})
+
+	// loadModes writes a `modes:` block and returns whatever Load made of it.
+	loadModes := func(body string) error {
+		writeYAML(dir, "kvarn.yml", "modes:\n"+body)
+		_, err := project.Load(dir)
+		return err
+	}
+
+	It("accepts a definition that names every axis", func() {
+		Expect(loadModes(`
+  audit:
+    description: Security audit against the house checklist.
+    extends: review
+    prompt: Check the egress allowlist.
+    workspace: read-only
+    validation: skip
+    deliver:
+      - pr-comment
+    start: pull-request
+    context:
+      - pr-metadata
+      - pr-diff
+`)).To(Succeed())
+	})
+
+	It("accepts a definition that names nothing", func() {
+		Expect(loadModes("  bare: {}\n")).To(Succeed())
+	})
+
+	DescribeTable("rejects a value outside an axis's vocabulary",
+		func(body, wantErr string) {
+			err := loadModes(body)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(wantErr))
+		},
+		Entry("workspace", "  m:\n    workspace: read-mostly\n", "invalid workspace"),
+		Entry("validation", "  m:\n    validation: maybe\n", "invalid validation"),
+		Entry("start", "  m:\n    start: tag\n", "invalid start"),
+		Entry("deliver", "  m:\n    deliver:\n      - email\n", "invalid deliver"),
+		Entry("context", "  m:\n    context:\n      - weather\n", "invalid context"),
+	)
+
+	It("rejects a name that shadows a built-in", func() {
+		err := loadModes("  review:\n    description: mine\n")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(`mode "review" is built in`))
+	})
+
+	It("rejects a name that is not a lowercase slug", func() {
+		err := loadModes("  Review_PR:\n    extends: review\n")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("lowercase alphanumerics"))
+	})
+
+	It("rejects extending a mode nothing defines", func() {
+		err := loadModes("  m:\n    extends: nonesuch\n")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(`extends unknown mode "nonesuch"`))
+	})
+
+	It("accepts extending another mode in the same file, in either order", func() {
+		Expect(loadModes(`
+  b:
+    extends: a
+  a:
+    extends: review
+`)).To(Succeed())
+	})
+
+	It("rejects a cycle of extends", func() {
+		err := loadModes(`
+  a:
+    extends: b
+  b:
+    extends: a
+`)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("cycle"))
+	})
+
+	It("rejects a mode that extends itself", func() {
+		err := loadModes("  a:\n    extends: a\n")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("cycle"))
+	})
+
+	It("rejects an empty deliver list, which reads as none but would inherit", func() {
+		err := loadModes("  m:\n    extends: review\n    deliver: []\n")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("deliver: [none]"))
+	})
+
+	It("rejects an empty context list", func() {
+		err := loadModes("  m:\n    extends: feedback\n    context: []\n")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("context: [none]"))
+	})
+
+	It("accepts context: none as the way to assemble no context", func() {
+		Expect(loadModes("  m:\n    extends: feedback\n    context:\n      - none\n")).To(Succeed())
+	})
+
+	It("rejects context: none combined with another block", func() {
+		err := loadModes("  m:\n    context:\n      - none\n      - pr-diff\n")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("combines context none"))
+	})
+
+	It("rejects deliver: none combined with another sink", func() {
+		err := loadModes("  m:\n    deliver:\n      - none\n      - pr-comment\n")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("combines deliver none"))
+	})
+
+	It("rejects the two commit sinks together", func() {
+		err := loadModes("  m:\n    deliver:\n      - follow-up-commit\n      - new-pull-request\n")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("land in one place or the other"))
+	})
+
+	It("rejects a duplicated sink", func() {
+		err := loadModes("  m:\n    deliver:\n      - pr-comment\n      - pr-comment\n")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(`lists deliver "pr-comment" twice`))
+	})
+
+	It("rejects a read-only mode that delivers a commit", func() {
+		err := loadModes("  m:\n    workspace: read-only\n    deliver:\n      - new-pull-request\n")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("no changes to deliver as a commit"))
+	})
+
+	It("rejects a branch-only mode that delivers a follow-up commit", func() {
+		err := loadModes("  m:\n    start: branch\n    deliver:\n      - follow-up-commit\n")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("no pull request to commit onto"))
+	})
+})
+
+// The kvarn.yml validator carries its own copy of the built-in mode names,
+// because the package that owns them sits downstream of this one. This is the
+// guard that keeps the copy honest.
+var _ = Describe("BuiltinModeNames", func() {
+	It("matches the modes the coding package ships", func() {
+		Expect(project.BuiltinModeNames()).To(ConsistOf(coding.Builtins().Names()))
 	})
 })
 

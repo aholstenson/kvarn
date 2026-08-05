@@ -13,7 +13,9 @@ message StartJobRequest {
   string project = 1;
   string prompt = 2;
   // Optional; defaults to "feedback" when continuing a pull request and to
-  // "auto" otherwise.
+  // "auto" otherwise. Names a built-in mode or one the project's kvarn.yml
+  // defines. A name the orchestrator cannot see yet is accepted here and
+  // resolved once the repository has been cloned.
   string mode = 4;
   // Optional caller-chosen key that makes submission safe to retry: a second
   // request carrying the same key within the same project returns the session
@@ -33,6 +35,46 @@ message StartJobRequest {
     // the project's forge.
     string pr_ref = 6;
   }
+
+  // Optional inline mode definition, for a run whose shape the repository does
+  // not define. It is checked when the request arrives and travels with the
+  // job, so an external agent can drive a bespoke run against a repository with
+  // no `modes:` block of its own. When set together with `mode`, the two names
+  // must agree.
+  ModeSpec mode_spec = 7;
+}
+
+// ModeSpec is a mode definition: the axes that decide what an agent run may do,
+// whether it is validated, where its result goes, where it may start, and what
+// context it opens with. It is the wire form of the same definition a project
+// writes under `modes:` in its kvarn.yml.
+//
+// Every field is optional. An unset axis takes its value from the mode named by
+// `extends`, or from that axis's own default.
+message ModeSpec {
+  // Name for the mode, used in logs and on the session. Defaults to "inline".
+  string name = 1;
+  // One-line summary.
+  string description = 2;
+  // Mode this one inherits from: a built-in, or one the project defines. Empty
+  // means "auto".
+  string extends = 3;
+  // Appended to the inherited prompt; it adds instructions rather than
+  // replacing them.
+  string prompt = 4;
+  // "read-only" or "read-write".
+  string workspace = 5;
+  // "skip", "run", or "require". Defaults to "run" for a read-write mode and
+  // "skip" otherwise.
+  string validation = 6;
+  // Where the result goes: "none", "pr-comment", "follow-up-commit",
+  // "new-pull-request".
+  repeated string deliver = 7;
+  // Where the run may begin: "branch", "pull-request", or "any" (the default).
+  string start = 8;
+  // Sections prepended to the task message: "original-task", "pr-metadata",
+  // "pr-diff".
+  repeated string context = 9;
 }
 
 message StartJobResponse {
@@ -95,6 +137,26 @@ message GetSessionResponse {
   // than asked to open one. pr_ref does not answer this on its own: a fresh
   // job acquires one the moment it opens its pull request.
   bool continuation = 19;
+}
+
+// GetSessionResultRequest asks for what a run produced in writing.
+message GetSessionResultRequest {
+  string session_id = 1;
+}
+
+// GetSessionResultResponse carries the run's written result: for a read-only
+// mode the agent's final answer, and for one that produced changes the summary
+// that became the commit message and pull request body.
+//
+// It is what makes a run that delivers nowhere still usable — a review or a
+// research answer that was never posted to a forge is read from here.
+message GetSessionResultResponse {
+  string session_id = 1;
+  // The run's state, so a caller can tell an empty result apart from one that
+  // has not been produced yet.
+  string state = 2;
+  // Empty until the run has produced one.
+  string result = 3;
 }
 
 // CostReport carries accumulated LLM spend for a job: totals across all
@@ -464,6 +526,7 @@ service OrchestratorService {
   rpc RetryJob(RetryJobRequest) returns (RetryJobResponse);
   rpc SetJobPriority(SetJobPriorityRequest) returns (SetJobPriorityResponse);
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc GetSessionResult(GetSessionResultRequest) returns (GetSessionResultResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc WatchSession(WatchSessionRequest) returns (stream SessionUpdate);
   rpc ListSessionEvents(ListSessionEventsRequest) returns (ListSessionEventsResponse);

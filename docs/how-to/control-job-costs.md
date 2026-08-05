@@ -34,7 +34,12 @@ max_cost_usd = 1.0
 max_cost_usd = 2.0
 ```
 
-Modes are `auto`, `implement`, `fix`, `feedback`, `review`, `research`.
+The mode is any name a job can run in: one of the six built-ins (`auto`,
+`implement`, `fix`, `feedback`, `review`, `research`) or a mode the
+repository defines in its [`kvarn.yml`](../reference/kvarn-yml.md#modes). A
+mode of its own is how a workflow gets a cap of its own — a nightly
+dependency bump kept to a dollar, say, without touching what `implement`
+may spend.
 
 ## Set a house default for every project
 

@@ -280,7 +280,7 @@ func (d *dispatcher) dispatch(ctx context.Context, sess *session.Session) bool {
 		log.Info("dispatched from backlog", "queue_wait", waited.String(), "attempt", sess.Attempts+1)
 	}
 
-	d.svc.instruments.RecordJobStart(ctx, sess.ProjectName, sess.Mode)
+	d.svc.instruments.RecordJobStart(ctx, sess.ProjectName, coding.MetricsModeLabel(sess.Mode))
 	d.svc.jobsWG.Add(1)
 	rootCtx, cancelJob := d.svc.beginJob(sess.ID, sess.ProjectName)
 	go d.svc.startClaimed(rootCtx, cancelJob, sess)
@@ -327,7 +327,11 @@ func (s *Service) startClaimed(rootCtx context.Context, cancelJob context.Cancel
 // deleted or a key revoked while the job waited stops it here rather than
 // running it against configuration nobody holds any more.
 func (s *Service) resolveSpec(ctx context.Context, sess *session.Session) (jobSpec, error) {
-	mode, err := coding.ModeByName(sess.Mode)
+	// The mode is deliberately not resolved here. A project defines its own
+	// modes in its kvarn.yml, which this process has not read yet — the clone
+	// that produces it happens inside the run. What the submission asked for is
+	// carried through instead, and the run resolves it once.
+	modeSpec, err := decodeModeSpec(sess.ModeSpecJSON)
 	if err != nil {
 		return jobSpec{}, err
 	}
@@ -342,13 +346,14 @@ func (s *Service) resolveSpec(ctx context.Context, sess *session.Session) (jobSp
 	}
 
 	spec := jobSpec{
-		sessionID:   sess.ID,
-		keyID:       sess.KeyID,
-		proj:        proj,
-		mode:        mode,
-		agentPrompt: sess.Prompt,
-		userPrompt:  sess.Prompt,
-		baseBranch:  sess.BaseBranch,
+		sessionID:    sess.ID,
+		keyID:        sess.KeyID,
+		proj:         proj,
+		modeName:     sess.Mode,
+		modeSpec:     modeSpec,
+		userPrompt:   sess.Prompt,
+		agentContext: coding.ContextInput{Task: sess.Prompt},
+		baseBranch:   sess.BaseBranch,
 	}
 
 	if !sess.Continuation {
@@ -398,8 +403,8 @@ func (s *Service) resolveContinuationSpec(ctx context.Context, sess *session.Ses
 	if pr.State != "open" {
 		return jobSpec{}, fmt.Errorf("pull request %s is %s; only open pull requests can be continued", sess.PRRef, pr.State)
 	}
-	if pr.HeadRepo == "" || pr.HeadRepo != pr.BaseRepo {
-		return jobSpec{}, fmt.Errorf("pull request %s comes from a fork (%s); its head branch cannot be pushed to", sess.PRRef, pr.HeadRepo)
+	if isForkPR(pr) {
+		return jobSpec{}, fmt.Errorf("pull request %s comes from a fork (%s); its head branch is not in this repository", sess.PRRef, pr.HeadRepo)
 	}
 
 	// Diff is context, not a requirement: a run without it is still useful.
@@ -422,7 +427,16 @@ func (s *Service) resolveContinuationSpec(ctx context.Context, sess *session.Ses
 		}
 	}
 
-	spec.agentPrompt = buildFeedbackPrompt(originalPrompt, pr, diff, sess.Prompt)
+	// The pieces are gathered here, against the pull request as it is now, but
+	// assembled into a task message inside the run: which of them appear is the
+	// mode's `context` axis, and the mode is not resolved until the clone.
+	spec.agentContext = coding.ContextInput{
+		OriginalTask: originalPrompt,
+		PRTitle:      pr.Title,
+		PRBody:       pr.Body,
+		PRDiff:       diff,
+		Task:         sess.Prompt,
+	}
 	spec.baseBranch = pr.BaseBranch
 	spec.pr = &prTarget{
 		ref:        pr.Ref,

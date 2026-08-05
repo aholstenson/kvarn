@@ -47,8 +47,8 @@ leaves no trace:
 | --- | --- |
 | No forge configured, or the ref is unreadable | Nothing to push to. |
 | The PR is not open | |
-| The PR head is in a fork | Pushing to a branch in another repository needs the maintainer-edit flag, which an org-scoped App installation token cannot use. |
-| Another run is in flight for the same PR | Named in the error. One run per PR at a time. |
+| The PR head is in a fork | The head branch lives in another repository, so it is not in the clone kvarn makes; pushing to it would additionally need the maintainer-edit flag an org-scoped App installation token cannot use. |
+| Another run is in flight for the same PR | Named in the error. Applies to modes that push, so two follow-up commits cannot race on one branch; two read-only runs on one PR are fine. |
 
 Just before pushing, the PR head is re-read; if it moved underneath the run, the
 run fails rather than pushing over someone else's work.

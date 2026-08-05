@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,6 +57,44 @@ type Config struct {
 	Secrets      []SecretRef       `yaml:"secrets,omitempty"`
 	Setup        Setup             `yaml:"setup"`
 	Validation   Validation        `yaml:"validation"`
+	Modes        Modes             `yaml:"modes,omitempty"`
+}
+
+// Modes are the agent modes this repository defines, keyed by the name a job
+// selects with `--mode`. They sit beside the built-in modes rather than
+// replacing them: a definition inherits from a built-in (or from another mode
+// in the same file) and overrides only the axes it names.
+type Modes map[string]ModeSpec
+
+// ModeSpec is one entry in the `modes:` map. Every field is optional; an unset
+// axis takes its value from the mode named by `extends`, or from that axis's
+// own default.
+//
+// The vocabulary is deliberately the same one the orchestrator resolves against
+// (see internal/agent/coding). It is restated here as plain strings because the
+// coding package sits downstream of this one, and validation below is what
+// keeps a typo in a kvarn.yml from reaching the run as a mode that quietly does
+// the wrong thing.
+type ModeSpec struct {
+	// Description is a one-line summary shown by `kvarn modes list`.
+	Description string `yaml:"description,omitempty"`
+	// Extends names the mode this one inherits from. Empty means `auto`.
+	Extends string `yaml:"extends,omitempty"`
+	// Prompt is appended to the inherited prompt; it adds instructions rather
+	// than replacing them.
+	Prompt string `yaml:"prompt,omitempty"`
+	// Workspace is "read-only" or "read-write".
+	Workspace string `yaml:"workspace,omitempty"`
+	// Validation is "skip", "run", or "require".
+	Validation string `yaml:"validation,omitempty"`
+	// Deliver lists where the result goes: "none", "pr-comment",
+	// "follow-up-commit", "new-pull-request".
+	Deliver []string `yaml:"deliver,omitempty"`
+	// Start constrains where a run may begin: "branch", "pull-request", "any".
+	Start string `yaml:"start,omitempty"`
+	// Context lists the sections prepended to the task message:
+	// "original-task", "pr-metadata", "pr-diff".
+	Context []string `yaml:"context,omitempty"`
 }
 
 // Cache defines additional guest-side paths to persist across VM runs.
@@ -494,6 +533,192 @@ func validateHostPattern(field, host string) error {
 // string is accepted and defaults to bearer at resolution time.
 var secretSchemes = map[string]bool{"": true, "bearer": true, "basic": true, "oauth": true}
 
+// The accepted values for each `modes:` axis. The empty string is accepted
+// everywhere and means "inherit"; see ModeSpec.
+var (
+	modeWorkspaces  = map[string]bool{"": true, "read-only": true, "read-write": true}
+	modeValidations = map[string]bool{"": true, "skip": true, "run": true, "require": true}
+	modeStarts      = map[string]bool{"": true, "branch": true, "pull-request": true, "any": true}
+	modeSinks       = map[string]bool{"none": true, "pr-comment": true, "follow-up-commit": true, "new-pull-request": true}
+	modeContexts    = map[string]bool{"none": true, "original-task": true, "pr-metadata": true, "pr-diff": true}
+)
+
+// builtinModeNames are the modes kvarn ships with. A repository may extend one
+// but not redefine it, so the names are reserved.
+//
+// It mirrors coding.Builtins(), which this package cannot read: the coding
+// package depends on this one through the sandbox. A test asserts the two lists
+// agree, so a mode added there is caught here rather than drifting.
+var builtinModeNames = []string{"auto", "implement", "fix", "feedback", "review", "research"}
+
+// BuiltinModeNames returns the reserved mode names, for callers that need the
+// same list this package validates against.
+func BuiltinModeNames() []string { return append([]string(nil), builtinModeNames...) }
+
+// modeNameRe constrains a mode name to lowercase alphanumerics separated by
+// single hyphens, matching what the orchestrator accepts on `--mode`.
+var modeNameRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// maxModeNameLen bounds a mode name so an unbounded string cannot travel from a
+// kvarn.yml into every log line a run produces.
+const maxModeNameLen = 64
+
+// Resolve checks every mode definition and how they relate: names are
+// well-formed and do not shadow a built-in, each axis holds a value from its
+// vocabulary, the combination is coherent, and `extends` reaches a real mode
+// without going in a circle. It returns the definitions in dependency order —
+// every mode after the one it extends — which is the order they can be built
+// in.
+//
+// It has no effect of its own; validate() calls it so a bad definition is
+// reported when the file is read rather than when a job selects the mode.
+func (m Modes) Resolve() ([]string, error) {
+	if len(m) == 0 {
+		return nil, nil
+	}
+
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	reserved := make(map[string]bool, len(builtinModeNames))
+	for _, name := range builtinModeNames {
+		reserved[name] = true
+	}
+
+	for _, name := range names {
+		if err := validateModeName(name); err != nil {
+			return nil, err
+		}
+		if reserved[name] {
+			return nil, fmt.Errorf("mode %q is built in and cannot be redefined", name)
+		}
+		if err := m[name].validate(name); err != nil {
+			return nil, err
+		}
+		if parent := m[name].Extends; parent != "" && !reserved[parent] {
+			if _, ok := m[parent]; !ok {
+				return nil, fmt.Errorf("mode %q extends unknown mode %q", name, parent)
+			}
+		}
+	}
+
+	// Depth-first over `extends`, emitting each mode after its parent. The
+	// visiting set is what catches a cycle: reaching a mode that is still on
+	// the stack means following extends leads back to where it started.
+	var order []string
+	done := make(map[string]bool, len(names))
+	visiting := make(map[string]bool, len(names))
+	var walk func(name string) error
+	walk = func(name string) error {
+		if done[name] || reserved[name] {
+			return nil
+		}
+		if visiting[name] {
+			return fmt.Errorf("mode %q extends itself through a cycle", name)
+		}
+		visiting[name] = true
+		if parent := m[name].Extends; parent != "" {
+			if err := walk(parent); err != nil {
+				return err
+			}
+		}
+		delete(visiting, name)
+		done[name] = true
+		order = append(order, name)
+		return nil
+	}
+	for _, name := range names {
+		if err := walk(name); err != nil {
+			return nil, err
+		}
+	}
+	return order, nil
+}
+
+// validateModeName enforces the shape of a mode name.
+func validateModeName(name string) error {
+	switch {
+	case name == "":
+		return errors.New("modes contains an empty name")
+	case len(name) > maxModeNameLen:
+		return fmt.Errorf("mode name %q is %d bytes; the limit is %d", name, len(name), maxModeNameLen)
+	case !modeNameRe.MatchString(name):
+		return fmt.Errorf("mode name %q must be lowercase alphanumerics separated by single hyphens", name)
+	}
+	return nil
+}
+
+// validate checks one definition's axes in the order they are documented.
+func (s ModeSpec) validate(name string) error {
+	if s.Extends != "" {
+		if err := validateModeName(s.Extends); err != nil {
+			return fmt.Errorf("mode %q extends: %w", name, err)
+		}
+	}
+	if !modeWorkspaces[s.Workspace] {
+		return fmt.Errorf("mode %q has invalid workspace %q: must be read-only or read-write", name, s.Workspace)
+	}
+	if !modeValidations[s.Validation] {
+		return fmt.Errorf("mode %q has invalid validation %q: must be skip, run or require", name, s.Validation)
+	}
+	if !modeStarts[s.Start] {
+		return fmt.Errorf("mode %q has invalid start %q: must be branch, pull-request or any", name, s.Start)
+	}
+
+	// An empty list is refused rather than read as either intent. Omitting the
+	// key inherits the base mode's sinks, and `[none]` delivers nothing; a
+	// written-out `[]` reads like the second but would do the first, so it is
+	// answered with the spelling that means what it looks like.
+	if s.Deliver != nil && len(s.Deliver) == 0 {
+		return fmt.Errorf("mode %q has an empty deliver list: write deliver: [none] to deliver nothing, or omit deliver to inherit", name)
+	}
+	if s.Context != nil && len(s.Context) == 0 {
+		return fmt.Errorf("mode %q has an empty context list: write context: [none] to assemble no context, or omit context to inherit", name)
+	}
+
+	seenSink := make(map[string]bool, len(s.Deliver))
+	for _, sink := range s.Deliver {
+		if !modeSinks[sink] {
+			return fmt.Errorf("mode %q has invalid deliver %q: must be one of none, pr-comment, follow-up-commit, new-pull-request", name, sink)
+		}
+		if seenSink[sink] {
+			return fmt.Errorf("mode %q lists deliver %q twice", name, sink)
+		}
+		seenSink[sink] = true
+	}
+	if seenSink["none"] && len(s.Deliver) > 1 {
+		return fmt.Errorf("mode %q combines deliver none with another sink", name)
+	}
+	if seenSink["follow-up-commit"] && seenSink["new-pull-request"] {
+		return fmt.Errorf("mode %q delivers both follow-up-commit and new-pull-request: changes land in one place or the other", name)
+	}
+	if s.Workspace == "read-only" && (seenSink["follow-up-commit"] || seenSink["new-pull-request"]) {
+		return fmt.Errorf("mode %q is read-only, so it has no changes to deliver as a commit", name)
+	}
+	if s.Start == "branch" && seenSink["follow-up-commit"] {
+		return fmt.Errorf("mode %q delivers follow-up-commit but can only start from a branch, which has no pull request to commit onto", name)
+	}
+
+	seenBlock := make(map[string]bool, len(s.Context))
+	for _, block := range s.Context {
+		if !modeContexts[block] {
+			return fmt.Errorf("mode %q has invalid context %q: must be one of none, original-task, pr-metadata, pr-diff", name, block)
+		}
+		if seenBlock[block] {
+			return fmt.Errorf("mode %q lists context %q twice", name, block)
+		}
+		seenBlock[block] = true
+	}
+	if seenBlock["none"] && len(s.Context) > 1 {
+		return fmt.Errorf("mode %q combines context none with another block", name)
+	}
+
+	return nil
+}
+
 func (c *Config) validate() error {
 	// image and dependencies are mutually exclusive: shell sessions inside an
 	// image: job run via `podman exec`, so host-installed Nix binaries are
@@ -603,6 +828,13 @@ func (c *Config) validate() error {
 			}
 		}
 		seenSecrets[ref.Name] = true
+	}
+
+	// Surface mode schema errors at load time.
+	if len(c.Modes) > 0 {
+		if _, err := c.Modes.Resolve(); err != nil {
+			return fmt.Errorf("modes: %w", err)
+		}
 	}
 
 	allSteps := make([]Step, 0)

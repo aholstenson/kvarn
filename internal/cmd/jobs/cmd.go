@@ -23,6 +23,7 @@ type Cmd struct {
 	Start    StartCmd    `cmd:"" help:"Start a project-aware job."`
 	List     ListCmd     `cmd:"" help:"List jobs, newest first."`
 	Show     ShowCmd     `cmd:"" help:"Show one job in full."`
+	Result   ResultCmd   `cmd:"" help:"Print what a job produced in writing."`
 	Watch    WatchCmd    `cmd:"" help:"Stream a job's events until it finishes."`
 	Events   EventsCmd   `cmd:"" help:"Replay a job's recorded event history."`
 	Cancel   CancelCmd   `cmd:"" help:"Cancel one job, or every job matching a filter."`

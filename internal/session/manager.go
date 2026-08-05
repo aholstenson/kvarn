@@ -108,6 +108,7 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*Session, er
 		ProjectName:     params.ProjectName,
 		Prompt:          params.Prompt,
 		Mode:            params.Mode,
+		ModeSpecJSON:    params.ModeSpecJSON,
 		State:           StatePending,
 		PRRef:           params.PRRef,
 		HeadBranch:      params.HeadBranch,
@@ -271,6 +272,20 @@ func (m *manager) SetPullRequest(ctx context.Context, id, url, ref, branch strin
 		Ref:       ref,
 		Branch:    branch,
 	})
+}
+
+// SetResult records the run's written result. No event accompanies it: the
+// agent's final message has already been broadcast as an AgentMessageEvent, so
+// this write is about a reader who arrives after the run rather than one
+// watching it.
+func (m *manager) SetResult(ctx context.Context, id, result string) error {
+	s, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return err
+	}
+	s.Result = result
+	s.UpdatedAt = time.Now()
+	return m.store.UpdateSession(ctx, s)
 }
 
 // EmitEvent carries no existence check of its own. The high-volume kinds —

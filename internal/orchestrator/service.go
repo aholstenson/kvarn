@@ -584,6 +584,10 @@ type startJobParams struct {
 	branch string
 	prRef  string
 	mode   string
+	// modeSpec is a mode definition supplied with the request, for a run whose
+	// shape the repository does not define. Nil for a submission that named a
+	// mode instead of defining one.
+	modeSpec *coding.Spec
 	// idempotencyKey, when set, makes the submission replayable: a second
 	// request carrying it returns the session the first one created. Empty for a
 	// caller that did not ask for the guarantee.
@@ -638,19 +642,24 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 			fmt.Errorf("idempotency key is %d bytes; the limit is %d", len(p.idempotencyKey), maxIdempotencyKeyLen))
 	}
 
-	// A continuation defaults to the mode written for it. Nothing stops a
-	// caller naming another one — reviewing a pull request is as reasonable as
-	// revising it — so the starting point picks the default and never more.
-	modeName := p.mode
-	if modeName == "" && p.continues() {
-		modeName = coding.ModeFeedback.Name
+	// The mode is checked here but not necessarily settled: a project defines
+	// its own modes in its kvarn.yml, which is not readable until the run's
+	// clone. What can be checked without the repository is, and the rest
+	// travels with the job. See mode.go.
+	choice, err := resolveSubmittedMode(p)
+	if err != nil {
+		return nil, invalidArgument(err)
 	}
-	mode, err := coding.ModeByName(modeName)
+	if err := checkModeFeasible(choice.resolved, p.continues()); err != nil {
+		return nil, invalidArgument(err)
+	}
+
+	specJSON, err := choice.specJSON()
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	log := reqid.LoggerFrom(ctx).With("project", p.project, "mode", mode.ModeName())
+	log := reqid.LoggerFrom(ctx).With("project", p.project, "mode", choice.name)
 
 	if p.continues() {
 		// The pull request arm's own fast path, before the forge round trips
@@ -663,7 +672,7 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 			if err != nil {
 				return nil, err
 			}
-			if claimed != nil && sameSubmission(claimed, p.prompt, mode.ModeName(), p.prRef, claimed.PRRef) == nil {
+			if claimed != nil && sameSubmission(claimed, p.prompt, choice.name, specJSON, p.prRef, claimed.PRRef) == nil {
 				log.Info("idempotent replay", "session_id", claimed.ID)
 				return &submissionResult{session: claimed, duplicate: true}, nil
 			}
@@ -679,9 +688,9 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 	log.Info("resolved project", "repo", proj.RepoURL, "forge", proj.Forge)
 
 	if p.continues() {
-		return s.startContinuation(ctx, p, proj, mode, log)
+		return s.startContinuation(ctx, p, proj, choice, specJSON, log)
 	}
-	return s.startFresh(ctx, p, proj, mode, log)
+	return s.startFresh(ctx, p, proj, choice, specJSON, log)
 }
 
 // startFresh admits a submission that starts from a branch: clone it, and open
@@ -690,7 +699,8 @@ func (s *Service) startFresh(
 	ctx context.Context,
 	p startJobParams,
 	proj *project.Project,
-	mode *coding.Mode,
+	choice modeChoice,
+	specJSON string,
 	log *slog.Logger,
 ) (*submissionResult, error) {
 	branch := p.branch
@@ -706,7 +716,7 @@ func (s *Service) startFresh(
 	// limit. The branch compared here is the resolved one: a caller that omitted
 	// it and one that named the project default sent the same job.
 	replay := func(claimed *session.Session) (*submissionResult, error) {
-		if err := sameSubmission(claimed, p.prompt, mode.ModeName(), branch, claimed.BaseBranch); err != nil {
+		if err := sameSubmission(claimed, p.prompt, choice.name, specJSON, branch, claimed.BaseBranch); err != nil {
 			return nil, err
 		}
 		log.Info("idempotent replay", "session_id", claimed.ID)
@@ -732,10 +742,11 @@ func (s *Service) startFresh(
 	sess, err := s.sessionMgr.Create(ctx, session.CreateParams{
 		ProjectName:    p.project,
 		Prompt:         p.prompt,
-		Mode:           mode.ModeName(),
+		Mode:           choice.name,
+		ModeSpecJSON:   specJSON,
 		BaseBranch:     branch,
 		KeyID:          callerKeyID(ctx),
-		Priority:       jobPriority(proj, mode.ModeName()),
+		Priority:       jobPriority(proj, choice.name),
 		IdempotencyKey: p.idempotencyKey,
 	})
 	// Two copies of one retried request can both get past the lookup above; the
@@ -780,8 +791,14 @@ func (s *Service) findClaimedSession(ctx context.Context, project, key string) (
 // startFrom is where the run begins: the branch a fresh job clones, or the pull
 // request a continuation works on. claimedStartFrom is that same thing read off
 // the claimed session, which is why the caller supplies both.
-func sameSubmission(claimed *session.Session, prompt, mode, startFrom, claimedStartFrom string) error {
-	if claimed.Prompt == prompt && claimed.Mode == mode && claimedStartFrom == startFrom {
+//
+// modeSpecJSON is compared alongside the mode name because an inline definition
+// is part of what was submitted: two requests naming the same inline mode but
+// defining it differently are two different jobs, and collapsing them into one
+// would silently drop the second.
+func sameSubmission(claimed *session.Session, prompt, mode, modeSpecJSON, startFrom, claimedStartFrom string) error {
+	if claimed.Prompt == prompt && claimed.Mode == mode &&
+		claimed.ModeSpecJSON == modeSpecJSON && claimedStartFrom == startFrom {
 		return nil
 	}
 	return connect.NewError(connect.CodeAlreadyExists,
@@ -795,6 +812,7 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 		project:        msg.Project,
 		prompt:         msg.Prompt,
 		mode:           msg.Mode,
+		modeSpec:       modeSpecFromProto(msg.GetModeSpec()),
 		idempotencyKey: msg.IdempotencyKey,
 		procedure:      req.Spec().Procedure,
 	}
@@ -843,16 +861,23 @@ type jobSpec struct {
 	// keyID is the API key that submitted the job, captured here because the
 	// job's context is detached from the request's and so carries no identity.
 	// Empty when auth is disabled.
-	keyID       string
-	proj        *project.Project
-	mode        *coding.Mode
-	agentPrompt string
-	baseBranch  string
+	keyID string
+	proj  *project.Project
+	// modeName is what the submission asked for and modeSpec the definition it
+	// supplied inline, if any. The runnable mode is resolved from these once the
+	// repository has been cloned and its own `modes:` block read; see
+	// resolveRunMode.
+	modeName   string
+	modeSpec   *coding.Spec
+	baseBranch string
 	// userPrompt is what the requester actually asked for, used for the PR
-	// comment. It differs from agentPrompt for a feedback run, where the agent
-	// receives an assembled context pack.
+	// comment and as the last section of the agent's task message.
 	userPrompt string
-	pr         *prTarget
+	// agentContext holds the pieces a context pack can be built from. Which of
+	// them the agent actually sees is the mode's `context` axis, applied inside
+	// the run.
+	agentContext coding.ContextInput
+	pr           *prTarget
 }
 
 // resolvedForge carries the forge wiring for a project: its config, the
@@ -918,7 +943,14 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	defer s.jobsWG.Done()
 	sessionID := spec.sessionID
 	proj := spec.proj
-	mode := spec.mode
+	// The mode's name is all that is available until the repository is cloned;
+	// the mode itself is resolved from it (and from the project's kvarn.yml)
+	// after the clone, below.
+	modeName := spec.modeName
+	if modeName == "" {
+		modeName = coding.ModeAuto.Name
+	}
+	var mode *coding.Mode
 	defer s.endJob(sessionID)
 	defer cancelJob(nil)
 	// A run is no longer bounded by the request that submitted it — it may
@@ -932,7 +964,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	// flipped it. Dropping only the cancellation keeps the request ID attached
 	// for logging inside the session manager.
 	termCtx := context.WithoutCancel(rootCtx)
-	log := reqid.LoggerFrom(ctx).With("session_id", sessionID, "project", proj.Name, "mode", mode.ModeName())
+	log := reqid.LoggerFrom(ctx).With("session_id", sessionID, "project", proj.Name, "mode", modeName)
 
 	// The branch to clone and work on: a continuation run picks up the pull
 	// request's head branch, a fresh run starts from the base branch.
@@ -962,7 +994,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 				outcome = "cancelled"
 			}
 		}
-		s.instruments.RecordJobEnd(ctx, proj.Name, mode.ModeName(), outcome, time.Since(jobStart).Seconds())
+		s.instruments.RecordJobEnd(ctx, proj.Name, coding.MetricsModeLabel(modeName), outcome, time.Since(jobStart).Seconds())
 	}()
 
 	log.Info("job started", "repo", proj.RepoURL, "branch", branch)
@@ -979,7 +1011,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 			userDefaults = d
 		}
 	}
-	costLimits := limits.Resolve(proj, userDefaults, mode.ModeName())
+	costLimits := limits.Resolve(proj, userDefaults, modeName)
 	tracker := cost.NewTracker(cost.TrackerOpts{
 		Pricing: s.pricingManager,
 		Limit:   cost.Limit{MaxUSD: costLimits.MaxCostUSD, WarnFraction: costLimits.WarnThreshold},
@@ -1078,6 +1110,23 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		return
 	}
 
+	// The repository is on disk, so its `modes:` block is finally readable and
+	// the mode the submission asked for can be settled. Everything that reads a
+	// mode's capabilities — the agent's toolset, whether validation runs, where
+	// the result goes — happens below this point.
+	mode, err = resolveRunMode(cfg, modeName, spec.modeSpec)
+	if err != nil {
+		log.Error("failed to resolve mode", "error", err)
+		s.failRun(termCtx, rootCtx, sessionID, err)
+		return
+	}
+	if err := checkModeFeasible(mode, spec.pr != nil); err != nil {
+		log.Error("mode cannot run from here", "error", err)
+		s.failRun(termCtx, rootCtx, sessionID, err)
+		return
+	}
+	agentPrompt := mode.BuildPrompt(spec.agentContext)
+
 	// The footprint is known, so the clone permit has done its job. Handing it
 	// back here rather than at the end of the run is the whole point: held
 	// across the wait for capacity, the number of permits would cap the queue
@@ -1119,7 +1168,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		MemBytes:      memBytes,
 		DiskBytes:     uint64(diskBytes),
 		Tenant:        scheduler.Tenant{Project: proj.Name, KeyID: spec.keyID},
-		Priority:      jobPriority(proj, mode.ModeName()),
+		Priority:      jobPriority(proj, modeName),
 		ProjectLimits: projLimits,
 		KeyLimits:     keyLim,
 		OnWait: func(e scheduler.WaitEvent) {
@@ -1173,7 +1222,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	defer lease.Release()
 
 	waited := time.Since(admitStart)
-	s.instruments.RecordAdmissionWait(ctx, proj.Name, mode.ModeName(), waited.Seconds())
+	s.instruments.RecordAdmissionWait(ctx, proj.Name, coding.MetricsModeLabel(modeName), waited.Seconds())
 	// The histogram gets every job; the log line is only for a wait an
 	// operator would be looking into by hand — "why did this one take so long
 	// to start" — which matches how every other wait here is logged.
@@ -1266,7 +1315,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		Branch:      branch,
 		WorkingDir:  sess.GetWorkingDir(),
 		SessionID:   sess.GetShellSessionID(),
-		Prompt:      spec.agentPrompt,
+		Prompt:      agentPrompt,
 		Mode:        mode,
 		Runner:      sess.GetRunner(),
 		RepoContext: rc,
@@ -1327,10 +1376,19 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		defer conv.Close()
 	}
 
-	validates := mode.WritesChanges() && cfg != nil &&
+	// Whether the project's checks run is the mode's decision, not a
+	// consequence of it writing files: a read-only mode may exist precisely to
+	// run them against someone else's branch and report an honest verdict.
+	validates := mode.Validation != coding.ValidationSkip && cfg != nil &&
 		(len(cfg.Validation.Required) > 0 || len(cfg.Validation.Advisory) > 0)
 
 	var valResult *sandbox.ValidationResult
+	var agentText string
+	// requiredFailed records a verdict the run has to deliver before it reports
+	// it. Under `require` a red required step ends the run, but ending it here
+	// would skip the delivery that is the entire output of a mode written to say
+	// whether someone else's branch passes.
+	requiredFailed := false
 	for attempt := 0; ; attempt++ {
 		followup := ""
 		if attempt > 0 {
@@ -1341,7 +1399,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		}
 
 		if conv != nil {
-			_, err = conv.Run(ctx, followup)
+			agentText, err = conv.Run(ctx, followup)
 			// Persist partial cost regardless of success: spend up to a
 			// failure is still interesting to users.
 			s.sessionMgr.UpdateCost(termCtx, sessionID, tracker.Snapshot())
@@ -1364,11 +1422,18 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		log.Info("running validation steps", "attempt", attempt+1)
 		s.sessionMgr.UpdateState(ctx, sessionID, session.StateValidating, "Running validation")
 
-		changedFiles, err := sess.ChangedFiles(ctx)
-		if err != nil {
-			log.Error("failed to get changed files", "error", err)
-			s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("changed files: %w", err))
-			return
+		// Path-scoped steps are gated on the run's own diff, which only a mode
+		// that writes one has. A read-only run leaves the list nil so every step
+		// runs: gating it on an empty diff would skip each step that declares
+		// `paths:` and report the pass those skips add up to.
+		var changedFiles []string
+		if mode.WritesChanges() {
+			changedFiles, err = sess.ChangedFiles(ctx)
+			if err != nil {
+				log.Error("failed to get changed files", "error", err)
+				s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("changed files: %w", err))
+				return
+			}
 		}
 
 		onStepDone := s.makeStepCallback(ctx, sessionID)
@@ -1382,6 +1447,24 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 
 		if valResult.RequiredPassed {
 			log.Info("validation complete", "attempt", attempt+1)
+			break
+		}
+
+		// `require` is a verdict, not a repair loop: it settles on the first red
+		// required step, which is what lets a read-only mode report that someone
+		// else's branch does not build. The run is already lost, so it breaks
+		// out to deliver the verdict and fails once that has gone out.
+		if mode.Validation == coding.ValidationRequire {
+			log.Error("required validation steps failed")
+			requiredFailed = true
+			break
+		}
+		// A read-only run has nothing to fix and nothing to break, so under
+		// `run` a red step is reported and the run continues to deliver
+		// whatever the agent produced. A mode that wants the failure to count
+		// asks for `require`.
+		if mode.ReadOnly() {
+			log.Warn("required validation steps failed in a read-only run; reporting without failing the job")
 			break
 		}
 
@@ -1400,8 +1483,14 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		}
 	}
 
+	// Every run has a result, including a read-only one: for a mode that
+	// commits it is the summary that becomes the commit message, and for one
+	// that does not it is the agent's own final answer. Both are persisted, so
+	// a mode that delivers nowhere is still readable afterwards.
 	var agentResult *agent.Result
-	if conv != nil && mode.WritesChanges() {
+	switch {
+	case conv == nil:
+	case mode.WritesChanges():
 		agentResult, err = conv.Summarize(ctx)
 		if err != nil {
 			log.Warn("failed to summarize agent run; using defaults", "error", err)
@@ -1409,6 +1498,13 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 				Title:       "Apply agent changes",
 				Description: "Automated changes by kvarn agent.",
 			}
+		}
+	case strings.TrimSpace(agentText) != "":
+		agentResult = &agent.Result{Description: agentText}
+	}
+	if agentResult != nil && agentResult.Description != "" {
+		if err := s.sessionMgr.SetResult(termCtx, sessionID, agentResult.Description); err != nil {
+			log.Warn("failed to record run result", "error", err)
 		}
 	}
 
@@ -1426,43 +1522,33 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		}
 	}
 
-	// Submit changes if a forge is available, the agent produced a result, and
-	// there are changes: a fresh run opens a PR, a continuation run pushes a
-	// follow-up commit onto the one it was started for.
+	// Deliver the run's output wherever the mode says it goes.
 	userPrompt := spec.userPrompt
 	if userPrompt == "" {
-		userPrompt = spec.agentPrompt
+		userPrompt = agentPrompt
 	}
-	var submitErr error
-	switch {
-	case !mode.WritesChanges():
-		log.Info("skipping PR submission: read-only mode")
-	case forgeImpl == nil:
-		log.Info("skipping PR submission: no forge configured")
-	case agentResult == nil:
-		log.Info("skipping PR submission: no agent result")
-	default:
-		// Opening or updating a pull request needs a forge API token, so
-		// resolve once to decide whether submission is possible at all. The
-		// submit paths below pass the source on rather than this value: by the
-		// time each one pushes or calls the API it re-resolves, which is what
-		// keeps a job longer than the credential's lifetime from failing.
-		submitCreds, credErr := scm.Resolve(ctx, creds)
-		switch {
-		case credErr != nil:
-			submitErr = fmt.Errorf("resolve credentials for submission: %w", credErr)
-		case submitCreds.APIToken() == "":
-			log.Info("skipping PR submission: no token in credentials")
-		case spec.pr != nil:
-			submitErr = s.submitFollowup(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg,
-				spec.pr, cloneURL, cloneDir, creds, userPrompt, worklog.snapshot(),
-				tracker.Snapshot(), costLimits.ReportCostOnPR, log)
-		default:
-			submitErr = s.submitChanges(ctx, sessionID, sess, forgeImpl, agentResult, proj, forgeCfg,
-				branch, cloneURL, cloneDir, creds, userPrompt, worklog.snapshot(),
-				tracker.Snapshot(), costLimits.ReportCostOnPR, log)
-		}
-	}
+	submitErr := s.deliver(ctx, deliveryRequest{
+		mode:        mode,
+		sessionID:   sessionID,
+		sandbox:     sess,
+		forgeImpl:   forgeImpl,
+		forgeCfg:    forgeCfg,
+		proj:        proj,
+		agentResult: agentResult,
+		baseBranch:  branch,
+		cloneURL:    cloneURL,
+		cloneDir:    cloneDir,
+		creds:       creds,
+		pr:          spec.pr,
+		userPrompt:  userPrompt,
+		worklog:     worklog.snapshot(),
+
+		valResult:        valResult,
+		validationFailed: requiredFailed,
+		cost:             tracker.Snapshot(),
+		reportCost:       costLimits.ReportCostOnPR,
+		log:              log,
+	})
 
 	// Final cost snapshot. The agent has already populated the session with
 	// its partial snapshot above; this one captures any tail work, and the
@@ -1484,6 +1570,12 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	if submitErr != nil {
 		log.Error("failed to submit changes", "error", submitErr)
 		s.failRun(termCtx, rootCtx, sessionID, submitErr)
+		return
+	}
+
+	// The verdict has been delivered, so the run can now report what it found.
+	if requiredFailed {
+		s.sessionMgr.Fail(termCtx, sessionID, errors.New("required validation steps failed"))
 		return
 	}
 
@@ -1890,6 +1982,31 @@ func (s *Service) GetSession(ctx context.Context, req *connect.Request[v1.GetSes
 	}
 
 	return connect.NewResponse(sessionToProto(sess)), nil
+}
+
+// GetSessionResult returns what a run produced in writing. It is how a mode
+// that delivers nowhere is read: the answer a research run wrote, or the review
+// a read-only audit produced, without replaying the whole event log to find the
+// final assistant message.
+func (s *Service) GetSessionResult(ctx context.Context, req *connect.Request[v1.GetSessionResultRequest]) (*connect.Response[v1.GetSessionResultResponse], error) {
+	if s.sessionMgr == nil {
+		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+	}
+
+	sess, err := s.sessionMgr.Get(ctx, req.Msg.SessionId)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, err)
+	}
+
+	if err := s.authorizeProject(ctx, sess.ProjectName, req.Spec().Procedure); err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&v1.GetSessionResultResponse{
+		SessionId: sess.ID,
+		State:     string(sess.State),
+		Result:    sess.Result,
+	}), nil
 }
 
 // sessionToProto renders a session as the wire message shared by GetSession

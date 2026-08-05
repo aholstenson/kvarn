@@ -4,20 +4,30 @@ import (
 	"fmt"
 	"strings"
 
-	llms "github.com/aholstenson/llms-go"
-
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 )
 
-// Mode is the high-level operating mode of a coding-agent run. New modes are
-// declared by populating the role + body strings; the SystemPrompt method
-// stitches the shared frame around them.
+// Mode is the high-level operating mode of a coding-agent run: what the agent
+// may do to the repository, whether validation runs, where the result goes,
+// where the run may start, and what context it opens with. See modespec.go for
+// the axes; the SystemPrompt method stitches the shared frame around the
+// mode-specific prompt body.
+//
+// Modes are built either as the package-level built-ins below or by NewMode
+// from a Spec, which is what lets a repository or a caller declare one.
 type Mode struct {
-	Name   string
-	Writes bool
-	// Tools optionally selects which tools the parent agent gets. When nil,
-	// the full toolkit (toolkit.Tools()) is used.
-	Tools func(toolkit *CodingToolkit) []llms.ToolDef
+	Name string
+	// Description is a one-line summary for `kvarn modes list`.
+	Description string
+	// BaseName is the built-in this mode ultimately derives from. It equals
+	// Name for a built-in.
+	BaseName string
+
+	Workspace  Workspace
+	Validation ValidationPolicy
+	Deliver    []Sink
+	Start      StartPoint
+	Context    []ContextBlock
 
 	// role is the noun phrase used in the opening sentence
 	// ("You are <role> running in a sandboxed VM.").
@@ -25,13 +35,49 @@ type Mode struct {
 	// body is the mode-specific section that follows the environment block
 	// and precedes the standard project/skills/sub-agents trailer.
 	body string
+	// taskHeading titles the section a context pack ends with — the thing the
+	// requester actually asked for. It is an internal wording detail rather
+	// than an axis: a mode that revises a pull request calls it feedback, and
+	// everything else calls it a task.
+	taskHeading string
 }
 
 // ModeName satisfies the agent.Mode interface.
 func (m *Mode) ModeName() string { return m.Name }
 
-// WritesChanges satisfies the agent.Mode interface.
-func (m *Mode) WritesChanges() bool { return m.Writes }
+// WritesChanges reports whether the mode delivers changes as commits, and so
+// satisfies the agent.Mode interface. It is derived rather than declared: a
+// mode writes changes exactly when one of its sinks produces a commit.
+func (m *Mode) WritesChanges() bool {
+	for _, sink := range m.Deliver {
+		if sink == SinkFollowUpCommit || sink == SinkNewPullRequest {
+			return true
+		}
+	}
+	return false
+}
+
+// ReadOnly reports whether the agent runs without file-editing tools.
+func (m *Mode) ReadOnly() bool { return m.Workspace == WorkspaceReadOnly }
+
+// DeliversTo reports whether sink is one of the mode's delivery targets.
+func (m *Mode) DeliversTo(sink Sink) bool {
+	for _, s := range m.Deliver {
+		if s == sink {
+			return true
+		}
+	}
+	return false
+}
+
+// TaskHeading is the markdown heading a context pack puts the requester's own
+// message under.
+func (m *Mode) TaskHeading() string {
+	if m.taskHeading == "" {
+		return "Task"
+	}
+	return m.taskHeading
+}
 
 // SystemPrompt renders the full system prompt for a run: shared role intro +
 // environment block + mode-specific body + project/skills/sub-agents trailer.
@@ -52,85 +98,99 @@ func (m *Mode) SystemPrompt(projectName, repoURL, branch string, rc *repocontext
 	return sb.String()
 }
 
+// builtin declares one of the modes kvarn ships with. Built-ins are their own
+// base, so BaseName is the mode's own name and every axis is stated outright
+// rather than inherited.
+func builtin(m *Mode) *Mode {
+	m.BaseName = m.Name
+	if err := m.validate(); err != nil {
+		panic(fmt.Sprintf("built-in mode %q is invalid: %v", m.Name, err))
+	}
+	return m
+}
+
 // ModeAuto is the default mode. The agent inspects the task message and
 // chooses between an implement workflow (plan-then-code) and a fix workflow
 // (replication-test-first).
-var ModeAuto = &Mode{
-	Name:   "auto",
-	Writes: true,
-	role:   "an autonomous coding agent",
-	body:   autoBody,
-}
+var ModeAuto = builtin(&Mode{
+	Name:        "auto",
+	Description: "Inspect the task and pick between implementing and fixing; open a pull request.",
+	Workspace:   WorkspaceReadWrite,
+	Validation:  ValidationRun,
+	Deliver:     []Sink{SinkNewPullRequest},
+	Start:       StartAny,
+	role:        "an autonomous coding agent",
+	body:        autoBody,
+})
 
 // ModeImplement is for new features, refactors, and other changes where there
 // is no concrete bug to reproduce. The agent plans first via the plan
 // sub-agent, then implements and verifies.
-var ModeImplement = &Mode{
-	Name:   "implement",
-	Writes: true,
-	role:   "an autonomous coding agent",
-	body:   implementBody,
-}
+var ModeImplement = builtin(&Mode{
+	Name:        "implement",
+	Description: "Plan, then implement a feature or refactor; open a pull request.",
+	Workspace:   WorkspaceReadWrite,
+	Validation:  ValidationRun,
+	Deliver:     []Sink{SinkNewPullRequest},
+	Start:       StartAny,
+	role:        "an autonomous coding agent",
+	body:        implementBody,
+})
 
 // ModeFix is for bug fixes. The agent reproduces the bug with a failing test,
 // verifies it's red, implements the fix, and verifies it's green.
-var ModeFix = &Mode{
-	Name:   "fix",
-	Writes: true,
-	role:   "an autonomous coding agent specializing in bug fixes",
-	body:   fixBody,
-}
+var ModeFix = builtin(&Mode{
+	Name:        "fix",
+	Description: "Reproduce a bug with a failing test, fix it, verify; open a pull request.",
+	Workspace:   WorkspaceReadWrite,
+	Validation:  ValidationRun,
+	Deliver:     []Sink{SinkNewPullRequest},
+	Start:       StartAny,
+	role:        "an autonomous coding agent specializing in bug fixes",
+	body:        fixBody,
+})
 
 // ModeFeedback continues work on an existing pull request: the repository is
 // checked out at the PR's head branch and the task message carries the
 // feedback to address. Changes land as a follow-up commit on that branch.
-var ModeFeedback = &Mode{
-	Name:   "feedback",
-	Writes: true,
-	role:   "an autonomous coding agent addressing review feedback",
-	body:   feedbackBody,
-}
+var ModeFeedback = builtin(&Mode{
+	Name:        "feedback",
+	Description: "Revise an open pull request against review feedback; push a follow-up commit.",
+	Workspace:   WorkspaceReadWrite,
+	Validation:  ValidationRun,
+	Deliver:     []Sink{SinkFollowUpCommit},
+	Start:       StartPullRequest,
+	Context:     []ContextBlock{ContextOriginalTask, ContextPRMetadata, ContextPRDiff},
+	role:        "an autonomous coding agent addressing review feedback",
+	body:        feedbackBody,
+	taskHeading: "Feedback to address",
+})
 
 // ModeReview is a read-only audit of the working tree / branch against the
 // task message. No edits, no PR.
-var ModeReview = &Mode{
-	Name:   "review",
-	Writes: false,
-	role:   "a read-only code review agent",
-	body:   reviewBody,
-	Tools:  (*CodingToolkit).ReadOnlyTools,
-}
+var ModeReview = builtin(&Mode{
+	Name:        "review",
+	Description: "Audit a branch or area of the codebase; write a review, change nothing.",
+	Workspace:   WorkspaceReadOnly,
+	Validation:  ValidationSkip,
+	Deliver:     []Sink{SinkNone},
+	Start:       StartAny,
+	role:        "a read-only code review agent",
+	body:        reviewBody,
+})
 
 // ModeResearch is a read-only investigation that answers an open-ended
 // question about the codebase. No edits, no PR.
-var ModeResearch = &Mode{
-	Name:   "research",
-	Writes: false,
-	role:   "a read-only research agent",
-	body:   researchBody,
-	Tools:  (*CodingToolkit).ReadOnlyTools,
-}
-
-// ModeByName resolves a string from the wire/CLI into a *Mode. Empty or
-// "auto" returns ModeAuto; unknown names return an error.
-func ModeByName(name string) (*Mode, error) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "", "auto":
-		return ModeAuto, nil
-	case "implement":
-		return ModeImplement, nil
-	case "fix":
-		return ModeFix, nil
-	case "feedback":
-		return ModeFeedback, nil
-	case "review":
-		return ModeReview, nil
-	case "research":
-		return ModeResearch, nil
-	default:
-		return nil, fmt.Errorf("unknown mode %q", name)
-	}
-}
+var ModeResearch = builtin(&Mode{
+	Name:        "research",
+	Description: "Answer an open-ended question about the codebase; change nothing.",
+	Workspace:   WorkspaceReadOnly,
+	Validation:  ValidationSkip,
+	Deliver:     []Sink{SinkNone},
+	Start:       StartAny,
+	role:        "a read-only research agent",
+	body:        researchBody,
+})
 
 // appendContextBlocks appends the shared "Project Instructions", "Available
 // Skills", and "Available Sub-Agents" sections to sb, when populated. Every

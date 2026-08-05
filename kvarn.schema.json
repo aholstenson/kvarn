@@ -156,6 +156,12 @@
           "items": { "$ref": "#/$defs/step" }
         }
       }
+    },
+    "modes": {
+      "description": "Agent modes this repository defines, keyed by the name a job selects with --mode. Each sits beside the built-in modes (auto, implement, fix, feedback, review, research) rather than replacing one: it inherits from a mode via `extends` and overrides only the axes it names.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64 },
+      "additionalProperties": { "$ref": "#/$defs/mode" }
     }
   },
   "$defs": {
@@ -228,6 +234,61 @@
         "bucket": {
           "description": "Cache bucket name used to group related entries.",
           "type": "string"
+        }
+      }
+    },
+    "mode": {
+      "description": "One mode definition. Every field is optional; an unset axis takes its value from the mode named by `extends`, or from that axis's own default.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "description": "One-line summary shown by `kvarn modes list`.",
+          "type": "string"
+        },
+        "extends": {
+          "description": "Mode this one inherits from: a built-in, or another mode defined in this file. Defaults to `auto`.",
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+        },
+        "prompt": {
+          "description": "Instructions appended to the inherited prompt. It adds to the inherited guidance rather than replacing it.",
+          "type": "string"
+        },
+        "workspace": {
+          "description": "What the agent may do to the checked-out repository. 'read-only' withholds the file-editing tools; 'read-write' gives the full toolkit.",
+          "type": "string",
+          "enum": ["read-only", "read-write"]
+        },
+        "validation": {
+          "description": "Whether the project's validation steps run after the agent. 'skip' never runs them; 'run' runs them and, in a read-write mode, feeds a failing required step back to the agent to fix; 'require' fails the job on the first failing required step, with no retry. Defaults to 'run' for a read-write mode and 'skip' otherwise.",
+          "type": "string",
+          "enum": ["skip", "run", "require"]
+        },
+        "deliver": {
+          "description": "Where the run's output goes. Omit to inherit the base mode's sinks; write ['none'] to deliver nothing. 'none' must stand alone; 'follow-up-commit' and 'new-pull-request' are alternatives, and both need a read-write workspace.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["none", "pr-comment", "follow-up-commit", "new-pull-request"]
+          }
+        },
+        "start": {
+          "description": "Where a run in this mode may begin. Inherited from the mode named by `extends`, which is 'any' unless that mode narrows it.",
+          "type": "string",
+          "enum": ["branch", "pull-request", "any"]
+        },
+        "context": {
+          "description": "Sections prepended to the agent's task message. Omit to inherit the base mode's sections; write ['none'] to assemble none. A section whose content is unavailable is left out.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["none", "original-task", "pr-metadata", "pr-diff"]
+          }
         }
       }
     }

@@ -21,3 +21,36 @@ validation:
     - name: Run all tests
       run: task test
       timeout: 10m
+
+modes:
+  review-pr:
+    description: Review an open pull request and post the review as a comment.
+    extends: review
+    start: pull-request
+    deliver:
+      - pr-comment
+    context:
+      - pr-metadata
+      - pr-diff
+    prompt: |
+      You are reviewing a pull request someone opened against this repository.
+      The working tree is checked out at its head branch and the diff is above.
+
+      Hold the change to CLAUDE.md: Ginkgo v2 + Gomega for every test, comments
+      that explain why rather than what changed, and no reference to how the
+      code used to look.
+
+  test-pr:
+    description: Run the project's validation steps against an open pull request.
+    extends: review
+    start: pull-request
+    validation: require
+    deliver:
+      - pr-comment
+    context:
+      - pr-metadata
+    prompt: |
+      Your job is to report whether this pull request builds and passes its
+      tests, not to change it. The project's validation steps run after you
+      finish and decide the job's outcome, so use your turn to reproduce and
+      explain any failure you can already see rather than to review style.

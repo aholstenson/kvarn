@@ -85,6 +85,39 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 			Expect(got.CreatedAt.Equal(base)).To(BeTrue())
 		})
 
+		It("round-trips the inline mode definition and the run's result", func() {
+			s := makeSession("s1", "proj", session.StatePending, base)
+			s.Mode = "audit"
+			s.ModeSpecJSON = `{"name":"audit","extends":"review","deliver":["pr-comment"]}`
+			Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+			got, err := store.GetSession(ctx, "s1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.Mode).To(Equal("audit"))
+			Expect(got.ModeSpecJSON).To(Equal(s.ModeSpecJSON))
+			Expect(got.Result).To(BeEmpty(), "no result until the agent produces one")
+
+			// The definition is set once at submission, so an ordinary update
+			// leaves it alone while the result it writes lands.
+			got.Result = "Approve with comments."
+			got.State = session.StateCompleted
+			Expect(store.UpdateSession(ctx, got)).To(Succeed())
+
+			reread, err := store.GetSession(ctx, "s1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reread.Result).To(Equal("Approve with comments."))
+			Expect(reread.ModeSpecJSON).To(Equal(s.ModeSpecJSON))
+		})
+
+		It("leaves the mode definition empty for a session that named a mode", func() {
+			s := makeSession("s1", "proj", session.StatePending, base)
+			Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+			got, err := store.GetSession(ctx, "s1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.ModeSpecJSON).To(BeEmpty())
+		})
+
 		Describe("idempotency keys", func() {
 			It("round-trips the key and finds the session by it", func() {
 				s := makeSession("s1", "proj", session.StatePending, base)

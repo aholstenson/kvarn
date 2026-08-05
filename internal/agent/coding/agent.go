@@ -95,8 +95,8 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 		llms.WithMaxSteps(maxSteps),
 		llms.WithMaxOutputTokens(maxOut),
 	}
-	if mode.Tools != nil {
-		opts = append(opts, llms.WithTools(mode.Tools(toolkit)...))
+	if mode.ReadOnly() {
+		opts = append(opts, llms.WithTools(toolkit.ReadOnlyTools()...))
 	} else {
 		opts = append(opts, llms.WithToolkits(toolkit))
 	}
@@ -338,4 +338,3 @@ func (c *codingConversation) handleStreamingEvent(ctx context.Context, event llm
 	}
 	return nil
 }
-

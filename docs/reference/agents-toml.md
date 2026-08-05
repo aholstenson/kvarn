@@ -71,7 +71,9 @@ max_validation_retries = 0
 | `max_validation_retries` | int | `3` | Additional agent passes after a required validation step fails. |
 
 `[defaults.jobs.<mode>]` narrows `max_cost_usd` and `max_validation_retries` to
-one agent mode (`auto`, `implement`, `fix`, `feedback`, `review`, `research`).
+one agent mode: a built-in (`auto`, `implement`, `fix`, `feedback`, `review`,
+`research`) or one a repository defines under `modes:` in its
+[`kvarn.yml`](kvarn-yml.md#modes).
 
 ## Resolution order
 

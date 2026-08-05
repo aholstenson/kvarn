@@ -67,10 +67,19 @@ func (s *Service) RetryJob(ctx context.Context, req *connect.Request[v1.RetryJob
 	// No idempotency key is carried over: a retry is an explicit request for a
 	// second run of a job that already finished, which is the opposite of what
 	// the original key claimed.
+	// The inline definition travels with the retry too: a job whose mode was
+	// defined by the request cannot be resubmitted by name alone, because that
+	// name means nothing without it.
+	modeSpec, err := decodeModeSpec(sess.ModeSpecJSON)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+
 	p := startJobParams{
 		project:   sess.ProjectName,
 		prompt:    prompt,
 		mode:      sess.Mode,
+		modeSpec:  modeSpec,
 		procedure: req.Spec().Procedure,
 	}
 	if sess.Continuation {

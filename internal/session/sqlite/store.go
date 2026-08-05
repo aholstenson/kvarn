@@ -92,11 +92,13 @@ func (s *Store) CreateSession(ctx context.Context, sess *session.Session) error 
 	}
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO sessions
-		   (id, project_name, prompt, mode, state, message, error, pull_request_url,
-		    pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at,
+		   (id, project_name, prompt, mode, mode_spec_json, result_text, state, message, error,
+		    pull_request_url, pr_ref, head_branch, base_branch, parent_session_id, cost_json,
+		    created_at, updated_at,
 		    key_id, priority, attempts, queued_at, idempotency_key, continuation)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		row.ID, row.ProjectName, row.Prompt, row.Mode, row.State, row.Message,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		row.ID, row.ProjectName, row.Prompt, row.Mode, row.ModeSpecJSON, row.Result,
+		row.State, row.Message,
 		row.Error, row.PullRequestURL, row.PRRef, row.HeadBranch, row.BaseBranch,
 		row.ParentSessionID, row.CostJSON, row.CreatedAt, row.UpdatedAt,
 		row.KeyID, row.Priority, row.Attempts, row.QueuedAt, row.IdempotencyKey,
@@ -129,13 +131,15 @@ func (s *Store) FindByIdempotencyKey(ctx context.Context, project, key string) (
 	return sess, nil
 }
 
-const sessionColumns = `id, project_name, prompt, mode, state, message, error, pull_request_url, ` +
+const sessionColumns = `id, project_name, prompt, mode, mode_spec_json, result_text, state, ` +
+	`message, error, pull_request_url, ` +
 	`pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at, ` +
 	`key_id, priority, attempts, queued_at, idempotency_key, continuation`
 
 func scanSession(scan func(dest ...any) error) (*session.Session, error) {
 	var r session.Row
-	if err := scan(&r.ID, &r.ProjectName, &r.Prompt, &r.Mode, &r.State, &r.Message,
+	if err := scan(&r.ID, &r.ProjectName, &r.Prompt, &r.Mode, &r.ModeSpecJSON, &r.Result,
+		&r.State, &r.Message,
 		&r.Error, &r.PullRequestURL, &r.PRRef, &r.HeadBranch, &r.BaseBranch,
 		&r.ParentSessionID, &r.CostJSON, &r.CreatedAt, &r.UpdatedAt,
 		&r.KeyID, &r.Priority, &r.Attempts, &r.QueuedAt, &r.IdempotencyKey,
@@ -170,10 +174,11 @@ func (s *Store) UpdateSession(ctx context.Context, sess *session.Session) error 
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE sessions
 		    SET state = ?, message = ?, error = ?, pull_request_url = ?,
-		        pr_ref = ?, head_branch = ?, base_branch = ?, cost_json = ?, updated_at = ?
+		        pr_ref = ?, head_branch = ?, base_branch = ?, cost_json = ?,
+		        result_text = ?, updated_at = ?
 		  WHERE id = ?`,
 		row.State, row.Message, row.Error, row.PullRequestURL, row.PRRef,
-		row.HeadBranch, row.BaseBranch, row.CostJSON, row.UpdatedAt, row.ID,
+		row.HeadBranch, row.BaseBranch, row.CostJSON, row.Result, row.UpdatedAt, row.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update session: %w", err)
