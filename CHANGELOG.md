@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.3.0](https://github.com/aholstenson/kvarn/compare/v0.2.0...v0.3.0) (2026-08-04)
+
+
+### Features
+
+* Ability to store LLM credentials in TOML config ([1db80fd](https://github.com/aholstenson/kvarn/commit/1db80fd1ef967139c0e6e1efa23aafc17bb3d32e))
+* Add ability to control clone depth ([46d304f](https://github.com/aholstenson/kvarn/commit/46d304f77ba64918f7652702389c551f9a42f69c))
+* Add built-in hostkeys for Git cloning ([8b2b1a7](https://github.com/aholstenson/kvarn/commit/8b2b1a7c2a3266cbc99b0ae4fe5c49175f7cb43b))
+* Add cache for container images ([b80c25a](https://github.com/aholstenson/kvarn/commit/b80c25a3b6711305d7b47b9600a4a5fa5babd10a))
+* Add improved job control via RPC and CLI ([0a96a7f](https://github.com/aholstenson/kvarn/commit/0a96a7f8177db06fae69b1cc65c08eea8beeb58c))
+* Add local host-control socket and admin capabilities for keys ([e263ac0](https://github.com/aholstenson/kvarn/commit/e263ac0927673f2368c577b878211e15de28edea))
+* Add persistent storage for sessions ([b3d7fea](https://github.com/aholstenson/kvarn/commit/b3d7fea45b3d18558ea234fbfeb5409e19e51643))
+* Backfill past jobs that don't fit, bounded by aging ([2150d58](https://github.com/aholstenson/kvarn/commit/2150d58627e324197eb1a4066a2dc304e8dbea01))
+* Boot VMs from a qcow2 overlay instead of copying the base image ([dbec9cb](https://github.com/aholstenson/kvarn/commit/dbec9cb940e23bd8adb3b5a88dcf140fed46462a))
+* Clone full Git repositories for faster jobs ([3e545a2](https://github.com/aholstenson/kvarn/commit/3e545a2bb86ef438b62e309c4e4406e2596ed42e))
+* Fix some CLI flags to make them more logical ([d8e8d6b](https://github.com/aholstenson/kvarn/commit/d8e8d6beb0d465bada14194c7207ee454fadc406))
+* Idempotency support on job starts ([a8e4ecb](https://github.com/aholstenson/kvarn/commit/a8e4ecba34663de0970a215b0b182083e150fcfa))
+* Improve prompt to encourage verification and thinking ([1a3c602](https://github.com/aholstenson/kvarn/commit/1a3c602b4ddf120b3dc34466a4e22dc588c1e228))
+* Improve secret injection supporting bearer, basic and OAuth schemes ([9fcaa18](https://github.com/aholstenson/kvarn/commit/9fcaa183147738e459ec106fd767cc5eda4c5f0e))
+* Improve VM sweeping and cleanup ([6a50c28](https://github.com/aholstenson/kvarn/commit/6a50c28ecef356e297d1b7cb85710085a38283fc))
+* Install Nix 2.34.7 in the image ([b4992c5](https://github.com/aholstenson/kvarn/commit/b4992c57d5b743a2f2728c0db1c9f47780bd2851))
+* Job queue can now be drained/resumed ([87629e2](https://github.com/aholstenson/kvarn/commit/87629e29c7baf7ba4509aa802a045c1a7942a2f3))
+* Make plan optional in implement mode ([7d19485](https://github.com/aholstenson/kvarn/commit/7d19485d2df98b69fc935a7b0a4a2561f3cf0b36))
+* Move startjob and cancel into jobs subcommand ([3b8e70f](https://github.com/aholstenson/kvarn/commit/3b8e70faa5a27ba6f9da189fdf1e387a11ec12fb))
+* Order the queue by fair share and aging priority ([be30da8](https://github.com/aholstenson/kvarn/commit/be30da82fbc14c064689029ea4a8622a509392bd))
+* Submitted jobs are now durable and survive restarts ([cdc7c31](https://github.com/aholstenson/kvarn/commit/cdc7c31c6fb4e33f63e3f435e9c23f9dad94bc04))
+* Support bounding the job queue ([05dc7ed](https://github.com/aholstenson/kvarn/commit/05dc7ed946afbe21eff143bdbb7988be55a2fc5e))
+* Support cancelling a running job ([fc0b5d3](https://github.com/aholstenson/kvarn/commit/fc0b5d3b3e6ece181a51a32f30ab9346e44189e0))
+* Support capping concurrent jobs per project and per API key ([45e6fc8](https://github.com/aholstenson/kvarn/commit/45e6fc86d7e66102252213e991eaf7ac0cb3735b))
+* Support for feedback runs on existing PRs ([d7d8110](https://github.com/aholstenson/kvarn/commit/d7d8110f75cf509ed5fb3ecbe593c4eb947eb693))
+* Support overcommiting thin VM disks ([01fe5b0](https://github.com/aholstenson/kvarn/commit/01fe5b0574bcc6bf5eebda08b3de4e31e73fab20))
+* Support relative cache paths ([d172431](https://github.com/aholstenson/kvarn/commit/d1724315f120e5e2ea479862061a4337b0890136))
+
+
+### Bug Fixes
+
+* Don't silently drop errors from Github ([9583eb1](https://github.com/aholstenson/kvarn/commit/9583eb1a35f491a3dc87b58340fbc053476817e8))
+* Fail sessions when push or PR creation fails ([ddcf4b7](https://github.com/aholstenson/kvarn/commit/ddcf4b73841c6aa642f84d0aa99043831a6533e8))
+* Gracefully handle panics during sandbox close ([db1a77f](https://github.com/aholstenson/kvarn/commit/db1a77fccdc58b200cc9a65b93b1f33ad948cdba))
+* macOS hosts can now read the memory size properly ([7b9c316](https://github.com/aholstenson/kvarn/commit/7b9c316b801aa0a12149c2f68d634bfbf32b0730))
+* Preserve file modes and symlinks when extracting VM changes ([6c1adca](https://github.com/aholstenson/kvarn/commit/6c1adcab90ff210a10f9ff6426144bd4ef2973c2))
+* Re-resolve forge credentials at push time ([458b2db](https://github.com/aholstenson/kvarn/commit/458b2dbb45ee4f1977d4940253f05cf71f900379))
+* Show full line-by-line output in run and test commands ([abed35a](https://github.com/aholstenson/kvarn/commit/abed35aec0ca71fe548b4d957a78a4a3402e3218))
+* Write terminal session state on an uncancellable context ([54c0b57](https://github.com/aholstenson/kvarn/commit/54c0b57bcf98df442aa57fe9a65e61705430bf7c))
+
 ## [0.2.0](https://github.com/aholstenson/kvarn/compare/v0.1.0...v0.2.0) (2026-05-31)
 
 
