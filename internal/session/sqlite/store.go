@@ -9,8 +9,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -95,14 +97,14 @@ func (s *Store) CreateSession(ctx context.Context, sess *session.Session) error 
 		   (id, project_name, prompt, mode, mode_spec_json, result_text, state, message, error,
 		    pull_request_url, pr_ref, head_branch, base_branch, parent_session_id, cost_json,
 		    created_at, updated_at,
-		    key_id, priority, attempts, queued_at, idempotency_key, continuation)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    key_id, priority, attempts, queued_at, idempotency_key, continuation, metadata_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.ID, row.ProjectName, row.Prompt, row.Mode, row.ModeSpecJSON, row.Result,
 		row.State, row.Message,
 		row.Error, row.PullRequestURL, row.PRRef, row.HeadBranch, row.BaseBranch,
 		row.ParentSessionID, row.CostJSON, row.CreatedAt, row.UpdatedAt,
 		row.KeyID, row.Priority, row.Attempts, row.QueuedAt, row.IdempotencyKey,
-		row.Continuation,
+		row.Continuation, row.MetadataJSON,
 	)
 	if isUniqueViolation(err) {
 		return session.ErrIdempotencyConflict
@@ -134,7 +136,7 @@ func (s *Store) FindByIdempotencyKey(ctx context.Context, project, key string) (
 const sessionColumns = `id, project_name, prompt, mode, mode_spec_json, result_text, state, ` +
 	`message, error, pull_request_url, ` +
 	`pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at, ` +
-	`key_id, priority, attempts, queued_at, idempotency_key, continuation`
+	`key_id, priority, attempts, queued_at, idempotency_key, continuation, metadata_json`
 
 func scanSession(scan func(dest ...any) error) (*session.Session, error) {
 	var r session.Row
@@ -143,7 +145,7 @@ func scanSession(scan func(dest ...any) error) (*session.Session, error) {
 		&r.Error, &r.PullRequestURL, &r.PRRef, &r.HeadBranch, &r.BaseBranch,
 		&r.ParentSessionID, &r.CostJSON, &r.CreatedAt, &r.UpdatedAt,
 		&r.KeyID, &r.Priority, &r.Attempts, &r.QueuedAt, &r.IdempotencyKey,
-		&r.Continuation); err != nil {
+		&r.Continuation, &r.MetadataJSON); err != nil {
 		return nil, err
 	}
 	return session.RowToSession(r)
@@ -215,6 +217,16 @@ func (s *Store) ListSessions(ctx context.Context, filter session.SessionFilter) 
 	if !filter.CreatedAfter.IsZero() {
 		where = append(where, "created_at > ?")
 		args = append(args, session.ToMicros(filter.CreatedAfter))
+	}
+	// One EXISTS per required pair, so they AND without needing a join. json_each
+	// takes both the key and the value as bound parameters, which keeps caller
+	// data out of the JSON path syntax a json_extract('$.'||key) form would have
+	// to build by hand. Keys are sorted so the same filter produces the same
+	// query text, and with it the same prepared statement.
+	for _, key := range slices.Sorted(maps.Keys(filter.Metadata)) {
+		where = append(where,
+			`EXISTS (SELECT 1 FROM json_each(sessions.metadata_json) WHERE key = ? AND value = ?)`)
+		args = append(args, key, filter.Metadata[key])
 	}
 	if filter.ActiveOnly {
 		placeholders, stateArgs := terminalStates()

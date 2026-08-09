@@ -300,6 +300,105 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 			Expect(idsOf(since)).To(Equal([]string{"failed"}))
 		})
 
+		Describe("metadata", func() {
+			It("round-trips the annotations a submission carried", func() {
+				s := makeSession("s1", "proj", session.StateRunning, base)
+				s.Metadata = map[string]string{
+					"source":     "slack",
+					"channel":    "C123/ops",
+					"request.id": "req-7",
+					"empty":      "",
+				}
+				Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+				got, err := store.GetSession(ctx, "s1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got.Metadata).To(Equal(s.Metadata))
+			})
+
+			It("reads back as nil for a session that carried none", func() {
+				Expect(store.CreateSession(ctx, makeSession("s1", "proj", session.StateRunning, base))).To(Succeed())
+
+				got, err := store.GetSession(ctx, "s1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got.Metadata).To(BeNil())
+			})
+
+			It("survives a state update, which never rewrites it", func() {
+				s := makeSession("s1", "proj", session.StatePending, base)
+				s.Metadata = map[string]string{"source": "slack"}
+				Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+				// A caller holding a stale copy cannot blank the record by
+				// updating something else on it.
+				s.Metadata = nil
+				s.State = session.StateCompleted
+				Expect(store.UpdateSession(ctx, s)).To(Succeed())
+
+				got, err := store.GetSession(ctx, "s1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got.Metadata).To(Equal(map[string]string{"source": "slack"}))
+			})
+
+			It("filters on every pair, matching exactly", func() {
+				slack := makeSession("slack", "proj", session.StateRunning, base.Add(1*time.Minute))
+				slack.Metadata = map[string]string{"source": "slack", "team": "ops"}
+				jira := makeSession("jira", "proj", session.StateRunning, base.Add(2*time.Minute))
+				jira.Metadata = map[string]string{"source": "jira", "team": "ops"}
+				bare := makeSession("bare", "proj", session.StateRunning, base.Add(3*time.Minute))
+				for _, s := range []*session.Session{slack, jira, bare} {
+					Expect(store.CreateSession(ctx, s)).To(Succeed())
+				}
+
+				one, err := store.ListSessions(ctx, session.SessionFilter{
+					Metadata: map[string]string{"team": "ops"},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(idsOf(one)).To(Equal([]string{"jira", "slack"})) // newest first
+
+				// Pairs are ANDed, not ORed.
+				both, err := store.ListSessions(ctx, session.SessionFilter{
+					Metadata: map[string]string{"team": "ops", "source": "slack"},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(idsOf(both)).To(Equal([]string{"slack"}))
+
+				// A value is matched whole; no prefix or substring semantics.
+				partial, err := store.ListSessions(ctx, session.SessionFilter{
+					Metadata: map[string]string{"source": "sla"},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(partial).To(BeEmpty())
+
+				// An empty filter constrains nothing.
+				all, err := store.ListSessions(ctx, session.SessionFilter{
+					Metadata: map[string]string{},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(all).To(HaveLen(3))
+			})
+
+			It("combines with the other filters rather than replacing them", func() {
+				running := makeSession("running", "proj", session.StateRunning, base.Add(1*time.Minute))
+				running.Metadata = map[string]string{"source": "slack"}
+				done := makeSession("done", "proj", session.StateCompleted, base.Add(2*time.Minute))
+				done.Metadata = map[string]string{"source": "slack"}
+				other := makeSession("other", "elsewhere", session.StateRunning, base.Add(3*time.Minute))
+				other.Metadata = map[string]string{"source": "slack"}
+				for _, s := range []*session.Session{running, done, other} {
+					Expect(store.CreateSession(ctx, s)).To(Succeed())
+				}
+
+				got, err := store.ListSessions(ctx, session.SessionFilter{
+					Project:    "proj",
+					ActiveOnly: true,
+					Metadata:   map[string]string{"source": "slack"},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(idsOf(got)).To(Equal([]string{"running"}))
+			})
+		})
+
 		It("returns not-found for an unknown session", func() {
 			_, err := store.GetSession(ctx, "missing")
 			Expect(err).To(MatchError(ContainSubstring("not found")))

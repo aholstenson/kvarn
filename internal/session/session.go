@@ -198,6 +198,14 @@ type Session struct {
 	// a retried StartJob return this session instead of starting a second run.
 	// Empty when the caller supplied no key.
 	IdempotencyKey string
+	// Metadata is the caller's own annotations on the submission — which ticket,
+	// which chat message, which upstream run asked for this. It is opaque here
+	// and everywhere below the request boundary: nothing reads a key to decide
+	// anything, and the only operation over it is exact-match filtering.
+	//
+	// Written at creation and never updated, so it stays a record of what was
+	// asked for. Nil when the submission carried none.
+	Metadata map[string]string
 }
 
 // Event represents something that happened to a session.
@@ -393,6 +401,9 @@ type CreateParams struct {
 	// IdempotencyKey claims the submission for the caller's key; see the field
 	// of the same name on Session. Empty for a submission with no key.
 	IdempotencyKey string
+	// Metadata is the caller's annotations on the submission; see the field of
+	// the same name on Session. Nil for a submission that carried none.
+	Metadata map[string]string
 }
 
 type Manager interface {

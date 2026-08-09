@@ -29,6 +29,8 @@ type StartCmd struct {
 	Watch    bool   `help:"Stream the session until it reaches a terminal state." negatable:""`
 
 	IdempotencyKey string `help:"Key that makes this submission replayable: resending it returns the session the first request created instead of starting a second job." default:""`
+
+	Meta map[string]string `help:"Annotation to record on the job, as key=value (repeatable). Stored with the session and filterable via 'kvarn jobs list --meta'; never seen by the agent." placeholder:"KEY=VALUE"`
 }
 
 func (c *StartCmd) Run() error {
@@ -41,6 +43,7 @@ func (c *StartCmd) Run() error {
 		Mode:    c.Mode,
 
 		IdempotencyKey: c.IdempotencyKey,
+		Metadata:       c.Meta,
 	}
 	if c.ModeSpec != "" {
 		spec, err := loadModeSpec(c.ModeSpec)

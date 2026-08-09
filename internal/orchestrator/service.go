@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -592,6 +594,9 @@ type startJobParams struct {
 	// request carrying it returns the session the first one created. Empty for a
 	// caller that did not ask for the guarantee.
 	idempotencyKey string
+	// metadata is the caller's own annotations on the submission, stored with
+	// the session and never interpreted here. Nil when none were sent.
+	metadata map[string]string
 	// procedure names the RPC on whose behalf the submission is authorized, for
 	// the audit log that records a denial.
 	procedure string
@@ -641,6 +646,9 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			fmt.Errorf("idempotency key is %d bytes; the limit is %d", len(p.idempotencyKey), maxIdempotencyKeyLen))
 	}
+	if err := validateMetadata(p.metadata); err != nil {
+		return nil, invalidArgument(err)
+	}
 
 	// The mode is checked here but not necessarily settled: a project defines
 	// its own modes in its kvarn.yml, which is not readable until the run's
@@ -660,6 +668,16 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 	}
 
 	log := reqid.LoggerFrom(ctx).With("project", p.project, "mode", choice.name)
+	if len(p.metadata) > 0 {
+		// The annotations join the job's log line for the same reason they are
+		// stored: an operator asking which jobs a given upstream request produced
+		// usually asks it of the logs first. Bounded by validateMetadata.
+		attrs := make([]any, 0, len(p.metadata))
+		for _, k := range slices.Sorted(maps.Keys(p.metadata)) {
+			attrs = append(attrs, slog.String(k, p.metadata[k]))
+		}
+		log = log.With(slog.Group("metadata", attrs...))
+	}
 
 	if p.continues() {
 		// The pull request arm's own fast path, before the forge round trips
@@ -748,6 +766,7 @@ func (s *Service) startFresh(
 		KeyID:          callerKeyID(ctx),
 		Priority:       jobPriority(proj, choice.name),
 		IdempotencyKey: p.idempotencyKey,
+		Metadata:       p.metadata,
 	})
 	// Two copies of one retried request can both get past the lookup above; the
 	// store's uniqueness constraint is what decides between them, and the loser
@@ -796,6 +815,12 @@ func (s *Service) findClaimedSession(ctx context.Context, project, key string) (
 // is part of what was submitted: two requests naming the same inline mode but
 // defining it differently are two different jobs, and collapsing them into one
 // would silently drop the second.
+//
+// Metadata is deliberately not compared. It annotates the work rather than
+// describing it, and a caller that regenerates a trace id between two sends of
+// one retried request has still sent that request once. The first submission's
+// annotations are the ones kept, and the duplicate flag on the response is what
+// tells the caller its second send changed nothing.
 func sameSubmission(claimed *session.Session, prompt, mode, modeSpecJSON, startFrom, claimedStartFrom string) error {
 	if claimed.Prompt == prompt && claimed.Mode == mode &&
 		claimed.ModeSpecJSON == modeSpecJSON && claimedStartFrom == startFrom {
@@ -814,6 +839,7 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 		mode:           msg.Mode,
 		modeSpec:       modeSpecFromProto(msg.GetModeSpec()),
 		idempotencyKey: msg.IdempotencyKey,
+		metadata:       msg.GetMetadata(),
 		procedure:      req.Spec().Procedure,
 	}
 	// An unset start_from is the project's default branch. A set-but-empty one
@@ -2032,6 +2058,7 @@ func sessionToProto(sess *session.Session) *v1.GetSessionResponse {
 		QueuedAt:        timestamppb.New(sess.QueuedAt),
 		Priority:        int32(sess.Priority),
 		Attempts:        int32(sess.Attempts),
+		Metadata:        sess.Metadata,
 	}
 }
 
@@ -2114,6 +2141,7 @@ func (s *Service) ListSessions(ctx context.Context, req *connect.Request[v1.List
 			States:         states,
 			ActiveOnly:     req.Msg.ActiveOnly,
 			CreatedAfter:   createdAfter,
+			Metadata:       req.Msg.GetMetadata(),
 			Limit:          limit,
 			AfterCreatedAt: cursorTime,
 			AfterID:        cursorID,

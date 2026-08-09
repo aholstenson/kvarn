@@ -70,6 +70,11 @@ func (s *Service) RetryJob(ctx context.Context, req *connect.Request[v1.RetryJob
 	// The inline definition travels with the retry too: a job whose mode was
 	// defined by the request cannot be resubmitted by name alone, because that
 	// name means nothing without it.
+	//
+	// The metadata travels with it as well, and for the opposite reason to the
+	// idempotency key: where the job came from is as true of the second attempt
+	// as of the first, so the caller's record keeping follows its work rather
+	// than stopping at the session that failed.
 	modeSpec, err := decodeModeSpec(sess.ModeSpecJSON)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -80,6 +85,7 @@ func (s *Service) RetryJob(ctx context.Context, req *connect.Request[v1.RetryJob
 		prompt:    prompt,
 		mode:      sess.Mode,
 		modeSpec:  modeSpec,
+		metadata:  sess.Metadata,
 		procedure: req.Spec().Procedure,
 	}
 	if sess.Continuation {

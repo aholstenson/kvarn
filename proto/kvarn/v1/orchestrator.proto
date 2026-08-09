@@ -42,6 +42,21 @@ message StartJobRequest {
   // no `modes:` block of its own. When set together with `mode`, the two names
   // must agree.
   ModeSpec mode_spec = 7;
+
+  // Optional caller-supplied annotations, stored with the session, returned by
+  // every read of it and filterable on ListSessions. Opaque to kvarn: nothing
+  // about how a run behaves depends on them, and the agent never sees them.
+  // They exist so a system submitting jobs can carry its own identifiers —
+  // which ticket, which chat message, which upstream run asked for this — into
+  // kvarn's record of what happened, and find the job again by them later.
+  //
+  // Fixed at submission and never rewritten afterwards, because the record of
+  // what was asked for stops being one as soon as two systems can edit it.
+  //
+  // Not a place for secrets: the pairs are readable by anyone who can read the
+  // session and appear in job listings and orchestrator logs. Keys beginning
+  // "kvarn." are reserved.
+  map<string, string> metadata = 8;
 }
 
 // ModeSpec is a mode definition: the axes that decide what an agent run may do,
@@ -137,6 +152,8 @@ message GetSessionResponse {
   // than asked to open one. pr_ref does not answer this on its own: a fresh
   // job acquires one the moment it opens its pull request.
   bool continuation = 19;
+  // The annotations the submission carried; see StartJobRequest.metadata.
+  map<string, string> metadata = 20;
 }
 
 // GetSessionResultRequest asks for what a run produced in writing.
@@ -215,6 +232,11 @@ message ListSessionsRequest {
   string pr_ref = 7;
   // Only sessions created strictly after this instant. Unset means no bound.
   google.protobuf.Timestamp created_after = 8;
+  // Annotations the session must carry: every pair must be present with the
+  // given value, ANDed with the other filters. This is what makes metadata
+  // record keeping rather than decoration — the system that stamped a job with
+  // its own identifier can find it again by that identifier.
+  map<string, string> metadata = 9;
 }
 
 message ListSessionsResponse {

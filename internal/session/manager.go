@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 
@@ -118,6 +119,7 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*Session, er
 		Priority:        params.Priority,
 		IdempotencyKey:  params.IdempotencyKey,
 		Continuation:    params.Continuation,
+		Metadata:        cloneMetadata(params.Metadata),
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		// A new session enters the backlog at creation, so its queue age starts
@@ -534,5 +536,17 @@ func (m *manager) ListEvents(ctx context.Context, id string, afterSeq int64, lim
 
 func copySession(s *Session) *Session {
 	cp := *s
+	// Metadata is the one reference field on a Session, and a snapshot handed to
+	// a watcher must not alias the map a later read rebuilds.
+	cp.Metadata = cloneMetadata(s.Metadata)
 	return &cp
+}
+
+// cloneMetadata copies an annotation map, returning nil for an empty one so
+// "no metadata" has a single representation everywhere it is compared.
+func cloneMetadata(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	return maps.Clone(m)
 }

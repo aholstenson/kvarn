@@ -66,16 +66,29 @@ type Row struct {
 	QueuedAt        int64 // unix micros UTC
 	IdempotencyKey  string
 	Continuation    bool
+	// MetadataJSON is the caller's annotations as a JSON object, "{}" when there
+	// are none. Stored as one document rather than a side table because nothing
+	// below the request boundary interprets a key: the pairs are written once
+	// and read back whole.
+	MetadataJSON string
 }
 
 // SessionToRow converts a Session into its persisted Row form, marshalling the
-// cost report to JSON.
+// cost report and the metadata to JSON.
 func SessionToRow(s *Session) (Row, error) {
 	costJSON := "{}"
 	if b, err := json.Marshal(s.Cost); err != nil {
 		return Row{}, fmt.Errorf("marshal cost: %w", err)
 	} else {
 		costJSON = string(b)
+	}
+	metadataJSON := "{}"
+	if len(s.Metadata) > 0 {
+		b, err := json.Marshal(s.Metadata)
+		if err != nil {
+			return Row{}, fmt.Errorf("marshal metadata: %w", err)
+		}
+		metadataJSON = string(b)
 	}
 	return Row{
 		ID:              s.ID,
@@ -101,16 +114,23 @@ func SessionToRow(s *Session) (Row, error) {
 		QueuedAt:        ToMicros(s.QueuedAt),
 		IdempotencyKey:  s.IdempotencyKey,
 		Continuation:    s.Continuation,
+		MetadataJSON:    metadataJSON,
 	}, nil
 }
 
 // RowToSession reconstructs a Session from its persisted Row form,
-// unmarshalling the cost report from JSON.
+// unmarshalling the cost report and the metadata from JSON.
 func RowToSession(r Row) (*Session, error) {
 	var report cost.Report
 	if r.CostJSON != "" && r.CostJSON != "{}" {
 		if err := json.Unmarshal([]byte(r.CostJSON), &report); err != nil {
 			return nil, fmt.Errorf("unmarshal cost: %w", err)
+		}
+	}
+	var metadata map[string]string
+	if r.MetadataJSON != "" && r.MetadataJSON != "{}" {
+		if err := json.Unmarshal([]byte(r.MetadataJSON), &metadata); err != nil {
+			return nil, fmt.Errorf("unmarshal metadata: %w", err)
 		}
 	}
 	return &Session{
@@ -137,6 +157,7 @@ func RowToSession(r Row) (*Session, error) {
 		QueuedAt:        FromMicros(r.QueuedAt),
 		IdempotencyKey:  r.IdempotencyKey,
 		Continuation:    r.Continuation,
+		Metadata:        metadata,
 	}, nil
 }
 

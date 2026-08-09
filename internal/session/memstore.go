@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -82,10 +83,26 @@ func (m *memStore) UpdateSession(_ context.Context, s *Session) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.sessions[s.ID]; !ok {
+	stored, ok := m.sessions[s.ID]
+	if !ok {
 		return fmt.Errorf("session %q not found", s.ID)
 	}
-	m.sessions[s.ID] = row
+	// Only a run's mutable fields are written, matching the column list the
+	// SQLite store's UPDATE names. What a submission fixed — its prompt, mode,
+	// metadata, and the queue columns the backlog operations own — is read back
+	// from the stored row, so an ordinary state update along a job's path cannot
+	// rewrite the record of what was asked for.
+	stored.State = row.State
+	stored.Message = row.Message
+	stored.Error = row.Error
+	stored.PullRequestURL = row.PullRequestURL
+	stored.PRRef = row.PRRef
+	stored.HeadBranch = row.HeadBranch
+	stored.BaseBranch = row.BaseBranch
+	stored.CostJSON = row.CostJSON
+	stored.Result = row.Result
+	stored.UpdatedAt = row.UpdatedAt
+	m.sessions[s.ID] = stored
 	return nil
 }
 
@@ -137,6 +154,11 @@ func (m *memStore) ListSessions(_ context.Context, filter SessionFilter) ([]*Ses
 		if createdAfter != 0 && r.CreatedAt <= createdAfter {
 			continue
 		}
+		if match, err := metadataMatches(r.MetadataJSON, filter.Metadata); err != nil {
+			return nil, err
+		} else if !match {
+			continue
+		}
 		if hasCursor {
 			// Strictly after the cursor in DESC order: (created, id) < cursor.
 			if r.CreatedAt > cursorMicros || (r.CreatedAt == cursorMicros && r.ID >= filter.AfterID) {
@@ -153,6 +175,27 @@ func (m *memStore) ListSessions(_ context.Context, filter SessionFilter) ([]*Ses
 		}
 	}
 	return out, nil
+}
+
+// metadataMatches reports whether a row's stored annotations contain every pair
+// in want, matched exactly — the Go statement of the EXISTS predicate the SQLite
+// store builds, so the conformance suite proves one rule rather than two.
+func metadataMatches(metadataJSON string, want map[string]string) (bool, error) {
+	if len(want) == 0 {
+		return true, nil
+	}
+	var have map[string]string
+	if metadataJSON != "" && metadataJSON != "{}" {
+		if err := json.Unmarshal([]byte(metadataJSON), &have); err != nil {
+			return false, fmt.Errorf("unmarshal metadata: %w", err)
+		}
+	}
+	for k, v := range want {
+		if got, ok := have[k]; !ok || got != v {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (m *memStore) AppendEvent(_ context.Context, sessionID, kind string, payload []byte) (PersistedEvent, error) {

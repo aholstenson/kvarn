@@ -35,7 +35,11 @@ type SessionFilter struct {
 	// (created_at DESC, id DESC) and walks backwards, while this is a floor the
 	// whole listing is held above.
 	CreatedAfter time.Time
-	Limit        int // 0 = no limit
+	// Metadata pairs the session must carry, all of them, each matched exactly.
+	// An empty map matches every session; a key present with an empty value
+	// matches only a session that stored that key with an empty value.
+	Metadata map[string]string
+	Limit    int // 0 = no limit
 	// AfterCreatedAt / AfterID form a cursor for keyset pagination, ordered by
 	// (created_at DESC, id DESC). A zero AfterCreatedAt starts from the top.
 	AfterCreatedAt time.Time

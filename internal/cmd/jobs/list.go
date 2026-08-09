@@ -3,7 +3,9 @@ package jobs
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -18,15 +20,16 @@ import (
 type ListCmd struct {
 	connectFlags
 
-	Project string        `help:"Only jobs for this project."`
-	State   []string      `help:"Only jobs in these states (repeatable, comma-separated)." placeholder:"STATE"`
-	Active  bool          `help:"Only jobs that have not finished."`
-	Mode    string        `help:"Only jobs run in this agent mode."`
-	PRRef   string        `help:"Only jobs working on this pull request." name:"pr-ref"`
-	Since   time.Duration `help:"Only jobs created within this window (e.g. 24h)."`
-	Limit   int           `help:"Maximum jobs to return." default:"50"`
-	All     bool          `help:"Follow pagination until every matching job has been listed."`
-	JSON    bool          `help:"Emit JSON instead of a table." name:"json"`
+	Project string            `help:"Only jobs for this project."`
+	State   []string          `help:"Only jobs in these states (repeatable, comma-separated)." placeholder:"STATE"`
+	Active  bool              `help:"Only jobs that have not finished."`
+	Mode    string            `help:"Only jobs run in this agent mode."`
+	PRRef   string            `help:"Only jobs working on this pull request." name:"pr-ref"`
+	Since   time.Duration     `help:"Only jobs created within this window (e.g. 24h)."`
+	Meta    map[string]string `help:"Only jobs annotated with this key=value (repeatable; all must match)." placeholder:"KEY=VALUE"`
+	Limit   int               `help:"Maximum jobs to return." default:"50"`
+	All     bool              `help:"Follow pagination until every matching job has been listed."`
+	JSON    bool              `help:"Emit JSON instead of a table." name:"json"`
 }
 
 func (c *ListCmd) Run() error {
@@ -39,6 +42,7 @@ func (c *ListCmd) Run() error {
 		ActiveOnly: c.Active,
 		Mode:       c.Mode,
 		PrRef:      c.PRRef,
+		Metadata:   c.Meta,
 		Limit:      int32(c.Limit),
 	}
 	if c.Since > 0 {
@@ -142,6 +146,12 @@ func (c *ShowCmd) Run() error {
 	if cost := s.Cost; cost != nil && cost.TotalUsd > 0 {
 		row("Cost", fmt.Sprintf("$%.4f (%d in / %d out / %d cached tokens)",
 			cost.TotalUsd, cost.InputTokens, cost.OutputTokens, cost.CachedTokens))
+	}
+	// One row per annotation, sorted, so a job's record keeping reads the same
+	// way every time it is printed. Printed directly rather than through row so
+	// a key stored with an empty value still shows up as stored.
+	for _, k := range slices.Sorted(maps.Keys(s.Metadata)) {
+		fmt.Fprintf(tw, "Meta %s:\t%s\n", k, Dash(s.Metadata[k]))
 	}
 	if err := tw.Flush(); err != nil {
 		return err
