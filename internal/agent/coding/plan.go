@@ -34,8 +34,5 @@ Be specific about file paths and the smallest reasonable scope. Do not produce d
 	Tools: func(deps SubAgentDeps) []llms.ToolDef {
 		return readOnlyTools(deps)
 	},
-	MaxSteps:        50,
-	Model:           ModelMain,
-	ReasoningEffort: llms.EffortMedium,
-	MaxOutputTokens: 8192,
+	Class: ClassReasoning,
 }

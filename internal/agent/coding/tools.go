@@ -22,34 +22,34 @@ import (
 
 // CodingToolkit provides file manipulation and shell tools for the coding agent.
 type CodingToolkit struct {
-	runner     sandbox.RunnerProxy
-	workingDir string
-	sessionID  string
-	skills     map[string]*repocontext.Skill
-	models     map[string]llms.Model
-	configs    map[string]modelcfg.Entry
-	subAgents  SubAgents
+	runner       sandbox.RunnerProxy
+	workingDir   string
+	sessionID    string
+	skills       map[string]*repocontext.Skill
+	agentModels  map[string]llms.Model
+	agentConfigs map[string]modelcfg.Entry
+	subAgents    SubAgents
 	repoCtx    *repocontext.RepoContext
 	tracker    *cost.Tracker
 	tasks      *TaskList
 }
 
-// CodingToolkitOpts configures a CodingToolkit. Models, SubAgents, and RepoCtx
-// are required when the parent agent should be able to spawn sub-agents; the
-// spawn_agent tool is omitted from the toolkit when SubAgents is empty or no
-// models are available.
+// CodingToolkitOpts configures a CodingToolkit. AgentModels, SubAgents, and
+// RepoCtx are required when the parent agent should be able to spawn
+// sub-agents; the spawn_agent tool is omitted from the toolkit when SubAgents
+// is empty or no sub-agent models are available.
 type CodingToolkitOpts struct {
 	Runner     sandbox.RunnerProxy
 	WorkingDir string
 	SessionID  string
 	Skills     []repocontext.Skill
-	// Models maps alias (e.g. ModelMain, ModelSmall) to a resolved LLM.
-	Models map[string]llms.Model
-	// Configs carries the resolved per-alias settings (thinking budget, max
-	// output tokens). May be nil if sub-agents are not used.
-	Configs   map[string]modelcfg.Entry
-	SubAgents SubAgents
-	RepoCtx   *repocontext.RepoContext
+	// AgentModels maps a sub-agent name to the model resolved for it.
+	AgentModels map[string]llms.Model
+	// AgentConfigs maps a sub-agent name to its resolved settings (reasoning
+	// effort, output cap, step budget). May be nil if sub-agents are not used.
+	AgentConfigs map[string]modelcfg.Entry
+	SubAgents    SubAgents
+	RepoCtx      *repocontext.RepoContext
 	// Tracker, when set, gates tool results so the agent receives a one-shot
 	// budget warning note in the next tool result it sees after the warn
 	// threshold is crossed.
@@ -71,16 +71,16 @@ func NewCodingToolkitWithOpts(opts CodingToolkitOpts) *CodingToolkit {
 		skillMap[opts.Skills[i].Name] = &opts.Skills[i]
 	}
 	return &CodingToolkit{
-		runner:     opts.Runner,
-		workingDir: opts.WorkingDir,
-		sessionID:  opts.SessionID,
-		skills:     skillMap,
-		models:     opts.Models,
-		configs:    opts.Configs,
-		subAgents:  opts.SubAgents,
-		repoCtx:    opts.RepoCtx,
-		tracker:    opts.Tracker,
-		tasks:      NewTaskList(),
+		runner:       opts.Runner,
+		workingDir:   opts.WorkingDir,
+		sessionID:    opts.SessionID,
+		skills:       skillMap,
+		agentModels:  opts.AgentModels,
+		agentConfigs: opts.AgentConfigs,
+		subAgents:    opts.SubAgents,
+		repoCtx:      opts.RepoCtx,
+		tracker:      opts.Tracker,
+		tasks:        NewTaskList(),
 	}
 }
 
@@ -138,7 +138,7 @@ func (t *CodingToolkit) Tools() []llms.ToolDef {
 	if len(t.skills) > 0 {
 		tools = append(tools, llms.NewToolDef(&activateSkillTool{skills: t.skills}))
 	}
-	if len(t.models) > 0 && len(t.subAgents) > 0 {
+	if len(t.agentModels) > 0 && len(t.subAgents) > 0 {
 		tools = append(tools, llms.NewToolDef(&spawnAgentTool{toolkit: t}))
 	}
 	return t.withBudgetWarning(tools)
@@ -160,7 +160,7 @@ func (t *CodingToolkit) ReadOnlyTools() []llms.ToolDef {
 	if len(t.skills) > 0 {
 		tools = append(tools, llms.NewToolDef(&activateSkillTool{skills: t.skills}))
 	}
-	if len(t.models) > 0 && len(t.subAgents) > 0 {
+	if len(t.agentModels) > 0 && len(t.subAgents) > 0 {
 		tools = append(tools, llms.NewToolDef(&spawnAgentTool{toolkit: t}))
 	}
 	return t.withBudgetWarning(tools)
@@ -741,14 +741,11 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 		return nil, fmt.Errorf("unknown sub-agent %q", input.Name)
 	}
 
-	alias := sub.Model
-	if alias == "" {
-		alias = ModelMain
-	}
-	model, ok := t.toolkit.models[alias]
+	model, ok := t.toolkit.agentModels[sub.Name]
 	if !ok {
-		return nil, fmt.Errorf("sub-agent %q requires model %q which is not configured", sub.Name, alias)
+		return nil, fmt.Errorf("sub-agent %q has no resolved model", sub.Name)
 	}
+	cfg := t.toolkit.agentConfigs[sub.Name]
 
 	sessResp, err := t.toolkit.runner.CreateSession(ctx, &v1.CreateSessionRequest{
 		WorkingDir: t.toolkit.workingDir,
@@ -779,12 +776,12 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 		Skills:     t.toolkit.skills,
 	}
 
-	maxOut := sub.MaxOutputTokens
+	maxOut := cfg.MaxOutputTokens
 	if maxOut == 0 {
 		maxOut = 16384
 	}
 
-	maxSteps := sub.MaxSteps
+	maxSteps := cfg.MaxSteps
 	if maxSteps == 0 {
 		maxSteps = 50
 	}
@@ -796,8 +793,8 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 		llms.WithMaxSteps(maxSteps),
 		llms.WithMaxOutputTokens(maxOut),
 	}
-	if sub.ReasoningEffort != "" {
-		opts = append(opts, llms.WithReasoningEffort(sub.ReasoningEffort))
+	if cfg.ReasoningEffort != "" {
+		opts = append(opts, llms.WithReasoningEffort(cfg.ReasoningEffort))
 	}
 	if parent := llms.GetExecutionContext(ctx); parent != nil {
 		opts = append(opts, llms.WithParentExecution(parent))

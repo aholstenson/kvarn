@@ -307,7 +307,7 @@ The orchestrator reads its configuration from `~/.config/kvarn/` by default. You
 Common orchestrator flags:
 
 - `--addr`, default `:8080`, chooses the listen address.
-- `--model`, default `coding-agent`, overrides the main coding-agent model alias.
+- `--model`, default `coding-agent`, overrides the model behind the main `coding-agent` class.
 - `--disk-image-path` points at the VM disk image when auto-discovery is not enough.
 - `--no-auth` disables API-key authentication (local dev only — never expose an unauthenticated orchestrator to an untrusted network).
 - `--sessions-db` points at the session database (default `~/.config/kvarn/sessions.db`).
@@ -497,9 +497,9 @@ secrets:
       - auth.docker.io
 ```
 
-### Model aliases
+### Model classes
 
-Model aliases live in `~/.config/kvarn/agents.toml`. These aliases override the built-in defaults:
+Agents pick a capability class rather than a model, and the classes live in `~/.config/kvarn/agents.toml`. `coding-agent` is the balanced default the main loop runs on, `coding-agent-fast` serves high-volume search (the `explore` sub-agent) and `coding-agent-reasoning` serves work worth deliberating over (the `plan` sub-agent):
 
 ```toml
 [models.coding-agent]
@@ -507,12 +507,24 @@ model = "anthropic/claude-sonnet-4-6"
 reasoning_effort = "medium"
 max_output_tokens = 16384
 
-[models.coding-agent-small]
+[models.coding-agent-fast]
 model = "anthropic/claude-haiku-4-5"
 max_output_tokens = 8192
+
+[models.coding-agent-reasoning]
+model = "anthropic/claude-opus-4-6"
+reasoning_effort = "high"
 ```
 
-`--model` on `kvarn run` and `kvarn orchestrator` overrides the main `coding-agent` alias for that invocation.
+An `[agents.<name>]` block moves a single sub-agent to another class, or tunes it on top of the one it already uses:
+
+```toml
+[agents.plan]
+class = "coding-agent"
+max_steps = 80
+```
+
+`--model` on `kvarn run` and `kvarn orchestrator` overrides the model behind the `coding-agent` class for that invocation. See [`agents.toml`](docs/reference/agents-toml.md) for the full reference.
 
 ## The VM disk image
 

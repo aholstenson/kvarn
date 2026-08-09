@@ -111,4 +111,37 @@ max_output_tokens = 16384
 		Expect(entry.MaxOutputTokens).NotTo(BeNil())
 		Expect(*entry.MaxOutputTokens).To(Equal(16384))
 	})
+
+	It("reads [agents.<name>] entries via Agents", func() {
+		content := `[agents.plan]
+class = "coding-agent-reasoning"
+
+[agents.explore]
+model     = "openai/gpt-5"
+max_steps = 40
+`
+		Expect(os.WriteFile(path, []byte(content), 0o644)).To(Succeed())
+
+		agents, err := store.Agents(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(agents).To(HaveKey("plan"))
+		Expect(agents["plan"].Class).To(Equal("coding-agent-reasoning"))
+		Expect(agents["plan"].ModelID).To(BeEmpty())
+		Expect(agents["plan"].MaxSteps).To(BeNil())
+
+		Expect(agents).To(HaveKey("explore"))
+		Expect(agents["explore"].Class).To(BeEmpty())
+		Expect(agents["explore"].ModelID).To(Equal("openai/gpt-5"))
+		Expect(agents["explore"].MaxSteps).NotTo(BeNil())
+		Expect(*agents["explore"].MaxSteps).To(Equal(40))
+	})
+
+	It("returns an empty agent map when the file defines none", func() {
+		Expect(os.WriteFile(path, []byte("[models.coder]\nmodel = \"test/a\"\n"), 0o644)).To(Succeed())
+
+		agents, err := store.Agents(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(agents).To(BeEmpty())
+	})
 })

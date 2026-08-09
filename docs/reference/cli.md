@@ -24,7 +24,7 @@ Runs the orchestrator service.
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--addr` | `:8080` | Listen address. |
-| `--model` | `coding-agent` | Model alias used as the main coding agent. |
+| `--model` | `coding-agent` | Model the `coding-agent` class resolves to for this invocation. |
 | `--no-auth` | off | Disable API-key authentication. Local development only. Env: `KVARN_NO_AUTH`. |
 | `--local-socket` | `~/.config/kvarn/orchestrator.sock` | Path of the host-local control socket. Env: `KVARN_LOCAL_SOCKET`. |
 | `--no-local-socket` | off | Do not serve the host-local control socket. Env: `KVARN_NO_LOCAL_SOCKET`. |
@@ -192,7 +192,7 @@ orchestrator, project, or forge. Write-capable modes require exactly one of
 | `--apply` | — | Copy changed files from the VM back onto the working directory. |
 | `--dir` | `.` | Project directory. |
 | `--mode` | `auto` | Built-in agent mode. Modes a repository defines are for orchestrator jobs; a local run has no forge to deliver to. |
-| `--model` | `coding-agent` | Model alias. |
+| `--model` | `coding-agent` | Model the `coding-agent` class resolves to for this run. |
 | `--max-validation-retries` | `0` | Additional agent passes after a required validation failure. |
 | `--no-cache` | off | Disable cache persistence for this run. |
 | `--cache-quota` | `5G` | Per-project tool-cache limit for the LRU sweep. |

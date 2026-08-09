@@ -15,7 +15,6 @@ import (
 	apikeytoml "github.com/aholstenson/kvarn/internal/config/apikey/tomlstore"
 	credtoml "github.com/aholstenson/kvarn/internal/config/credential/tomlstore"
 	forgetoml "github.com/aholstenson/kvarn/internal/config/forge/tomlstore"
-	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 	modeltoml "github.com/aholstenson/kvarn/internal/config/model/tomlstore"
 	orchcfg "github.com/aholstenson/kvarn/internal/config/orchestrator"
 	projtoml "github.com/aholstenson/kvarn/internal/config/project/tomlstore"
@@ -233,12 +232,7 @@ func (c *Cmd) Run() error {
 	forgeStore := forgetoml.New(forgesPath)
 
 	agentsStore := modeltoml.OpenDefault(c.AgentsFile)
-	models, configs, err := modelcfg.Resolve(
-		ctx, mgr,
-		agentsStore,
-		coding.DefaultModels(),
-		coding.ModelMain, c.Model,
-	)
+	models, err := coding.ResolveModels(ctx, mgr, agentsStore, c.Model)
 	if err != nil {
 		return err
 	}
@@ -455,7 +449,7 @@ func (c *Cmd) Run() error {
 			"git":    forgegit.New(),
 		},
 		SessionMgr:          sessionMgr,
-		Agent:               coding.NewCodingAgent(models, configs),
+		Agent:               coding.NewCodingAgent(models),
 		Transferer:          &transfer.StreamingTransferer{},
 		DefaultsStore:       agentsStore,
 		PricingManager:      llms.NewPricingManager(logger),

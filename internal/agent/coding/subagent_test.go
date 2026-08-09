@@ -59,15 +59,16 @@ var _ = Describe("spawn_agent", func() {
 	})
 
 	buildToolkit := func(model llms.Model, subs coding.SubAgents) *coding.CodingToolkit {
+		models := make(map[string]llms.Model, len(subs))
+		for name := range subs {
+			models[name] = model
+		}
 		return coding.NewCodingToolkitWithOpts(coding.CodingToolkitOpts{
-			Runner:     runner,
-			WorkingDir: "/home/kvarn/workspace",
-			SessionID:  "parent-session",
-			Models: map[string]llms.Model{
-				coding.ModelMain:  model,
-				coding.ModelSmall: model,
-			},
-			SubAgents: subs,
+			Runner:      runner,
+			WorkingDir:  "/home/kvarn/workspace",
+			SessionID:   "parent-session",
+			AgentModels: models,
+			SubAgents:   subs,
 		})
 	}
 
@@ -143,18 +144,18 @@ var _ = Describe("spawn_agent", func() {
 		Expect(out.Text).To(Equal("explored"))
 	})
 
-	It("routes each sub-agent to the model alias it declares", func() {
-		var mainCalls, smallCalls int
-		mainModel := &fakeModel{
+	It("routes each sub-agent to the model resolved for it", func() {
+		var planCalls, exploreCalls int
+		planModel := &fakeModel{
 			generate: func(_ context.Context, _ ...llms.GenerateOption) (llms.Result, error) {
-				mainCalls++
-				return llms.TextResult{Text: "main"}, nil
+				planCalls++
+				return llms.TextResult{Text: "plan"}, nil
 			},
 		}
-		smallModel := &fakeModel{
+		exploreModel := &fakeModel{
 			generate: func(_ context.Context, _ ...llms.GenerateOption) (llms.Result, error) {
-				smallCalls++
-				return llms.TextResult{Text: "small"}, nil
+				exploreCalls++
+				return llms.TextResult{Text: "explore"}, nil
 			},
 		}
 
@@ -162,9 +163,9 @@ var _ = Describe("spawn_agent", func() {
 			Runner:     runner,
 			WorkingDir: "/home/kvarn/workspace",
 			SessionID:  "parent-session",
-			Models: map[string]llms.Model{
-				coding.ModelMain:  mainModel,
-				coding.ModelSmall: smallModel,
+			AgentModels: map[string]llms.Model{
+				coding.Explore.Name: exploreModel,
+				coding.Plan.Name:    planModel,
 			},
 			SubAgents: coding.SubAgents{
 				coding.Explore.Name: coding.Explore,
@@ -179,27 +180,30 @@ var _ = Describe("spawn_agent", func() {
 		_, err = tool.Execute(ctx, &coding.SpawnAgentInput{Name: coding.Plan.Name, Prompt: "plan"})
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(smallCalls).To(Equal(1))
-		Expect(mainCalls).To(Equal(1))
+		Expect(exploreCalls).To(Equal(1))
+		Expect(planCalls).To(Equal(1))
 	})
 
-	It("errors when the sub-agent's model alias is not configured", func() {
+	It("errors when the sub-agent has no resolved model", func() {
 		tk := coding.NewCodingToolkitWithOpts(coding.CodingToolkitOpts{
 			Runner:     runner,
 			WorkingDir: "/home/kvarn/workspace",
 			SessionID:  "parent-session",
-			Models: map[string]llms.Model{
-				coding.ModelMain: &fakeModel{},
-				// ModelSmall intentionally missing.
+			AgentModels: map[string]llms.Model{
+				coding.Plan.Name: &fakeModel{},
+				// Explore intentionally missing.
 			},
-			SubAgents: coding.SubAgents{coding.Explore.Name: coding.Explore},
+			SubAgents: coding.SubAgents{
+				coding.Explore.Name: coding.Explore,
+				coding.Plan.Name:    coding.Plan,
+			},
 		})
 		tool := findSpawnTool(tk)
 		Expect(tool).NotTo(BeNil())
 
 		_, err := tool.Execute(ctx, &coding.SpawnAgentInput{Name: coding.Explore.Name, Prompt: "explore"})
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring(coding.ModelSmall))
+		Expect(err.Error()).To(ContainSubstring(coding.Explore.Name))
 		Expect(runner.createCalls).To(BeEmpty())
 	})
 
@@ -253,6 +257,28 @@ var _ = Describe("Mode", func() {
 		readOnly := coding.ModeReview.SystemPrompt("proj", "url", "main", nil, nil)
 		Expect(write).To(ContainSubstring("## Operating principles"))
 		Expect(readOnly).To(ContainSubstring("## Operating principles"))
+	})
+})
+
+var _ = Describe("Model classes", func() {
+	It("backs every class a built-in sub-agent names", func() {
+		models := coding.DefaultModels()
+		for name, sub := range coding.BuiltinSubAgents() {
+			Expect(models).To(HaveKey(string(sub.Class)), "sub-agent %s names an unconfigured class", name)
+		}
+	})
+
+	It("reports the class each built-in sub-agent runs on", func() {
+		Expect(coding.DefaultAgentClasses()).To(Equal(map[string]string{
+			coding.Explore.Name: string(coding.ClassFast),
+			coding.Plan.Name:    string(coding.ClassReasoning),
+		}))
+	})
+
+	It("gives every class a model so an unconfigured tier cannot resolve to nothing", func() {
+		for alias, entry := range coding.DefaultModels() {
+			Expect(entry.ModelID).NotTo(BeEmpty(), "class %s has no model", alias)
+		}
 	})
 })
 

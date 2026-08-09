@@ -23,7 +23,6 @@ import (
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 	"github.com/aholstenson/kvarn/internal/cmd/imageutil"
 	credtoml "github.com/aholstenson/kvarn/internal/config/credential/tomlstore"
-	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 	modeltoml "github.com/aholstenson/kvarn/internal/config/model/tomlstore"
 	projectstore "github.com/aholstenson/kvarn/internal/config/project"
 	projecttoml "github.com/aholstenson/kvarn/internal/config/project/tomlstore"
@@ -96,19 +95,14 @@ func (c *Cmd) Run() error {
 	if err != nil {
 		return fmt.Errorf("create llms manager: %w", err)
 	}
-	models, configs, err := modelcfg.Resolve(
-		ctx, mgr,
-		modeltoml.OpenDefault(c.AgentsFile),
-		coding.DefaultModels(),
-		coding.ModelMain, c.Model,
-	)
+	models, err := coding.ResolveModels(ctx, mgr, modeltoml.OpenDefault(c.AgentsFile), c.Model)
 	if err != nil {
 		return err
 	}
 
 	return c.runWith(ctx, runDeps{
 		Provider: local.NewProvider(),
-		Agent:    coding.NewCodingAgent(models, configs),
+		Agent:    coding.NewCodingAgent(models),
 		Mode:     mode,
 		Stdout:   os.Stdout,
 	})

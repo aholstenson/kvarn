@@ -16,6 +16,28 @@ type entryData struct {
 	Model           string       `toml:"model"`
 	ReasoningEffort *llms.Effort `toml:"reasoning_effort"`
 	MaxOutputTokens *int         `toml:"max_output_tokens"`
+	MaxSteps        *int         `toml:"max_steps"`
+}
+
+// raw converts a parsed block to the domain override. An absent key is a nil
+// pointer, which the resolver reads as "leave the inherited value alone".
+func (e entryData) raw() modelcfg.RawEntry {
+	return modelcfg.RawEntry{
+		ModelID:         e.Model,
+		ReasoningEffort: e.ReasoningEffort,
+		MaxOutputTokens: e.MaxOutputTokens,
+		MaxSteps:        e.MaxSteps,
+	}
+}
+
+// agentData mirrors a single [agents.<name>] block: the class the agent runs
+// on, plus the same per-model keys, applied on top of that class.
+type agentData struct {
+	Class           string       `toml:"class"`
+	Model           string       `toml:"model"`
+	ReasoningEffort *llms.Effort `toml:"reasoning_effort"`
+	MaxOutputTokens *int         `toml:"max_output_tokens"`
+	MaxSteps        *int         `toml:"max_steps"`
 }
 
 // jobDefaults mirrors a single [defaults.jobs.<mode>] block.
@@ -48,9 +70,13 @@ type defaultsData struct {
 //	model            = "anthropic/claude-sonnet-4-6"
 //	reasoning_effort = "medium"
 //	max_output_tokens = 16384
+//
+//	[agents.plan]
+//	class = "coding-agent-reasoning"
 type fileData struct {
 	Defaults defaultsData         `toml:"defaults"`
 	Models   map[string]entryData `toml:"models"`
+	Agents   map[string]agentData `toml:"agents"`
 }
 
 // modelDomain is the per-alias domain value List would return. Model only uses
@@ -105,20 +131,14 @@ func New(path string) *Store {
 			Less: func(a, b string) bool { return a < b },
 		},
 		func(alias string, e entryData) (modelDomain, error) {
-			return modelDomain{
-				Alias: alias,
-				Raw: modelcfg.RawEntry{
-					ModelID:         e.Model,
-					ReasoningEffort: e.ReasoningEffort,
-					MaxOutputTokens: e.MaxOutputTokens,
-				},
-			}, nil
+			return modelDomain{Alias: alias, Raw: e.raw()}, nil
 		},
 		func(d modelDomain) (string, entryData) {
 			return d.Alias, entryData{
 				Model:           d.Raw.ModelID,
 				ReasoningEffort: d.Raw.ReasoningEffort,
 				MaxOutputTokens: d.Raw.MaxOutputTokens,
+				MaxSteps:        d.Raw.MaxSteps,
 			}
 		},
 	)}
@@ -148,10 +168,28 @@ func (s *Store) All(ctx context.Context) (map[string]modelcfg.RawEntry, error) {
 	}
 	out := make(map[string]modelcfg.RawEntry, len(fd.Models))
 	for alias, e := range fd.Models {
-		out[alias] = modelcfg.RawEntry{
-			ModelID:         e.Model,
-			ReasoningEffort: e.ReasoningEffort,
-			MaxOutputTokens: e.MaxOutputTokens,
+		out[alias] = e.raw()
+	}
+	return out, nil
+}
+
+// Agents returns every per-agent override. A missing file is not an error;
+// callers receive an empty map.
+func (s *Store) Agents(ctx context.Context) (map[string]modelcfg.RawAgent, error) {
+	fd, err := s.inner.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]modelcfg.RawAgent, len(fd.Agents))
+	for name, a := range fd.Agents {
+		out[name] = modelcfg.RawAgent{
+			Class: a.Class,
+			RawEntry: entryData{
+				Model:           a.Model,
+				ReasoningEffort: a.ReasoningEffort,
+				MaxOutputTokens: a.MaxOutputTokens,
+				MaxSteps:        a.MaxSteps,
+			}.raw(),
 		}
 	}
 	return out, nil

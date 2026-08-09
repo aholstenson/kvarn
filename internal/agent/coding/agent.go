@@ -23,16 +23,14 @@ type AgentSummary struct {
 
 // CodingAgent is an LLM-powered agent that can modify files in a VM.
 type CodingAgent struct {
-	models  map[string]llms.Model
-	configs map[string]modelcfg.Entry
+	models Models
 }
 
-// NewCodingAgent creates a new coding agent. The models map must contain at
-// least ModelMain; sub-agents that declare a different alias (e.g. ModelSmall
-// for Explore) require the corresponding entry to also be present. configs
-// carries the resolved per-alias settings (thinking budget, max output tokens).
-func NewCodingAgent(models map[string]llms.Model, configs map[string]modelcfg.Entry) *CodingAgent {
-	return &CodingAgent{models: models, configs: configs}
+// NewCodingAgent creates a new coding agent from a resolved model set. Classes
+// must contain at least ModelMain, and Agents an entry for every sub-agent the
+// run can spawn — see ResolveModels, which produces both.
+func NewCodingAgent(models Models) *CodingAgent {
+	return &CodingAgent{models: models}
 }
 
 // Start opens a stateful llms.Session so the orchestrator can drive multiple
@@ -53,25 +51,22 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 		}
 	}
 
-	subAgents := SubAgents{
-		Explore.Name: Explore,
-		Plan.Name:    Plan,
-	}
+	subAgents := BuiltinSubAgents()
 
 	toolkit := NewCodingToolkitWithOpts(CodingToolkitOpts{
-		Runner:     agentCtx.Runner,
-		WorkingDir: agentCtx.WorkingDir,
-		SessionID:  agentCtx.SessionID,
-		Skills:     skills,
-		Models:     a.models,
-		Configs:    a.configs,
-		SubAgents:  subAgents,
-		RepoCtx:    agentCtx.RepoContext,
-		Tracker:    agentCtx.Cost,
+		Runner:       agentCtx.Runner,
+		WorkingDir:   agentCtx.WorkingDir,
+		SessionID:    agentCtx.SessionID,
+		Skills:       skills,
+		AgentModels:  a.models.Agents,
+		AgentConfigs: a.models.AgentConfigs,
+		SubAgents:    subAgents,
+		RepoCtx:      agentCtx.RepoContext,
+		Tracker:      agentCtx.Cost,
 	})
 	systemPrompt := mode.SystemPrompt(agentCtx.ProjectName, agentCtx.RepoURL, agentCtx.Branch, agentCtx.RepoContext, subAgents)
 
-	mainCfg := a.configs[ModelMain]
+	mainCfg := a.models.ClassConfigs[ModelMain]
 	maxOut := mainCfg.MaxOutputTokens
 	if maxOut == 0 {
 		maxOut = 16384
@@ -108,7 +103,7 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 		opts = append(opts, llms.WithStreamingFunc(c.handleStreamingEvent))
 	}
 
-	mainModel := a.models[ModelMain]
+	mainModel := a.models.Classes[ModelMain]
 	sessCtx := ctx
 	if agentCtx.Cost != nil {
 		sessCtx = llms.WithMetrics(sessCtx, agentCtx.Cost.Recorder())
@@ -220,7 +215,7 @@ func (c *codingConversation) Summarize(ctx context.Context) (*agent.Result, erro
 		summarySystem.WriteString(c.agentCtx.RepoContext.Instructions)
 	}
 
-	mainModel := c.agent.models[ModelMain]
+	mainModel := c.agent.models.Classes[ModelMain]
 	summaryResult, err := mainModel.GenerateContent(ctx,
 		llms.WithSystemPrompt(summarySystem.String()),
 		llms.WithMessages(messages...),

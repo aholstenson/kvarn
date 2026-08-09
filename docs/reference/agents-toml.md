@@ -1,12 +1,21 @@
 # `agents.toml`
 
-Model aliases for the coding agent, and the user-level defaults that projects
-inherit for cost and retry limits.
+Model classes for the coding agent, the per-agent overrides layered on them,
+and the user-level defaults that projects inherit for cost and retry limits.
 
 Default location `~/.config/kvarn/agents.toml`, overridable with
 `--agents-file`. Re-read on every request.
 
-## Model aliases
+## Model classes
+
+Agents do not name models; they name a **class**, a capability tier configured
+once and shared by everything that asks for it. Three classes exist:
+
+| Class | Used for | Built-in default |
+| --- | --- | --- |
+| `coding-agent` | The main agent loop — the balanced default. | `anthropic/claude-sonnet-4-6`, effort `medium`, 16384 output tokens, 100 steps. |
+| `coding-agent-fast` | High-volume, shallow work where breadth of search beats depth of reasoning (the `explore` sub-agent). | `anthropic/claude-haiku-4-5`, effort `none`, 8192 output tokens, 100 steps. |
+| `coding-agent-reasoning` | Work worth thinking hard about and run rarely enough to pay for it (the `plan` sub-agent). | `anthropic/claude-sonnet-4-6`, effort `high`, 16384 output tokens, 50 steps. |
 
 ```toml
 [models.coding-agent]
@@ -14,9 +23,13 @@ model = "anthropic/claude-sonnet-4-6"
 reasoning_effort = "medium"
 max_output_tokens = 16384
 
-[models.coding-agent-small]
+[models.coding-agent-fast]
 model = "anthropic/claude-haiku-4-5"
 max_output_tokens = 8192
+
+[models.coding-agent-reasoning]
+model = "anthropic/claude-opus-4-6"
+reasoning_effort = "high"
 ```
 
 | Key | Type | Notes |
@@ -24,19 +37,37 @@ max_output_tokens = 8192
 | `model` | string | Provider-qualified model ID, e.g. `anthropic/claude-sonnet-4-6`. |
 | `reasoning_effort` | string | One of `none`, `low`, `medium`, `high`. |
 | `max_output_tokens` | int | Cap on output tokens per request. |
+| `max_steps` | int | Cap on tool-call steps per agent run. |
 
-Two aliases are meaningful to the agent:
+Each key you set replaces the built-in value for that class; keys you leave out
+keep theirs. A `[models.<alias>]` block naming something other than the three
+classes above is an error, so a typo is reported rather than ignored.
 
-| Alias | Used for | Built-in default |
-| --- | --- | --- |
-| `coding-agent` | The main agent loop. | `anthropic/claude-sonnet-4-6`, effort `medium`, 16384 output tokens. |
-| `coding-agent-small` | Cheaper sub-agents that don't need top-tier reasoning (e.g. exploration). | `anthropic/claude-haiku-4-5`, 8192 output tokens. |
+`--model` on `kvarn run` and `kvarn orchestrator` selects which model the
+`coding-agent` class resolves to for that invocation.
 
-An alias defined here replaces the built-in entry entirely. Aliases you leave
-out keep their built-in configuration.
+## Per-agent overrides
 
-`--model` on `kvarn run` and `kvarn orchestrator` selects which alias serves as
-the main coding agent for that invocation (default `coding-agent`).
+A sub-agent runs on the class it declares — `explore` on `coding-agent-fast`,
+`plan` on `coding-agent-reasoning`. An `[agents.<name>]` block changes that for
+one agent without disturbing the class or any other agent using it:
+
+```toml
+# Investigate with the balanced model instead of the fast one.
+[agents.explore]
+class = "coding-agent"
+
+# Plan on a specific model, and give it more room than the class allows.
+[agents.plan]
+model = "openai/gpt-5"
+reasoning_effort = "high"
+max_steps = 80
+```
+
+`class` picks the tier; the model keys from the table above are then applied on
+top of whichever class was selected. Setting `model` bypasses the class's model
+without bypassing the rest of its settings. Agent names are `explore` and
+`plan`; any other name is an error.
 
 Provider API keys are never read from this file. They live in the `[llm]`
 block of [`credentials.toml`](credentials-toml.md), falling back to the

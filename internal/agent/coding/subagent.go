@@ -20,16 +20,19 @@ type SubAgent struct {
 	SystemPrompt func(rc *repocontext.RepoContext) string
 	// Tools constructs the sub-agent's toolkit from the run-scoped dependencies.
 	Tools func(deps SubAgentDeps) []llms.ToolDef
-	// MaxSteps caps how many tool-call steps the sub-agent may take.
-	MaxSteps int
-	// Model is the alias of the LLM the sub-agent runs against. Empty falls
-	// back to ModelMain.
-	Model string
-	// ReasoningEffort is the reasoning-effort level for sub-agent calls. The
-	// empty value (or EffortNone) disables reasoning.
-	ReasoningEffort llms.Effort
-	// MaxOutputTokens caps the sub-agent's output. 0 falls back to 16384.
-	MaxOutputTokens int
+	// Class is the capability tier the sub-agent runs on. The model, reasoning
+	// effort, output cap and step budget all come from the resolved class, so
+	// the definition states what kind of work this is and leaves how much model
+	// to spend on it to configuration.
+	Class Class
+}
+
+// BuiltinSubAgents returns the sub-agents every coding-agent run registers.
+func BuiltinSubAgents() SubAgents {
+	return SubAgents{
+		Explore.Name: Explore,
+		Plan.Name:    Plan,
+	}
 }
 
 // SubAgentDeps carries everything a sub-agent's toolkit needs to construct

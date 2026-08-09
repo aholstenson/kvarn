@@ -102,7 +102,8 @@ to. Both write a final cost snapshot to the session before it goes terminal.
 
 ## Choosing a model
 
-Cost per job is also a function of which models run. Aliases are configured in
+Cost per job is also a function of which models run. Every agent picks one of
+three classes, and the classes are configured in
 [`agents.toml`](../reference/agents-toml.md):
 
 ```toml
@@ -112,6 +113,9 @@ reasoning_effort = "medium"
 max_output_tokens = 16384
 ```
 
-`coding-agent` is the main loop; `coding-agent-small` serves cheaper sub-agents
-that do not need top-tier reasoning. Overriding `coding-agent-small` with a
-smaller, faster model is usually the lowest-risk cost reduction available.
+`coding-agent` is the balanced class the main loop runs on, and dominates the
+bill. `coding-agent-fast` serves the exploration sub-agent, which runs often and
+searches rather than reasons: pointing it at a smaller, faster model is usually
+the lowest-risk cost reduction available. `coding-agent-reasoning` is the
+opposite trade — spent rarely, on planning — so raising it costs less than it
+looks like it should.
