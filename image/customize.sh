@@ -260,7 +260,9 @@ fi
 echo "net.ipv4.ip_unprivileged_port_start=0" > "$ROOTFS/etc/sysctl.d/99-kvarn.conf"
 echo "net.core.bpf_jit_enable=0" >> "$ROOTFS/etc/sysctl.d/99-kvarn.conf"
 
-# Load vsock and iso9660 modules at boot.
+# Load the modules the runner depends on at boot. None of these are autoloaded:
+# tun in particular has no trigger, because pasta opens /dev/net/tun and that
+# node only appears once the module is loaded.
 mkdir -p "$ROOTFS/etc/modules-load.d"
 cat > "$ROOTFS/etc/modules-load.d/vsock.conf" <<'MODULES'
 vsock
@@ -271,6 +273,11 @@ virtiofs
 MODULES
 cat > "$ROOTFS/etc/modules-load.d/iso9660.conf" <<'MODULES'
 iso9660
+MODULES
+# Rootless Podman wires every container network through pasta, which needs
+# /dev/net/tun to create the tap device inside the container namespace.
+cat > "$ROOTFS/etc/modules-load.d/tun.conf" <<'MODULES'
+tun
 MODULES
 
 # Configure cloud-init to use NoCloud datasource (seed disk with label "cidata").
