@@ -6,7 +6,7 @@ require (
 	connectrpc.com/connect v1.19.1
 	github.com/Code-Hex/vz/v3 v3.7.1
 	github.com/Masterminds/semver/v3 v3.4.0
-	github.com/aholstenson/llms-go v0.6.0
+	github.com/aholstenson/llms-go v0.6.1
 	github.com/alecthomas/kong v1.15.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/diskfs/go-diskfs v1.7.0
