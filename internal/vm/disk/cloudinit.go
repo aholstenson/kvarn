@@ -26,12 +26,6 @@ type CloudInitOpts struct {
 	// untouched.
 	Runner []byte
 
-	// ProxyCA, if non-empty, is written into the rootfs as
-	// /usr/local/share/ca-certificates/kvarn-proxy.crt and
-	// update-ca-certificates is run on first boot so that in-VM TLS
-	// clients trust the per-VM egress proxy.
-	ProxyCA []byte
-
 	// ImageCacheAddr is the "host:port" of the in-VM pull-through OCI
 	// registry mirror. When non-empty together with ImageCacheUpstreams,
 	// cloud-init writes a containers/registries.conf.d drop-in that lists
@@ -136,16 +130,6 @@ func buildUserData(opts CloudInitOpts) string {
 	b.WriteString("    content: |\n")
 	fmt.Fprintf(&b, "      KVARN_BRIDGE_TOKEN=%s\n", opts.Token)
 	fmt.Fprintf(&b, "      KVARN_BRIDGE_VSOCK_PORT=%d\n", opts.VsockPort)
-	if len(opts.ProxyCA) > 0 {
-		b.WriteString("  - path: /usr/local/share/ca-certificates/kvarn-proxy.crt\n")
-		b.WriteString("    permissions: '0644'\n")
-		b.WriteString("    content: |\n")
-		for _, line := range strings.Split(strings.TrimRight(string(opts.ProxyCA), "\n"), "\n") {
-			b.WriteString("      ")
-			b.WriteString(line)
-			b.WriteByte('\n')
-		}
-	}
 	if opts.ImageCacheAddr != "" && len(opts.ImageCacheUpstreams) > 0 {
 		// Drop-in sorts after the base image's 00-kvarn.conf, so
 		// unqualified-search-registries stays in place and we only add
@@ -169,10 +153,6 @@ func buildUserData(opts CloudInitOpts) string {
 			fmt.Fprintf(&b, "      location = %q\n", opts.ImageCacheAddr+"/"+ups)
 			fmt.Fprintf(&b, "      insecure = true\n")
 		}
-	}
-	if len(opts.ProxyCA) > 0 {
-		b.WriteString("runcmd:\n")
-		b.WriteString("  - update-ca-certificates\n")
 	}
 	return b.String()
 }

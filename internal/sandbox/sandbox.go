@@ -516,6 +516,15 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	proxy := NewBridgeProxy(pr.CommandCh, pr.ResultCh, pr.OutputCh, pr)
 	sess.bareProxy = proxy
 
+	// Establish trust in the egress proxy before anything below it opens a
+	// TLS connection from inside the VM. Everything that follows — the file
+	// transfer's git operations, the cache restore, `nix profile add`, the
+	// container image pull — reaches the network only through the MITM
+	// proxy, so this has to be the first command the guest runs.
+	if err := InstallProxyCA(ctx, proxy, instance.ProxyCAPEM); err != nil {
+		return nil, fmt.Errorf("install proxy CA: %w", err)
+	}
+
 	// Transfer files.
 	if opts.Transferer != nil && opts.SourceDir != "" {
 		emit(opts, TransferringEvent{})

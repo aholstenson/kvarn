@@ -197,8 +197,9 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	cid := p.allocateCID()
 	vsockPort := p.allocatePort()
 
-	// Generate per-VM CA so the proxy can MITM TLS, and bake the public
-	// certificate into the cloud-init seed for the in-VM trust store.
+	// Generate per-VM CA so the proxy can MITM TLS. The public certificate
+	// is returned on the VM for the caller to install into the guest trust
+	// store over the runner connection.
 	ca, err := egressproxy.GenerateCA()
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate proxy CA: %w", err)
@@ -217,7 +218,6 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 		Token:               opts.Token,
 		VsockPort:           vsockPort,
 		Runner:              runnerBin,
-		ProxyCA:             ca.CertPEM(),
 		ImageCacheUpstreams: opts.Network.ImageCacheUpstreams,
 	}
 	if opts.Network.ImageCacheHandler != nil && opts.Network.ImageCachePort != 0 {
@@ -423,8 +423,9 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 
 	success = true
 	return &vm.VM{
-			ID:    id,
-			Token: opts.Token,
+			ID:         id,
+			Token:      opts.Token,
+			ProxyCAPEM: ca.CertPEM(),
 		}, &vm.RunnerConn{
 			Listener:        listener,
 			ExpectedPeerCID: cid,

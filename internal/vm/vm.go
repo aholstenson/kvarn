@@ -12,6 +12,14 @@ import (
 type VM struct {
 	ID    string
 	Token string
+
+	// ProxyCAPEM is the PEM-encoded certificate of the per-VM egress proxy
+	// CA, for providers that MITM TLS. Nothing in the guest trusts it at
+	// boot: the caller installs it over the runner connection, which is the
+	// only way to order trust ahead of the first guest command that speaks
+	// TLS. Empty when the provider relies on platform-native egress
+	// controls instead, in which case the guest needs no extra anchor.
+	ProxyCAPEM []byte
 }
 
 type RunnerConn struct {

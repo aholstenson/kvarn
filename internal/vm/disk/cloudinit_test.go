@@ -103,14 +103,17 @@ var _ = Describe("CreateCloudInitDisk", func() {
 		Expect(userData).To(ContainSubstring("insecure = true"))
 	})
 
-	It("includes the proxy CA when provided", func() {
+	// The egress proxy CA is installed over the runner connection instead
+	// (sandbox.InstallProxyCA), which is the only way to order trust ahead
+	// of the first guest command that speaks TLS. A boot-time install here
+	// would both land too late and collide with that one: two concurrent
+	// update-ca-certificates runs fight over a fixed temp-file name.
+	It("leaves the guest trust store alone", func() {
 		path := GinkgoT().TempDir() + "/cidata.iso"
 
-		const ca = "-----BEGIN CERTIFICATE-----\nFAKEDATA\n-----END CERTIFICATE-----\n"
 		Expect(disk.CreateCloudInitDisk(path, disk.CloudInitOpts{
 			Token:     "tok",
 			VsockPort: 1024,
-			ProxyCA:   []byte(ca),
 		})).To(Succeed())
 
 		d, err := diskfs.Open(path)
@@ -125,9 +128,7 @@ var _ = Describe("CreateCloudInitDisk", func() {
 			userDataPath = "/USER_DATA.;1"
 		}
 		userData := readISOFile(fs, userDataPath)
-		Expect(userData).To(ContainSubstring("/usr/local/share/ca-certificates/kvarn-proxy.crt"))
-		Expect(userData).To(ContainSubstring("update-ca-certificates"))
-		Expect(userData).To(ContainSubstring("FAKEDATA"))
+		Expect(userData).NotTo(ContainSubstring("ca-certificates"))
 	})
 })
 

@@ -25,6 +25,7 @@ type mockProxy struct {
 	execResponses      []*v1.ExecResponse
 	execErrors         []error
 	execCallCounter    int
+	uploadError        error
 }
 
 func newMockProxy() *mockProxy {
@@ -63,6 +64,9 @@ func (m *mockProxy) CloseSession(_ context.Context, req *v1.CloseSessionRequest)
 
 func (m *mockProxy) UploadFiles(_ context.Context, req *v1.UploadFilesRequest) (*v1.UploadFilesResponse, error) {
 	m.uploadCalls = append(m.uploadCalls, req)
+	if m.uploadError != nil {
+		return nil, m.uploadError
+	}
 	return &v1.UploadFilesResponse{}, nil
 }
 

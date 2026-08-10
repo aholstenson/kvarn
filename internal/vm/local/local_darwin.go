@@ -133,8 +133,9 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	}
 	token := opts.Token
 
-	// Generate per-VM CA so the proxy can MITM TLS, and bake the public
-	// certificate into the cloud-init seed for the in-VM trust store.
+	// Generate per-VM CA so the proxy can MITM TLS. The public certificate
+	// is returned on the VM for the caller to install into the guest trust
+	// store over the runner connection.
 	ca, err := egressproxy.GenerateCA()
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate proxy CA: %w", err)
@@ -147,14 +148,13 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 		return nil, nil, fmt.Errorf("load embedded runner: %w", err)
 	}
 
-	// Create cloud-init seed disk with per-VM token, vsock port, CA, and the
+	// Create cloud-init seed disk with per-VM token, vsock port, and the
 	// runner binary the in-VM setup script stages.
 	tmpSeed = tmpDisk + ".cidata.iso"
 	cloudInit := disk.CloudInitOpts{
 		Token:               token,
 		VsockPort:           vsockPort,
 		Runner:              runnerBin,
-		ProxyCA:             ca.CertPEM(),
 		ImageCacheUpstreams: opts.Network.ImageCacheUpstreams,
 	}
 	if opts.Network.ImageCacheHandler != nil && opts.Network.ImageCachePort != 0 {
@@ -361,8 +361,9 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 
 	success = true
 	return &vm.VM{
-			ID:    id,
-			Token: token,
+			ID:         id,
+			Token:      token,
+			ProxyCAPEM: ca.CertPEM(),
 		}, &vm.RunnerConn{
 			Listener: listener,
 			// vz does not surface the guest CID on accepted connections, so
