@@ -205,6 +205,13 @@ func (c *Cmd) Run() error {
 				if toolProvisionItem != nil {
 					renderer.AppendStreams(toolProvisionItem, ev.Stdout, ev.Stderr)
 				}
+			case sandbox.EgressDeniedEvent:
+				// Shown against whatever provisioning step is running, which is
+				// where a blocked download usually surfaces. Denials outside one
+				// still reach the failure message via the session's host list.
+				if lastProvisionItem != nil {
+					renderer.AppendOutput(lastProvisionItem, fmt.Sprintf("egress denied: %s", ev.Host))
+				}
 			case sandbox.ToolProvisionedEvent:
 				if toolProvisionItem != nil {
 					renderer.SetStatus(toolProvisionItem, taskui.StatusPassed, "")

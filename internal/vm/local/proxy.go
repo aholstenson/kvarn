@@ -29,6 +29,7 @@ func startProxy(ctx context.Context, n *link.Network, ca *egressproxy.CA, cfg vm
 		CA:        ca,
 		Injector:  cfg.SecretInjector,
 		Logger:    slog.Default(),
+		OnDenied:  cfg.OnEgressDenied,
 	})
 
 	httpsLn, err := n.ListenAny(443)

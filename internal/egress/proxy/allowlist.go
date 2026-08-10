@@ -14,8 +14,12 @@ var DefaultAllowedHosts = []string{
 	"bitbucket.org",
 	"api.github.com",
 	"codeload.github.com",
-	"objects.githubusercontent.com",
 	"raw.githubusercontent.com",
+	// A release asset download is a 302 from github.com to one of these, and
+	// the client follows it as a fresh connection with its own SNI. Allowing
+	// github.com alone gets a redirect the client cannot follow.
+	"objects.githubusercontent.com",
+	"release-assets.githubusercontent.com",
 
 	// Container registries
 	"registry-1.docker.io",

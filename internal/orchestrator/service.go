@@ -1949,6 +1949,11 @@ func (s *Service) makeEventAdapter(ctx context.Context, sessionID string) func(s
 			message = fmt.Sprintf("Provisioning %s", ev.Tool)
 		case sandbox.ToolProvisionedEvent:
 			return
+		case sandbox.EgressDeniedEvent:
+			// Not a session event: a denial is only interesting next to the
+			// failure it caused, and that failure carries the host list.
+			slog.Info("egress denied", "session_id", sessionID, "host", ev.Host)
+			return
 		case sandbox.ToolProvisionOutputEvent:
 			// Provisioning output rides the dependency-output event so a live
 			// `mise install` streams to a watching client without a new durable

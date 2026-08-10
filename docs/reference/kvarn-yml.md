@@ -112,6 +112,15 @@ allowlist, on top of the defaults needed to fetch dependencies. Entries are
 hostnames, IP addresses, or a `*.domain` wildcard that matches any subdomain.
 Schemes, paths and ports are rejected.
 
+A denied connection is closed without an answer, so the program inside the VM
+reports a truncated download or a reset connection rather than a refusal. Kvarn
+records the hostname and names it in whatever failure follows, so a job that
+dies on "unexpected EOF" still tells you which host to add here.
+
+Matching is per hostname, and a redirect is a new connection to a new host: a
+download that starts at an allowed host and redirects to a CDN needs the CDN
+allowed too.
+
 ## `cache`
 
 [Registered tools](registered-tools.md) (language package managers and build

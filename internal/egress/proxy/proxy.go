@@ -37,6 +37,7 @@ type Proxy struct {
 	dialer      Dialer
 	upstreamTLS *tls.Config
 	log         *slog.Logger
+	onDenied    func(host string)
 }
 
 // Config configures a Proxy.
@@ -47,6 +48,13 @@ type Config struct {
 	Dialer      Dialer
 	UpstreamTLS *tls.Config // nil = system default; ServerName is set per-host
 	Logger      *slog.Logger
+	// OnDenied, if set, is called with the hostname of every refused
+	// connection. A refusal is a closed socket and nothing else, which reaches
+	// the client as a truncated connection rather than as an explanation; this
+	// is how the side that knows the reason gets to tell someone. It is called
+	// from connection-handling goroutines, so it must be safe for concurrent
+	// use and must not block.
+	OnDenied func(host string)
 }
 
 // New constructs a Proxy. CA may be nil for HTTP-only proxies.
@@ -66,6 +74,16 @@ func New(cfg Config) *Proxy {
 		dialer:      d,
 		upstreamTLS: cfg.UpstreamTLS,
 		log:         log,
+		onDenied:    cfg.OnDenied,
+	}
+}
+
+// deny records a refused connection. The caller closes the connection; this
+// only reports it.
+func (p *Proxy) deny(host string) {
+	p.log.Info("egress denied", "host", host)
+	if p.onDenied != nil {
+		p.onDenied(host)
 	}
 }
 
@@ -108,7 +126,7 @@ func (p *Proxy) handleTLS(ctx context.Context, raw net.Conn) {
 	raw.SetReadDeadline(time.Time{})
 
 	if !p.allowlist.Permit(host) {
-		p.log.Info("egress denied", "host", host)
+		p.deny(host)
 		return
 	}
 
@@ -168,7 +186,7 @@ func (p *Proxy) handlePlain(ctx context.Context, raw net.Conn) {
 		host = stripPort(req.URL.Host)
 	}
 	if !p.allowlist.Permit(host) {
-		p.log.Info("egress denied", "host", host)
+		p.deny(host)
 		writeForbidden(raw)
 		return
 	}

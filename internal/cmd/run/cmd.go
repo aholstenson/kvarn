@@ -219,6 +219,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 
 	var lastProvisionItem *taskui.Item
 	var dependenciesItem *taskui.Item
+	var toolProvisionItem *taskui.Item
 	markLastProvisionDone := func() {
 		if lastProvisionItem != nil {
 			renderer.SetStatus(lastProvisionItem, taskui.StatusPassed, "")
@@ -277,6 +278,13 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 			case sandbox.ToolProvisionOutputEvent:
 				if toolProvisionItem != nil {
 					renderer.AppendStreams(toolProvisionItem, ev.Stdout, ev.Stderr)
+				}
+			case sandbox.EgressDeniedEvent:
+				// Shown against whatever provisioning step is running, which is
+				// where a blocked download usually surfaces. Denials outside one
+				// still reach the failure message via the session's host list.
+				if lastProvisionItem != nil {
+					renderer.AppendOutput(lastProvisionItem, fmt.Sprintf("egress denied: %s", ev.Host))
 				}
 			case sandbox.ToolProvisionedEvent:
 				if toolProvisionItem != nil {

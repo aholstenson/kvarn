@@ -43,6 +43,16 @@ var _ = Describe("Allowlist", func() {
 		Expect(a.Permit("evil.com")).To(BeFalse())
 	})
 
+	It("permits every host a GitHub release download passes through", func() {
+		// github.com answers a release asset request with a 302 the client
+		// follows as a fresh connection, so allowing github.com alone leaves
+		// every `gh release download`-shaped fetch failing at the redirect.
+		a := proxy.NewAllowlist(proxy.DefaultAllowedHosts)
+		Expect(a.Permit("github.com")).To(BeTrue())
+		Expect(a.Permit("release-assets.githubusercontent.com")).To(BeTrue())
+		Expect(a.Permit("objects.githubusercontent.com")).To(BeTrue())
+	})
+
 	It("strips port and trailing dot", func() {
 		a := proxy.NewAllowlist([]string{"foo.com"})
 		Expect(a.Permit("foo.com.")).To(BeTrue())
@@ -83,6 +93,7 @@ var _ = Describe("Proxy ServeHTTPS", func() {
 		upstream    *httptest.Server
 		gotAuth     atomic.Value
 		gotPath     atomic.Value
+		deniedHost  atomic.Value
 		ca          *proxy.CA
 		listener    net.Listener
 		serveCancel context.CancelFunc
@@ -91,6 +102,7 @@ var _ = Describe("Proxy ServeHTTPS", func() {
 	BeforeEach(func() {
 		gotAuth.Store("")
 		gotPath.Store("")
+		deniedHost.Store("")
 		upstream = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotAuth.Store(r.Header.Get("Authorization"))
 			gotPath.Store(r.URL.Path)
@@ -119,6 +131,7 @@ var _ = Describe("Proxy ServeHTTPS", func() {
 			}),
 			Dialer:      insecureUpstreamDialer{target: upHost},
 			UpstreamTLS: &tls.Config{InsecureSkipVerify: true},
+			OnDenied:    func(host string) { deniedHost.Store(host) },
 		})
 
 		var ctx context.Context
@@ -170,6 +183,20 @@ var _ = Describe("Proxy ServeHTTPS", func() {
 			_, readErr := conn.Read(one)
 			Expect(readErr).To(HaveOccurred())
 		}
+	})
+
+	It("reports the refused host so the caller can explain the closed socket", func() {
+		pool := x509.NewCertPool()
+		Expect(pool.AppendCertsFromPEM(ca.CertPEM())).To(BeTrue())
+
+		conn, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
+			ServerName: "dl.google.com",
+			RootCAs:    pool,
+		})
+		if err == nil {
+			defer conn.Close()
+		}
+		Eventually(deniedHost.Load).Should(Equal("dl.google.com"))
 	})
 })
 

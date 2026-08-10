@@ -107,6 +107,16 @@ type ToolProvisionOutputEvent struct {
 
 func (ToolProvisionOutputEvent) isEvent() {}
 
+// EgressDeniedEvent reports a connection the allowlist refused. It is a
+// warning, not a failure: plenty of jobs pass with a blocked telemetry ping.
+// It matters when something else fails right afterwards, which is why the
+// hosts are also recorded on the session and named in that failure.
+type EgressDeniedEvent struct {
+	Host string
+}
+
+func (EgressDeniedEvent) isEvent() {}
+
 type ContainerStartedEvent struct{}
 
 func (ContainerStartedEvent) isEvent() {}
@@ -199,9 +209,58 @@ type Session struct {
 	cacheLayers   []cache.Layer
 	onEvent       func(Event)
 
+	deniedMu    sync.Mutex
+	deniedHosts []string
+
 	closers   []func()
 	closersMu sync.Mutex
 	closeOnce sync.Once
+}
+
+// maxRecordedDeniedHosts bounds the set kept for error messages. A job that
+// retries a blocked download in a loop reports the same host every time; the
+// list exists to name the problem, not to log it.
+const maxRecordedDeniedHosts = 20
+
+// recordEgressDenied notes a host the proxy refused. Called from proxy
+// goroutines.
+func (s *Session) recordEgressDenied(host string) {
+	s.deniedMu.Lock()
+	defer s.deniedMu.Unlock()
+	for _, h := range s.deniedHosts {
+		if h == host {
+			return
+		}
+	}
+	if len(s.deniedHosts) >= maxRecordedDeniedHosts {
+		return
+	}
+	s.deniedHosts = append(s.deniedHosts, host)
+}
+
+// DeniedHosts returns the hosts the egress proxy has refused so far, in the
+// order they were first seen.
+func (s *Session) DeniedHosts() []string {
+	s.deniedMu.Lock()
+	defer s.deniedMu.Unlock()
+	return append([]string(nil), s.deniedHosts...)
+}
+
+// annotateEgress adds the hosts the proxy refused to a failure. A refused
+// connection reaches the program inside the VM as a socket that closed
+// mid-handshake, so the error it reports — "unexpected EOF", "connection
+// reset" — describes the symptom and cannot name the cause. The proxy knows
+// the hostname; this is where the two halves meet.
+func (s *Session) annotateEgress(err error) error {
+	if err == nil {
+		return nil
+	}
+	denied := s.DeniedHosts()
+	if len(denied) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w (egress denied: %s — add the host to network.allowed_hosts in kvarn.yml if the job needs it)",
+		err, strings.Join(denied, ", "))
 }
 
 // BareProxy returns the underlying BridgeProxy that talks directly to the VM,
@@ -232,7 +291,8 @@ func (s *Session) RunSetup(ctx context.Context, cfg *project.Config, onDone OnSt
 	if cfg == nil {
 		return &SetupResult{}, nil
 	}
-	return RunSetup(ctx, s.Runner, cfg, s.ShellSessionID, onDone, onOutput)
+	result, err := RunSetup(ctx, s.Runner, cfg, s.ShellSessionID, onDone, onOutput)
+	return result, s.annotateEgress(err)
 }
 
 // RunValidation runs validation steps from the config.
@@ -242,7 +302,8 @@ func (s *Session) RunValidation(ctx context.Context, cfg *project.Config, change
 	if cfg == nil {
 		return &ValidationResult{RequiredPassed: true}, nil
 	}
-	return RunValidation(ctx, s.Runner, cfg, s.ShellSessionID, changedFiles, onDone, onOutput)
+	result, err := RunValidation(ctx, s.Runner, cfg, s.ShellSessionID, changedFiles, onDone, onOutput)
+	return result, s.annotateEgress(err)
 }
 
 // ChangedFiles runs `git diff --name-only HEAD` on the VM and returns the list of changed file paths.
@@ -405,6 +466,10 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		}
 	}
 	createOpts.Network.AllowedHosts = append(createOpts.Network.AllowedHosts, allowedHosts...)
+	createOpts.Network.OnEgressDenied = func(host string) {
+		sess.recordEgressDenied(host)
+		emit(opts, EgressDeniedEvent{Host: host})
+	}
 	// CreateOpts.Network.SecretInjector is whatever the caller set; the
 	// orchestrator builds a PlaceholderInjector for bearer-typed secrets
 	// before invoking sandbox.Start, leaving it nil when no bearer secrets
@@ -500,7 +565,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		if err := InstallDependencies(ctx, proxy, deps, func(stdout, stderr string) {
 			emit(opts, DependencyOutputEvent{Stdout: stdout, Stderr: stderr})
 		}); err != nil {
-			return nil, fmt.Errorf("install dependencies: %w", err)
+			return nil, sess.annotateEgress(fmt.Errorf("install dependencies: %w", err))
 		}
 		emit(opts, DependenciesInstalledEvent{})
 	}

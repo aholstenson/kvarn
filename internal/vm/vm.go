@@ -78,6 +78,12 @@ type NetworkConfig struct {
 	// before they are sent upstream. May be nil to forward unmodified.
 	SecretInjector egressproxy.SecretInjector
 
+	// OnEgressDenied, when non-nil, is called with the hostname of each
+	// connection the allowlist refuses, so a caller can tell the job why
+	// something inside the VM saw its connection cut. Called from proxy
+	// goroutines: it must be concurrency-safe and must not block.
+	OnEgressDenied func(host string)
+
 	// ImageCacheHandler, when non-nil, is bound on the per-VM gateway IP
 	// at ImageCachePort so the VM's container runtime can use it as a
 	// pull-through OCI registry mirror. Same handler is shared across
