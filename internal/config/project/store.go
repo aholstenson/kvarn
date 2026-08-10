@@ -23,9 +23,12 @@ type Project struct {
 	// Nil means "inherit from defaults". Resolution order is documented on
 	// internal/config/limits.
 	MaxCostUSD *float64
-	// ReportCostOnPR overrides whether the work-log PR comment includes a
+	// ReportCostOnPR overrides whether a delivery's PR comment includes a
 	// cost section. Nil means "inherit from defaults".
 	ReportCostOnPR *bool
+	// ReportWorklogOnPR overrides whether a delivery's PR comment includes the
+	// collapsible work log. Nil means "inherit from defaults".
+	ReportWorklogOnPR *bool
 	// MaxValidationRetries overrides the user-level default for how many
 	// additional agent attempts to allow after a required validation step
 	// fails. Nil means "inherit from defaults". 0 means "no retries".

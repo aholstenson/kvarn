@@ -82,16 +82,26 @@ max_validation_retries = 0
 For local runs, `kvarn run --max-validation-retries N` does the same; it
 defaults to `0` there, since you are watching.
 
-## Report cost on the pull request
+## Choose what the pull-request comment carries
 
 ```toml
 [projects.my-project]
 report_cost_on_pr = true
+report_worklog_on_pr = true
 ```
 
-Adds a cost section to the work-log comment Kvarn posts on the PR. On by
-default. Turn it off for repositories where the comment is noise, or where the
-figure would be visible to people who shouldn't see it.
+Both are on by default and control one section each of the comment Kvarn posts
+on the PR: `report_cost_on_pr` the cost summary, `report_worklog_on_pr` the
+collapsible work log of what the agent did.
+
+Turn the cost section off for repositories where the figure would be visible to
+people who shouldn't see it. Turn the work log off where it is noise — a busy
+run's log is long, and on a repository whose reviewers only want the result it
+buries it. Neither switch changes what is recorded: the work log is also
+emitted as session events, so `kvarn jobs events <session-id>` still shows it.
+
+Both resolve project → `[defaults]` in `agents.toml` → built-in, so set them
+once in `agents.toml` to change the habit everywhere and override per project.
 
 ## What a cap trip looks like
 

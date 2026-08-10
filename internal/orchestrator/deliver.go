@@ -48,8 +48,10 @@ type deliveryRequest struct {
 	// just established that what it produced does not pass.
 	validationFailed bool
 	cost             cost.Report
-	reportCost       bool
-	log              *slog.Logger
+	// sections says which optional sections the comments this delivery posts
+	// carry, resolved from project and user config.
+	sections commentSections
+	log      *slog.Logger
 }
 
 // deliverySinkOrder is the order sinks are attempted in, which is not the order
@@ -129,7 +131,7 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 		case coding.SinkNewPullRequest:
 			if err := s.submitChanges(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
 				req.proj, req.forgeCfg, req.baseBranch, req.cloneURL, req.cloneDir, req.creds,
-				req.userPrompt, req.worklog, req.cost, req.reportCost, req.log); err != nil {
+				req.userPrompt, req.worklog, req.cost, req.sections, req.log); err != nil {
 				return err
 			}
 			commented = true
@@ -140,7 +142,7 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 			}
 			if err := s.submitFollowup(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
 				req.proj, req.forgeCfg, req.pr, req.cloneURL, req.cloneDir, req.creds,
-				req.userPrompt, req.worklog, req.cost, req.reportCost, req.log); err != nil {
+				req.userPrompt, req.worklog, req.cost, req.sections, req.log); err != nil {
 				return err
 			}
 			commented = true
@@ -183,7 +185,7 @@ func (s *Service) postResultComment(ctx context.Context, req deliveryRequest) er
 		result = req.agentResult.Description
 	}
 	body := formatResultComment(req.userPrompt, result, req.valResult,
-		req.worklog, req.reportCost, req.cost)
+		req.worklog, req.sections, req.cost)
 	if err := req.forgeImpl.PostComment(ctx, forge.PostCommentOpts{
 		RepoURL:     req.cloneURL,
 		PRRef:       prRef,
@@ -209,7 +211,7 @@ const truncationNote = "\n\n_(truncated: the full result is available with `kvar
 // validation steps went, and the same collapsible work log and cost sections
 // every other comment carries.
 func formatResultComment(prompt, result string, val *sandbox.ValidationResult,
-	entries []worklogEntry, includeCost bool, report cost.Report,
+	entries []worklogEntry, sections commentSections, report cost.Report,
 ) string {
 	var sb strings.Builder
 	sb.WriteString("## Task\n\n")
@@ -219,8 +221,8 @@ func formatResultComment(prompt, result string, val *sandbox.ValidationResult,
 		sb.WriteString(result)
 	}
 	writeValidation(&sb, val)
-	writeWorklog(&sb, entries)
-	writeCostSection(&sb, includeCost, report)
+	writeWorklog(&sb, sections.worklog, entries)
+	writeCostSection(&sb, sections.cost, report)
 	return trimCommentBody(sb.String())
 }
 

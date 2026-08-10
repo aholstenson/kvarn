@@ -25,6 +25,7 @@ type projectEntry struct {
 	Forge                string              `toml:"forge,omitempty"`
 	MaxCostUSD           *float64            `toml:"max_cost_usd,omitempty"`
 	ReportCostOnPR       *bool               `toml:"report_cost_on_pr,omitempty"`
+	ReportWorklogOnPR    *bool               `toml:"report_worklog_on_pr,omitempty"`
 	MaxValidationRetries *int                `toml:"max_validation_retries,omitempty"`
 	Jobs                 map[string]jobEntry `toml:"jobs,omitempty"`
 	BranchPrefix         string              `toml:"branch_prefix,omitempty"`
@@ -112,6 +113,7 @@ func entryToProject(name string, entry *projectEntry) (*project.Project, error) 
 		Forge:                entry.Forge,
 		MaxCostUSD:           entry.MaxCostUSD,
 		ReportCostOnPR:       entry.ReportCostOnPR,
+		ReportWorklogOnPR:    entry.ReportWorklogOnPR,
 		MaxValidationRetries: entry.MaxValidationRetries,
 		Jobs:                 jobs,
 		BranchPrefix:         entry.BranchPrefix,
@@ -146,6 +148,7 @@ func projectToEntry(p *project.Project) (string, *projectEntry) {
 		Forge:                p.Forge,
 		MaxCostUSD:           p.MaxCostUSD,
 		ReportCostOnPR:       p.ReportCostOnPR,
+		ReportWorklogOnPR:    p.ReportWorklogOnPR,
 		MaxValidationRetries: p.MaxValidationRetries,
 		Jobs:                 jobs,
 		BranchPrefix:         p.BranchPrefix,

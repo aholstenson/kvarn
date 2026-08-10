@@ -82,6 +82,7 @@ type Defaults struct {
 	MaxCostUSD           *float64
 	WarnThreshold        *float64
 	ReportCostOnPR       *bool
+	ReportWorklogOnPR    *bool
 	MaxValidationRetries *int
 	Jobs                 map[string]JobDefaults
 }

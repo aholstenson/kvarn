@@ -32,6 +32,7 @@ The table key (`my-project` above) is the project name clients pass to
 repo = "owner/repo"
 max_cost_usd = 5.0
 report_cost_on_pr = true
+report_worklog_on_pr = true
 max_validation_retries = 3
 
 [projects.my-project.jobs.review]
@@ -41,7 +42,8 @@ max_cost_usd = 1.0
 | Key | Type | Notes |
 | --- | --- | --- |
 | `max_cost_usd` | float | Hard budget for a job. The agent is warned as it approaches, and the run is cancelled when it is reached. |
-| `report_cost_on_pr` | bool | Include a cost section in the work-log PR comment. |
+| `report_cost_on_pr` | bool | Include a cost section in the PR comment a delivery posts. |
+| `report_worklog_on_pr` | bool | Include the collapsible work log in the PR comment a delivery posts. The log is still emitted as session events either way. |
 | `max_validation_retries` | int | Additional agent passes allowed after a required validation step fails. `0` disables retries. |
 
 `[projects.<name>.jobs.<mode>]` overrides `max_cost_usd`,
@@ -49,7 +51,8 @@ max_cost_usd = 1.0
 `implement`, `fix`, `feedback`, `review`, `research`).
 
 Omitting these keys does **not** mean unlimited — the built-in fallbacks are
-`max_cost_usd = 5.00`, `max_validation_retries = 3`, `report_cost_on_pr = true`.
+`max_cost_usd = 5.00`, `max_validation_retries = 3`, `report_cost_on_pr = true`,
+`report_worklog_on_pr = true`.
 The full cascade, including the user-level defaults in `agents.toml`, is in
 [`agents.toml`](agents-toml.md#resolution-order).
 

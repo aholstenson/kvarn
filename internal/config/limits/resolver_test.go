@@ -19,6 +19,7 @@ var _ = Describe("Resolve", func() {
 		Expect(out.MaxCostUSD).To(Equal(limits.BuiltinMaxCostUSD))
 		Expect(out.WarnThreshold).To(Equal(limits.BuiltinWarnThreshold))
 		Expect(out.ReportCostOnPR).To(Equal(limits.BuiltinReportCostOnPR))
+		Expect(out.ReportWorklogOnPR).To(Equal(limits.BuiltinReportWorklogOnPR))
 	})
 
 	It("uses defaults.max_cost_usd when set", func() {
@@ -71,6 +72,29 @@ var _ = Describe("Resolve", func() {
 		proj := &project.Project{ReportCostOnPR: b(true)}
 		Expect(limits.Resolve(proj, modelcfg.Defaults{ReportCostOnPR: b(false)}, "implement").ReportCostOnPR).
 			To(BeTrue())
+	})
+
+	It("resolves ReportWorklogOnPR project → defaults → built-in", func() {
+		// Built-in.
+		Expect(limits.Resolve(nil, modelcfg.Defaults{}, "implement").ReportWorklogOnPR).
+			To(Equal(limits.BuiltinReportWorklogOnPR))
+		// Defaults override built-in.
+		Expect(limits.Resolve(nil, modelcfg.Defaults{ReportWorklogOnPR: b(false)}, "implement").ReportWorklogOnPR).
+			To(BeFalse())
+		// Project overrides defaults.
+		proj := &project.Project{ReportWorklogOnPR: b(true)}
+		Expect(limits.Resolve(proj, modelcfg.Defaults{ReportWorklogOnPR: b(false)}, "implement").ReportWorklogOnPR).
+			To(BeTrue())
+	})
+
+	It("resolves the two report toggles independently", func() {
+		out := limits.Resolve(
+			&project.Project{ReportWorklogOnPR: b(false)},
+			modelcfg.Defaults{},
+			"implement",
+		)
+		Expect(out.ReportWorklogOnPR).To(BeFalse())
+		Expect(out.ReportCostOnPR).To(BeTrue())
 	})
 
 	It("WarnThreshold is user-level only", func() {

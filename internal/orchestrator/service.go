@@ -126,22 +126,35 @@ func firstLine(s string) string {
 	return ""
 }
 
+// commentSections says which optional sections a delivery's PR comment carries.
+// Both are resolved per job from project and user config; they travel together
+// because every comment formatter needs the same answer for both.
+type commentSections struct {
+	worklog bool
+	cost    bool
+}
+
+// sectionsFrom reads the comment-section choices out of resolved job limits.
+func sectionsFrom(l limits.Limits) commentSections {
+	return commentSections{worklog: l.ReportWorklogOnPR, cost: l.ReportCostOnPR}
+}
+
 // formatWorklogComment renders the original prompt and a collapsible work log
-// for posting as a PR comment. When includeCost is true and report has any
+// for posting as a PR comment. When sections.cost is set and report has any
 // recorded spend, a "## Cost" section is appended after the work log.
-func formatWorklogComment(prompt string, entries []worklogEntry, includeCost bool, report cost.Report) string {
+func formatWorklogComment(prompt string, entries []worklogEntry, sections commentSections, report cost.Report) string {
 	var sb strings.Builder
 	sb.WriteString("## Task\n\n")
 	sb.WriteString(strings.TrimSpace(prompt))
-	writeWorklog(&sb, entries)
-	writeCostSection(&sb, includeCost, report)
+	writeWorklog(&sb, sections.worklog, entries)
+	writeCostSection(&sb, sections.cost, report)
 	return sb.String()
 }
 
 // formatFollowupComment renders the comment posted after a feedback run: the
 // feedback that was addressed, the agent's own account of what it changed, and
 // the same work log / cost sections a fresh run posts.
-func formatFollowupComment(feedback, summary string, entries []worklogEntry, includeCost bool, report cost.Report) string {
+func formatFollowupComment(feedback, summary string, entries []worklogEntry, sections commentSections, report cost.Report) string {
 	var sb strings.Builder
 	sb.WriteString("## Feedback addressed\n\n")
 	sb.WriteString(strings.TrimSpace(feedback))
@@ -149,15 +162,17 @@ func formatFollowupComment(feedback, summary string, entries []worklogEntry, inc
 		sb.WriteString("\n\n## Changes\n\n")
 		sb.WriteString(summary)
 	}
-	writeWorklog(&sb, entries)
-	writeCostSection(&sb, includeCost, report)
+	writeWorklog(&sb, sections.worklog, entries)
+	writeCostSection(&sb, sections.cost, report)
 	return sb.String()
 }
 
-// writeWorklog appends the collapsible work-log section, or nothing when there
-// is no log to show.
-func writeWorklog(sb *strings.Builder, entries []worklogEntry) {
-	if len(entries) == 0 {
+// writeWorklog appends the collapsible work-log section, or nothing when the
+// section is turned off or there is no log to show. Suppressing it only keeps
+// it off the comment: every entry is also emitted as a session event, so the
+// durable history a client reads is unaffected.
+func writeWorklog(sb *strings.Builder, includeWorklog bool, entries []worklogEntry) {
+	if !includeWorklog || len(entries) == 0 {
 		return
 	}
 	sb.WriteString("\n\n<details>\n<summary>Work log</summary>\n\n")
@@ -1572,7 +1587,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		valResult:        valResult,
 		validationFailed: requiredFailed,
 		cost:             tracker.Snapshot(),
-		reportCost:       costLimits.ReportCostOnPR,
+		sections:         sectionsFrom(costLimits),
 		log:              log,
 	})
 
@@ -1677,7 +1692,7 @@ func (s *Service) submitChanges(
 	prompt string,
 	worklog []worklogEntry,
 	costReport cost.Report,
-	reportCostOnPR bool,
+	sections commentSections,
 	log *slog.Logger,
 ) error {
 	// Check if there are any changes.
@@ -1781,7 +1796,7 @@ func (s *Service) submitChanges(
 
 	// Post task + work log as a PR comment so it stays out of any
 	// squash-merge commit message.
-	commentBody := formatWorklogComment(prompt, worklog, reportCostOnPR, costReport)
+	commentBody := formatWorklogComment(prompt, worklog, sections, costReport)
 	if err := forgeImpl.PostComment(ctx, forge.PostCommentOpts{
 		RepoURL:     cloneURL,
 		PRRef:       pr.Ref,
@@ -1813,7 +1828,7 @@ func (s *Service) submitFollowup(
 	feedback string,
 	worklog []worklogEntry,
 	costReport cost.Report,
-	reportCostOnPR bool,
+	sections commentSections,
 	log *slog.Logger,
 ) error {
 	// The VM cloned the PR head, so the changed set is the follow-up delta.
@@ -1888,7 +1903,7 @@ func (s *Service) submitFollowup(
 
 	log.Info("follow-up commit pushed", "branch", pr.headBranch, "url", pr.url)
 
-	commentBody := formatFollowupComment(feedback, agentResult.Description, worklog, reportCostOnPR, costReport)
+	commentBody := formatFollowupComment(feedback, agentResult.Description, worklog, sections, costReport)
 	if err := forgeImpl.PostComment(ctx, forge.PostCommentOpts{
 		RepoURL:     cloneURL,
 		PRRef:       pr.ref,

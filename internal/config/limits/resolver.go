@@ -14,18 +14,21 @@ const (
 	BuiltinMaxCostUSD           = 5.00
 	BuiltinWarnThreshold        = 0.80
 	BuiltinReportCostOnPR       = true
+	BuiltinReportWorklogOnPR    = true
 	BuiltinMaxValidationRetries = 3
 )
 
 // Limits is the resolved per-job configuration. MaxCostUSD is the hard cap;
 // WarnThreshold is the fraction of MaxCostUSD at which the soft warning
-// fires; ReportCostOnPR decides whether the work-log PR comment shows the
-// cost section; MaxValidationRetries is the maximum number of additional
-// agent passes allowed after the first when required validation fails.
+// fires; ReportCostOnPR and ReportWorklogOnPR decide whether a delivery's PR
+// comment shows the cost and work-log sections; MaxValidationRetries is the
+// maximum number of additional agent passes allowed after the first when
+// required validation fails.
 type Limits struct {
 	MaxCostUSD           float64
 	WarnThreshold        float64
 	ReportCostOnPR       bool
+	ReportWorklogOnPR    bool
 	MaxValidationRetries int
 }
 
@@ -38,8 +41,9 @@ type Limits struct {
 //  4. defaults.max_cost_usd
 //  5. built-in fallback (BuiltinMaxCostUSD)
 //
-// ReportCostOnPR resolves project → defaults → built-in. WarnThreshold is
-// user-level only (defaults → built-in); there is no project knob.
+// ReportCostOnPR and ReportWorklogOnPR resolve project → defaults → built-in.
+// WarnThreshold is user-level only (defaults → built-in); there is no project
+// knob.
 //
 // MaxValidationRetries follows the same five-step rule as MaxCostUSD
 // (project.jobs.<mode> → project → defaults.jobs.<mode> → defaults → builtin).
@@ -51,6 +55,7 @@ func Resolve(proj *project.Project, defaults modelcfg.Defaults, mode string) Lim
 		MaxCostUSD:           BuiltinMaxCostUSD,
 		WarnThreshold:        BuiltinWarnThreshold,
 		ReportCostOnPR:       BuiltinReportCostOnPR,
+		ReportWorklogOnPR:    BuiltinReportWorklogOnPR,
 		MaxValidationRetries: BuiltinMaxValidationRetries,
 	}
 
@@ -102,6 +107,13 @@ func Resolve(proj *project.Project, defaults modelcfg.Defaults, mode string) Lim
 	}
 	if proj != nil && proj.ReportCostOnPR != nil {
 		out.ReportCostOnPR = *proj.ReportCostOnPR
+	}
+
+	if defaults.ReportWorklogOnPR != nil {
+		out.ReportWorklogOnPR = *defaults.ReportWorklogOnPR
+	}
+	if proj != nil && proj.ReportWorklogOnPR != nil {
+		out.ReportWorklogOnPR = *proj.ReportWorklogOnPR
 	}
 
 	return out

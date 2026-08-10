@@ -52,6 +52,7 @@ type defaultsData struct {
 	MaxCostUSD           *float64               `toml:"max_cost_usd,omitempty"`
 	WarnThreshold        *float64               `toml:"warn_threshold,omitempty"`
 	ReportCostOnPR       *bool                  `toml:"report_cost_on_pr,omitempty"`
+	ReportWorklogOnPR    *bool                  `toml:"report_worklog_on_pr,omitempty"`
 	MaxValidationRetries *int                   `toml:"max_validation_retries,omitempty"`
 	Jobs                 map[string]jobDefaults `toml:"jobs,omitempty"`
 }
@@ -206,6 +207,7 @@ func (s *Store) Defaults(ctx context.Context) (modelcfg.Defaults, error) {
 		MaxCostUSD:           fd.Defaults.MaxCostUSD,
 		WarnThreshold:        fd.Defaults.WarnThreshold,
 		ReportCostOnPR:       fd.Defaults.ReportCostOnPR,
+		ReportWorklogOnPR:    fd.Defaults.ReportWorklogOnPR,
 		MaxValidationRetries: fd.Defaults.MaxValidationRetries,
 	}
 	if len(fd.Defaults.Jobs) > 0 {

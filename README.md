@@ -354,7 +354,7 @@ default_branch = "main"
 forge = "github"
 ```
 
-Optionally cap spend per job and report cost on the PR:
+Optionally cap spend per job and choose what the PR comment carries:
 
 ```toml
 [projects.my-project]
@@ -362,7 +362,8 @@ repo = "owner/repo"
 default_branch = "main"
 forge = "github"
 max_cost_usd = 5.0       # hard budget; the job is cancelled once it is reached
-report_cost_on_pr = true # post a cost summary on the opened PR
+report_cost_on_pr = true    # post a cost summary on the opened PR
+report_worklog_on_pr = true # post the agent's work log on the opened PR
 
 [projects.my-project.jobs.review]
 max_cost_usd = 1.0       # override the cap for a specific mode
