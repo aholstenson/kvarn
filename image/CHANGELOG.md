@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/aholstenson/kvarn/compare/image-v0.3.0...image-v0.4.0) (2026-08-10)
+
+
+### Features
+
+* **image:** Include tun in the VM image ([4019074](https://github.com/aholstenson/kvarn/commit/401907405ed6326c2a47e9c873c1721a63a1c3dd))
+
 ## [0.3.0](https://github.com/aholstenson/kvarn/compare/image-v0.2.0...image-v0.3.0) (2026-06-05)
 
 
