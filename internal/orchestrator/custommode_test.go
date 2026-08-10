@@ -132,7 +132,7 @@ var _ = Describe("Custom agent modes", func() {
 			if err != nil {
 				return nil, err
 			}
-			return &testSandbox{runner: proxy, shellSessionID: sessResp.SessionId, workingDir: wsDir}, nil
+			return newTestSandbox(proxy, sessResp.SessionId, wsDir), nil
 		}
 
 		svc := orchestrator.NewServiceWithOpts(orchestrator.ServiceOpts{

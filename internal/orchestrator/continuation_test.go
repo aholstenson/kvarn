@@ -181,11 +181,7 @@ var _ = Describe("StartJob continuing a pull request", func() {
 			if err != nil {
 				return nil, err
 			}
-			return &testSandbox{
-				runner:         proxy,
-				shellSessionID: sessResp.SessionId,
-				workingDir:     wsDir,
-			}, nil
+			return newTestSandbox(proxy, sessResp.SessionId, wsDir), nil
 		}
 
 		mockForgeInst = &mockForge{

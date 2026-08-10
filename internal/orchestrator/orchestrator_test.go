@@ -204,6 +204,19 @@ type testSandbox struct {
 	runner         sandbox.RunnerProxy
 	shellSessionID string
 	workingDir     string
+	baseCommit     string
+}
+
+// newTestSandbox pins the workspace's base commit the way sandbox.Start does,
+// so specs measure change against the commit the workspace started at rather
+// than against whatever HEAD the run leaves behind.
+func newTestSandbox(runner sandbox.RunnerProxy, shellSessionID string, workingDir string) *testSandbox {
+	return &testSandbox{
+		runner:         runner,
+		shellSessionID: shellSessionID,
+		workingDir:     workingDir,
+		baseCommit:     sandbox.ResolveBaseCommit(context.Background(), runner, workingDir),
+	}
 }
 
 func (m *testSandbox) GetRunner() sandbox.RunnerProxy    { return m.runner }
@@ -227,11 +240,11 @@ func (m *testSandbox) RunValidation(ctx context.Context, cfg *projconfig.Config,
 }
 
 func (m *testSandbox) ChangedFiles(ctx context.Context) ([]string, error) {
-	return sandbox.ChangedFiles(ctx, m.runner, m.workingDir)
+	return sandbox.ChangedFiles(ctx, m.runner, m.workingDir, m.baseCommit)
 }
 
 func (m *testSandbox) ExtractChanges(ctx context.Context, destDir string) error {
-	return sandbox.ExtractChanges(ctx, m.runner, m.workingDir, destDir)
+	return sandbox.ExtractChanges(ctx, m.runner, m.workingDir, destDir, m.baseCommit)
 }
 
 // mockSCM records clone calls and performs a real local clone.
@@ -246,6 +259,9 @@ type mockSCM struct {
 	pushCalls     int
 	pushErr       error
 	lastPushOpts  scm.CommitAndPushOpts
+	// onPush observes the push while the repository directory still exists;
+	// the orchestrator removes it once the run finishes.
+	onPush func(scm.CommitAndPushOpts)
 	// Tokens as resolved at the moment of each operation, which is how a real
 	// SCM reads them.
 	lastCloneToken string
@@ -295,6 +311,9 @@ func (m *mockSCM) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts)
 	m.pushCalls++
 	m.lastPushOpts = opts
 	m.lastPushToken = creds.APIToken()
+	if m.onPush != nil {
+		m.onPush(opts)
+	}
 	return m.pushErr
 }
 
@@ -550,11 +569,7 @@ var _ = Describe("StartJob", func() {
 				return nil, err
 			}
 
-			return &testSandbox{
-				runner:         proxy,
-				shellSessionID: sessResp.SessionId,
-				workingDir:     wsDir,
-			}, nil
+			return newTestSandbox(proxy, sessResp.SessionId, wsDir), nil
 		}
 
 		mockForgeInst = &mockForge{scmImpl: mockScm}
@@ -900,11 +915,7 @@ var _ = Describe("StartJob with secrets", func() {
 			if err != nil {
 				return nil, err
 			}
-			return &testSandbox{
-				runner:         proxy,
-				shellSessionID: sessResp.SessionId,
-				workingDir:     wsDir,
-			}, nil
+			return newTestSandbox(proxy, sessResp.SessionId, wsDir), nil
 		}
 
 		mockForgeInst := &mockForge{scmImpl: mockScm}
@@ -1123,11 +1134,7 @@ var _ = Describe("StartJob submission flow", func() {
 			if err != nil {
 				return nil, err
 			}
-			return &testSandbox{
-				runner:         proxy,
-				shellSessionID: sessResp.SessionId,
-				workingDir:     wsDir,
-			}, nil
+			return newTestSandbox(proxy, sessResp.SessionId, wsDir), nil
 		}
 
 		mockForgeInst = &mockForge{scmImpl: mockScm}
@@ -1369,11 +1376,7 @@ var _ = Describe("StartJob admission scheduler", func() {
 			if err != nil {
 				return nil, err
 			}
-			return &testSandbox{
-				runner:         proxy,
-				shellSessionID: sessResp.SessionId,
-				workingDir:     wsDir,
-			}, nil
+			return newTestSandbox(proxy, sessResp.SessionId, wsDir), nil
 		}
 
 		// Pool sized so two jobs of 2 vCPU / 4 GiB / 16 GiB fit (filling the

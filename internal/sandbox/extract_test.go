@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/sandbox"
@@ -69,6 +70,16 @@ func git(dir string, args ...string) {
 	Expect(err).NotTo(HaveOccurred(), "git %v: %s", args, out)
 }
 
+// gitOut runs a git command in dir and returns its trimmed stdout.
+func gitOut(dir string, args ...string) string {
+	GinkgoHelper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	Expect(err).NotTo(HaveOccurred(), "git %v", args)
+	return strings.TrimSpace(string(out))
+}
+
 // writeFile writes content at path relative to dir, creating parents.
 func writeFile(dir string, path string, content string, perm os.FileMode) {
 	GinkgoHelper()
@@ -90,10 +101,11 @@ func modeOf(path string) os.FileMode {
 
 var _ = Describe("ExtractChanges", func() {
 	var (
-		ctx     context.Context
-		runner  *gitRunnerProxy
-		vmDir   string
-		destDir string
+		ctx        context.Context
+		runner     *gitRunnerProxy
+		vmDir      string
+		destDir    string
+		baseCommit string
 	)
 
 	BeforeEach(func() {
@@ -119,6 +131,8 @@ var _ = Describe("ExtractChanges", func() {
 		git(vmDir, "add", "-A")
 		git(vmDir, "commit", "-m", "baseline")
 
+		baseCommit = gitOut(vmDir, "rev-parse", "HEAD")
+
 		// destDir plays the host clone sitting at that same commit.
 		git(root, "clone", vmDir, destDir)
 	})
@@ -140,7 +154,7 @@ var _ = Describe("ExtractChanges", func() {
 		git(vmDir, "mv", "docs/old.md", "docs/new.md")
 		Expect(os.Remove(filepath.Join(vmDir, "stale.txt"))).To(Succeed())
 
-		Expect(sandbox.ExtractChanges(ctx, runner, vmDir, destDir)).To(Succeed())
+		Expect(sandbox.ExtractChanges(ctx, runner, vmDir, destDir, baseCommit)).To(Succeed())
 
 		Expect(os.ReadFile(filepath.Join(destDir, "plain.txt"))).To(Equal([]byte("updated\n")))
 		Expect(modeOf(filepath.Join(destDir, "plain.txt"))).To(Equal(os.FileMode(0o644)))
@@ -164,7 +178,7 @@ var _ = Describe("ExtractChanges", func() {
 		Expect(os.Symlink("plain.txt", filepath.Join(vmDir, "link.txt"))).To(Succeed())
 		Expect(os.Remove(filepath.Join(vmDir, "stale.txt"))).To(Succeed())
 
-		Expect(sandbox.ExtractChanges(ctx, runner, vmDir, destDir)).To(Succeed())
+		Expect(sandbox.ExtractChanges(ctx, runner, vmDir, destDir, baseCommit)).To(Succeed())
 
 		// The point of preserving modes is that the commit made from destDir
 		// matches the VM's tree, so compare what each side would commit.
@@ -180,11 +194,12 @@ var _ = Describe("ExtractChanges", func() {
 		git(vmDir, "add", "-A")
 		git(vmDir, "commit", "-m", "make plain.txt a symlink")
 		git(destDir, "pull", "--ff-only")
+		baseCommit = gitOut(vmDir, "rev-parse", "HEAD")
 
 		Expect(os.Remove(filepath.Join(vmDir, "plain.txt"))).To(Succeed())
 		writeFile(vmDir, "plain.txt", "regular again\n", 0o644)
 
-		Expect(sandbox.ExtractChanges(ctx, runner, vmDir, destDir)).To(Succeed())
+		Expect(sandbox.ExtractChanges(ctx, runner, vmDir, destDir, baseCommit)).To(Succeed())
 
 		info, err := os.Lstat(filepath.Join(destDir, "plain.txt"))
 		Expect(err).NotTo(HaveOccurred())
@@ -192,12 +207,28 @@ var _ = Describe("ExtractChanges", func() {
 		Expect(os.ReadFile(filepath.Join(destDir, "plain.txt"))).To(Equal([]byte("regular again\n")))
 	})
 
+	It("extracts work the agent committed inside the VM", func() {
+		// Agents are free to run git themselves; against HEAD the commit below
+		// would look like an untouched worktree and the work would be lost.
+		writeFile(vmDir, "plain.txt", "committed\n", 0o644)
+		writeFile(vmDir, "bin/new.sh", "#!/bin/sh\n", 0o755)
+		Expect(os.Remove(filepath.Join(vmDir, "stale.txt"))).To(Succeed())
+		git(vmDir, "add", "-A")
+		git(vmDir, "commit", "-m", "agent commit")
+
+		Expect(sandbox.ExtractChanges(ctx, runner, vmDir, destDir, baseCommit)).To(Succeed())
+
+		Expect(os.ReadFile(filepath.Join(destDir, "plain.txt"))).To(Equal([]byte("committed\n")))
+		Expect(modeOf(filepath.Join(destDir, "bin/new.sh"))).To(Equal(os.FileMode(0o755)))
+		Expect(filepath.Join(destDir, "stale.txt")).NotTo(BeAnExistingFile())
+	})
+
 	It("refuses to write through a symlinked directory in the destination", func() {
 		outside := GinkgoT().TempDir()
 		Expect(os.Symlink(outside, filepath.Join(destDir, "docs-link"))).To(Succeed())
 		writeFile(vmDir, "docs-link/pwned.txt", "should not escape\n", 0o644)
 
-		err := sandbox.ExtractChanges(ctx, runner, vmDir, destDir)
+		err := sandbox.ExtractChanges(ctx, runner, vmDir, destDir, baseCommit)
 		Expect(err).To(MatchError(ContainSubstring("crosses symlink")))
 		Expect(filepath.Join(outside, "pwned.txt")).NotTo(BeAnExistingFile())
 	})

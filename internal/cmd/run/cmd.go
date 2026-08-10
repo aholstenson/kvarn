@@ -629,7 +629,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 	if mode.WritesChanges() {
 		switch {
 		case c.Diff:
-			diffLineCount, outputErr = emitDiff(ctx, sess.GetRunner(), sess.GetWorkingDir(), deps.Stdout)
+			diffLineCount, outputErr = emitDiff(ctx, sess.GetRunner(), sess.GetWorkingDir(), sess.GetBaseCommit(), deps.Stdout)
 		case c.Apply:
 			appliedFileCount, outputErr = emitApply(ctx, sess, c.Dir, deps.Stdout)
 		}
@@ -675,19 +675,21 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 type extractor interface {
 	GetRunner() sandbox.RunnerProxy
 	GetWorkingDir() string
+	GetBaseCommit() string
 	ExtractChanges(ctx context.Context, destDir string) error
 }
 
-// emitDiff runs `git diff HEAD` inside the VM and copies the result to out.
+// emitDiff runs `git diff <base>` inside the VM and copies the result to out.
 // Returns the number of lines emitted.
-func emitDiff(ctx context.Context, runner sandbox.RunnerProxy, workdir string, out io.Writer) (int, error) {
+func emitDiff(ctx context.Context, runner sandbox.RunnerProxy, workdir string, baseRef string, out io.Writer) (int, error) {
+	base := sandbox.BaseRef(baseRef)
 	resp, err := runner.Exec(ctx, &v1.ExecRequest{
 		Command:    "git",
-		Args:       []string{"diff", "HEAD"},
+		Args:       []string{"diff", base},
 		WorkingDir: workdir,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("git diff HEAD: %w", err)
+		return 0, fmt.Errorf("git diff %s: %w", base, err)
 	}
 	if _, err := io.WriteString(out, resp.Stdout); err != nil {
 		return 0, fmt.Errorf("write diff: %w", err)
@@ -701,7 +703,7 @@ func emitDiff(ctx context.Context, runner sandbox.RunnerProxy, workdir string, o
 // emitApply extracts changed files from the VM and writes them onto the
 // host working directory. Returns the count of files added/modified.
 func emitApply(ctx context.Context, sess extractor, destDir string, out io.Writer) (int, error) {
-	added, modified, deleted, err := classifyChanges(ctx, sess.GetRunner(), sess.GetWorkingDir())
+	added, modified, deleted, err := classifyChanges(ctx, sess.GetRunner(), sess.GetWorkingDir(), sess.GetBaseCommit())
 	if err != nil {
 		return 0, fmt.Errorf("classify changes: %w", err)
 	}
@@ -713,11 +715,11 @@ func emitApply(ctx context.Context, sess extractor, destDir string, out io.Write
 	return added + modified, nil
 }
 
-// classifyChanges runs git diff against HEAD inside the VM to count added,
-// modified, and deleted files. ExtractChanges also stages all changes via
+// classifyChanges runs git diff against the base commit inside the VM to count
+// added, modified, and deleted files. ExtractChanges also stages all changes via
 // `git add -A`, but we run our own classification first so we can report
 // counts before mutating the host directory.
-func classifyChanges(ctx context.Context, runner sandbox.RunnerProxy, workdir string) (added, modified, deleted int, _ error) {
+func classifyChanges(ctx context.Context, runner sandbox.RunnerProxy, workdir string, baseRef string) (added, modified, deleted int, _ error) {
 	stage, err := runner.Exec(ctx, &v1.ExecRequest{
 		Command: "git", Args: []string{"add", "-A"}, WorkingDir: workdir,
 	})
@@ -730,7 +732,7 @@ func classifyChanges(ctx context.Context, runner sandbox.RunnerProxy, workdir st
 
 	resp, err := runner.Exec(ctx, &v1.ExecRequest{
 		Command:    "git",
-		Args:       []string{"diff", "--cached", "--name-status", "HEAD"},
+		Args:       []string{"diff", "--cached", "--name-status", sandbox.BaseRef(baseRef)},
 		WorkingDir: workdir,
 	})
 	if err != nil {

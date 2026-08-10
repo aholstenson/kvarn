@@ -63,6 +63,7 @@ func (s *stubRunner) StreamFromGuest(_ context.Context, _ string, _ io.Writer) e
 type stubSandbox struct {
 	runner            sandbox.RunnerProxy
 	workdir           string
+	baseCommit        string
 	extractCalls      int
 	extractDest       string
 	extractReturnsErr error
@@ -70,6 +71,7 @@ type stubSandbox struct {
 
 func (s *stubSandbox) GetRunner() sandbox.RunnerProxy { return s.runner }
 func (s *stubSandbox) GetWorkingDir() string          { return s.workdir }
+func (s *stubSandbox) GetBaseCommit() string          { return s.baseCommit }
 func (s *stubSandbox) ExtractChanges(_ context.Context, destDir string) error {
 	s.extractCalls++
 	s.extractDest = destDir
@@ -84,10 +86,22 @@ var _ = Describe("emitDiff", func() {
 			},
 		}
 		var out bytes.Buffer
-		lines, err := emitDiff(context.Background(), runner, "/work", &out)
+		lines, err := emitDiff(context.Background(), runner, "/work", "", &out)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(out.String()).To(ContainSubstring("diff --git a/x b/x"))
 		Expect(lines).To(Equal(4))
+	})
+
+	It("diffs against the base commit when the session recorded one", func() {
+		runner := &stubRunner{
+			execResponses: map[string]*v1.ExecResponse{
+				"git diff abc123": {Stdout: "diff --git a/x b/x\n@@\n"},
+			},
+		}
+		var out bytes.Buffer
+		lines, err := emitDiff(context.Background(), runner, "/work", "abc123", &out)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lines).To(Equal(2))
 	})
 
 	It("returns 0 lines for an empty diff", func() {
@@ -97,7 +111,7 @@ var _ = Describe("emitDiff", func() {
 			},
 		}
 		var out bytes.Buffer
-		lines, err := emitDiff(context.Background(), runner, "/work", &out)
+		lines, err := emitDiff(context.Background(), runner, "/work", "", &out)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(lines).To(Equal(0))
 		Expect(out.String()).To(BeEmpty())
@@ -154,7 +168,7 @@ var _ = Describe("classifyChanges", func() {
 				},
 			},
 		}
-		added, modified, deleted, err := classifyChanges(context.Background(), runner, "/work")
+		added, modified, deleted, err := classifyChanges(context.Background(), runner, "/work", "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(added).To(Equal(2))
 		Expect(modified).To(Equal(2)) // M + R both count as modified
@@ -167,7 +181,7 @@ var _ = Describe("classifyChanges", func() {
 				"git add -A": {ExitCode: 1, Stderr: "permission denied"},
 			},
 		}
-		_, _, _, err := classifyChanges(context.Background(), runner, "/work")
+		_, _, _, err := classifyChanges(context.Background(), runner, "/work", "")
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("permission denied"))
 	})

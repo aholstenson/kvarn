@@ -548,9 +548,22 @@ var _ = Describe("ChangedFiles", func() {
 			Stdout:   "src/main.go\ninternal/pkg/util.go\nREADME.md\n",
 		}
 
-		files, err := sandbox.ChangedFiles(context.Background(), runner, "/home/kvarn/workspace")
+		files, err := sandbox.ChangedFiles(context.Background(), runner, "/home/kvarn/workspace", "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(files).To(Equal([]string{"src/main.go", "internal/pkg/util.go", "README.md"}))
+	})
+
+	It("diffs against the base commit when one was recorded", func() {
+		runner := newMockRunner()
+		runner.execResponses["git diff --name-only abc123"] = &v1.ExecResponse{
+			ExitCode: 0,
+			Stdout:   "src/main.go\n",
+		}
+
+		files, err := sandbox.ChangedFiles(context.Background(), runner, "/home/kvarn/workspace", "abc123")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(files).To(Equal([]string{"src/main.go"}),
+			"an agent that committed its work must still count as changed")
 	})
 
 	It("returns empty list for empty output", func() {
@@ -560,7 +573,7 @@ var _ = Describe("ChangedFiles", func() {
 			Stdout:   "",
 		}
 
-		files, err := sandbox.ChangedFiles(context.Background(), runner, "/home/kvarn/workspace")
+		files, err := sandbox.ChangedFiles(context.Background(), runner, "/home/kvarn/workspace", "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(files).To(BeEmpty())
 		Expect(files).NotTo(BeNil(),
@@ -571,7 +584,31 @@ var _ = Describe("ChangedFiles", func() {
 		runner := newMockRunner()
 		runner.errors["git diff --name-only HEAD"] = fmt.Errorf("connection lost")
 
-		_, err := sandbox.ChangedFiles(context.Background(), runner, "/home/kvarn/workspace")
+		_, err := sandbox.ChangedFiles(context.Background(), runner, "/home/kvarn/workspace", "")
 		Expect(err).To(HaveOccurred())
+	})
+})
+
+var _ = Describe("ResolveBaseCommit", func() {
+	It("returns the trimmed commit the workspace sits at", func() {
+		runner := newMockRunner()
+		runner.execResponses["git rev-parse HEAD"] = &v1.ExecResponse{
+			ExitCode: 0,
+			Stdout:   "abc123\n",
+		}
+
+		Expect(sandbox.ResolveBaseCommit(context.Background(), runner, "/home/kvarn/workspace")).
+			To(Equal("abc123"))
+	})
+
+	It("returns empty when the workspace has no commit to resolve", func() {
+		runner := newMockRunner()
+		runner.execResponses["git rev-parse HEAD"] = &v1.ExecResponse{
+			ExitCode: 128,
+			Stderr:   "fatal: not a git repository",
+		}
+
+		Expect(sandbox.ResolveBaseCommit(context.Background(), runner, "/home/kvarn/workspace")).
+			To(BeEmpty())
 	})
 })

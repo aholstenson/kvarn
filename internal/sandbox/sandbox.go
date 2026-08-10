@@ -200,6 +200,11 @@ type Session struct {
 	WorkingDir     string
 	VmInfo         *v1.VmInfo
 
+	// BaseCommit is the commit the workspace sat at once it was prepared, and
+	// the revision every later change detection compares against. Empty when
+	// the workspace is not a git repository or has no commits.
+	BaseCommit string
+
 	// bareProxy is the underlying BridgeProxy (not wrapped by container).
 	// Needed for operations like git diff that must run on the host VM.
 	bareProxy *BridgeProxy
@@ -274,7 +279,7 @@ func (s *Session) BareProxy() *BridgeProxy {
 // directory. It identifies modified/added/deleted files via git commands,
 // reads each changed file, writes them to destDir, and removes deleted files.
 func (s *Session) ExtractChanges(ctx context.Context, destDir string) error {
-	return ExtractChanges(ctx, s.bareProxy, s.WorkingDir, destDir)
+	return ExtractChanges(ctx, s.bareProxy, s.WorkingDir, destDir, s.BaseCommit)
 }
 
 // GetRunner returns the session's RunnerProxy.
@@ -306,10 +311,15 @@ func (s *Session) RunValidation(ctx context.Context, cfg *project.Config, change
 	return result, s.annotateEgress(err)
 }
 
-// ChangedFiles runs `git diff --name-only HEAD` on the VM and returns the list of changed file paths.
+// ChangedFiles returns the paths the workspace has changed since the session's
+// base commit.
 func (s *Session) ChangedFiles(ctx context.Context) ([]string, error) {
-	return ChangedFiles(ctx, s.bareProxy, s.WorkingDir)
+	return ChangedFiles(ctx, s.bareProxy, s.WorkingDir, s.BaseCommit)
 }
+
+// GetBaseCommit returns the commit the workspace started at, or "" when it
+// could not be resolved.
+func (s *Session) GetBaseCommit() string { return s.BaseCommit }
 
 // SaveCache creates tarballs from cached guest paths and stores them via the
 // cache provider. Should be called explicitly by the caller after job
@@ -551,6 +561,11 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 			}
 		}
 	}
+
+	// Pin the base commit while the workspace is still exactly what was
+	// uploaded. Everything downstream measures change against this commit, so
+	// it has to be read before any step or agent can move HEAD.
+	sess.BaseCommit = ResolveBaseCommit(ctx, proxy, workingDir)
 
 	// Restore cache before installing dependencies so that Nix's eval and
 	// fetcher state in ~/.cache/nix is in place before `nix profile add`

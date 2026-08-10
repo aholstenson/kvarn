@@ -167,14 +167,17 @@ func RunValidation(ctx context.Context, runner RunnerProxy, cfg *project.Config,
 	return result, nil
 }
 
-// ChangedFiles runs `git diff --name-only HEAD` on the VM and returns the list
-// of changed file paths. The list is never nil: a run that changed nothing has
-// answered the question, which is not the same as not being asked, and only the
-// second means "run every step" to shouldRun.
-func ChangedFiles(ctx context.Context, runner RunnerProxy, workspaceDir string) ([]string, error) {
+// ChangedFiles runs `git diff --name-only <base>` on the VM and returns the
+// list of changed file paths. The list is never nil: a run that changed nothing
+// has answered the question, which is not the same as not being asked, and only
+// the second means "run every step" to shouldRun.
+//
+// See BaseRef for why the comparison is against a recorded base rather than
+// HEAD.
+func ChangedFiles(ctx context.Context, runner RunnerProxy, workspaceDir string, baseRef string) ([]string, error) {
 	resp, err := runner.Exec(ctx, &v1.ExecRequest{
 		Command:    "git",
-		Args:       []string{"diff", "--name-only", "HEAD"},
+		Args:       []string{"diff", "--name-only", BaseRef(baseRef)},
 		WorkingDir: workspaceDir,
 	})
 	if err != nil {
@@ -182,6 +185,35 @@ func ChangedFiles(ctx context.Context, runner RunnerProxy, workspaceDir string) 
 	}
 
 	return parseFileList(resp.Stdout), nil
+}
+
+// BaseRef resolves the revision a workspace's changes are measured against.
+// The base is the commit the workspace was created at, not HEAD: agents are
+// free to commit inside the VM, and against HEAD everything they committed
+// would read as "no changes" and never leave the sandbox. An empty base means
+// the commit could not be resolved (no repository, or no commits yet), and
+// HEAD is then the only ref there is.
+func BaseRef(baseRef string) string {
+	if baseRef == "" {
+		return "HEAD"
+	}
+	return baseRef
+}
+
+// ResolveBaseCommit reads the commit a freshly prepared workspace sits at, to
+// be passed back as the baseRef of later change detection. It returns "" when
+// the workspace is not a git repository or has no commits yet, which callers
+// treat as "compare against HEAD".
+func ResolveBaseCommit(ctx context.Context, runner RunnerProxy, workspaceDir string) string {
+	resp, err := runner.Exec(ctx, &v1.ExecRequest{
+		Command:    "git",
+		Args:       []string{"rev-parse", "HEAD"},
+		WorkingDir: workspaceDir,
+	})
+	if err != nil || resp.ExitCode != 0 {
+		return ""
+	}
+	return strings.TrimSpace(resp.Stdout)
 }
 
 // shouldRun returns true if the step should execute given the changed files.
@@ -282,12 +314,13 @@ type changedEntry struct {
 }
 
 // ExtractChanges copies changed files from the VM workspace back to destDir.
-// It stages all changes, diffs against HEAD, then recreates each entry in
-// destDir with the mode git recorded for it and removes the paths that went
-// away. destDir is expected to hold the pre-image (a clone at HEAD), so the
-// result is a worktree that git sees as exactly the VM's diff.
-func ExtractChanges(ctx context.Context, runner RunnerProxy, workspaceDir string, destDir string) error {
-	// Stage all changes so we can diff against HEAD.
+// It stages all changes, diffs against baseRef (see BaseRef), then recreates
+// each entry in destDir with the mode git recorded for it and removes the paths
+// that went away. destDir is expected to hold the pre-image (a clone at the same
+// base commit), so the result is a worktree that git sees as exactly the VM's
+// diff.
+func ExtractChanges(ctx context.Context, runner RunnerProxy, workspaceDir string, destDir string, baseRef string) error {
+	// Stage all changes so we can diff against the base commit.
 	resp, err := runner.Exec(ctx, &v1.ExecRequest{
 		Command:    "git",
 		Args:       []string{"add", "-A"},
@@ -305,7 +338,7 @@ func ExtractChanges(ctx context.Context, runner RunnerProxy, workspaceDir string
 	// links; a name-only listing would flatten everything to a 0644 file.
 	resp, err = runner.Exec(ctx, &v1.ExecRequest{
 		Command:    "git",
-		Args:       []string{"diff", "--cached", "--raw", "-z", "HEAD"},
+		Args:       []string{"diff", "--cached", "--raw", "-z", BaseRef(baseRef)},
 		WorkingDir: workspaceDir,
 	})
 	if err != nil {

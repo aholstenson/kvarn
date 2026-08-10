@@ -24,6 +24,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/orchestrator"
 	"github.com/aholstenson/kvarn/internal/runner"
 	"github.com/aholstenson/kvarn/internal/sandbox"
+	"github.com/aholstenson/kvarn/internal/scm"
 	"github.com/aholstenson/kvarn/internal/session"
 	"github.com/aholstenson/kvarn/internal/vm"
 )
@@ -150,11 +151,7 @@ var _ = Describe("StartJob validation retry", func() {
 			if err != nil {
 				return nil, err
 			}
-			return &testSandbox{
-				runner:         proxy,
-				shellSessionID: sessResp.SessionId,
-				workingDir:     wsDir,
-			}, nil
+			return newTestSandbox(proxy, sessResp.SessionId, wsDir), nil
 		}
 
 		mockForgeInst = &mockForge{scmImpl: mockScm}
@@ -230,6 +227,47 @@ var _ = Describe("StartJob validation retry", func() {
 		Expect(ag.followups[1]).To(ContainSubstring("Step Marker exited 1"))
 		Expect(ag.summarizeCalls).To(Equal(1))
 		Expect(mockForgeInst.prCalls).To(Equal(1))
+	})
+
+	It("submits work the agent committed in the workspace", func() {
+		// Agents are free to run git themselves. The changes are measured
+		// against the commit the workspace booted at, so committing does not
+		// hide them from submission.
+		var pushed []byte
+		mockScm.onPush = func(opts scm.CommitAndPushOpts) {
+			pushed, _ = os.ReadFile(filepath.Join(opts.RepoDir, "seed.txt"))
+		}
+		ag.onRun = func(attempt int, workingDir string, _ string) error {
+			if attempt != 0 {
+				return nil
+			}
+			if err := os.WriteFile(filepath.Join(workingDir, "seed.txt"), []byte("seed\nagent\n"), 0644); err != nil {
+				return err
+			}
+			for _, args := range [][]string{
+				{"add", "-A"},
+				{"-c", "user.email=a@a", "-c", "user.name=a", "commit", "-m", "agent commit"},
+			} {
+				c := exec.Command("git", args...)
+				c.Dir = workingDir
+				if out, err := c.CombinedOutput(); err != nil {
+					return fmt.Errorf("git %v: %s: %w", args, out, err)
+				}
+			}
+			return nil
+		}
+
+		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			Project: "test-project",
+			Prompt:  "do the thing",
+		}))
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+
+		Expect(mockForgeInst.prCalls).To(Equal(1))
+		Expect(string(pushed)).To(Equal("seed\nagent\n"),
+			"the committed content must reach the host clone that gets pushed")
 	})
 
 	It("fails the session when the retry cap is exhausted", func() {
