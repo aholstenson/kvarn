@@ -9,7 +9,8 @@
 These commands need access to the Go build cache and toolchain, so they **will not work inside the sandbox**. Always run them with `dangerouslyDisableSandbox: true`.
 
 ```sh
-task build          # generate + build (preferred)
+task build          # generate + build for the host (preferred)
+task build:linux:amd64   # cross-compile the linux CLI into dist/linux_<arch>/
 task generate       # regenerate proto code only
 task test           # generate + run all tests
 task --list         # see all available tasks

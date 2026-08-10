@@ -29,6 +29,35 @@ tasks:
     cmds:
       - GOOS=linux GOARCH={{ARCH}} CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/aholstenson/kvarn/internal/buildinfo.Version={{.VERSION}}" -o internal/runnerbin/kvarn-runner ./cmd/runner
 
+  build:linux:amd64:
+    desc: Cross-compile the linux/amd64 CLI with embedded runner into dist/
+    cmds:
+      - task: build:linux
+        vars: { GOARCH: amd64 }
+
+  build:linux:arm64:
+    desc: Cross-compile the linux/arm64 CLI with embedded runner into dist/
+    cmds:
+      - task: build:linux
+        vars: { GOARCH: arm64 }
+
+  # Only linux targets are cross-compilable: the darwin CLI needs cgo for
+  # Virtualization.framework plus a codesigned entitlement, so it is built on a
+  # mac (see .github/workflows/release.yml).
+  build:linux:
+    internal: true
+    deps: [generate]
+    vars:
+      VERSION:
+        sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+    cmds:
+      # The runner is embedded into the CLI and executes inside the guest, so it
+      # follows the target arch rather than the host's. This overwrites the
+      # artifact `task build` produced, so re-run that before using the CLI
+      # locally.
+      - GOOS=linux GOARCH={{.GOARCH}} CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/aholstenson/kvarn/internal/buildinfo.Version={{.VERSION}}" -o internal/runnerbin/kvarn-runner ./cmd/runner
+      - GOOS=linux GOARCH={{.GOARCH}} CGO_ENABLED=0 go build -tags embedrunner -ldflags "-s -w -X github.com/aholstenson/kvarn/internal/buildinfo.Version={{.VERSION}}" -o dist/linux_{{.GOARCH}}/kvarn ./cmd/kvarn
+
   sign:
     desc: Ad-hoc codesign with virtualization entitlement (macOS only)
     platforms: [darwin]
