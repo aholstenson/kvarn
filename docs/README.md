@@ -26,6 +26,7 @@ Descriptions of every configuration surface, organized by the file it lives in.
 
 - [Configuration overview](reference/configuration.md) — which file holds what, where they live, environment variables.
 - [`kvarn.yml`](reference/kvarn-yml.md) — the per-repository build, validation, cache and network config.
+- [Registered tools](reference/registered-tools.md) — the nixpkgs attributes that bring caching, egress hosts and environment with them.
 - [`projects.toml`](reference/projects-toml.md) — projects, their repositories, and per-project overrides.
 - [`forges.toml`](reference/forges-toml.md) — forge instances and pull-request behavior.
 - [`credentials.toml`](reference/credentials-toml.md) — forge credentials.

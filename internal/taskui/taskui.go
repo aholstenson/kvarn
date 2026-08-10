@@ -340,6 +340,24 @@ func (r *Renderer) AppendOutput(item *Item, line string) {
 	}
 }
 
+// AppendStreams adds the lines of a command's stdout and stderr to an item's
+// buffer, dropping the empty ones. Streamed output arrives in whatever chunks
+// the reader produced, so callers hold whole-or-partial blocks rather than
+// lines; this is where that becomes the renderer's problem instead of every
+// caller's.
+func (r *Renderer) AppendStreams(item *Item, stdout, stderr string) {
+	for _, chunk := range []string{stdout, stderr} {
+		if chunk == "" {
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimRight(chunk, "\n"), "\n") {
+			if line != "" {
+				r.AppendOutput(item, line)
+			}
+		}
+	}
+}
+
 // WriteRaw writes frozen text that won't be redrawn (e.g. VM info).
 func (r *Renderer) WriteRaw(text string) {
 	r.mu.Lock()

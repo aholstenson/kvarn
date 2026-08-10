@@ -72,6 +72,11 @@ Attribute names are validated conservatively (they are concatenated into a shell
 command). The host of each non-`nixpkgs` source is added to the egress allowlist
 automatically.
 
+Declaring certain attributes brings more than the package: caching, egress
+hosts, environment and, for a version manager like `mise`, the command that
+installs what it pins. See [Registered tools](registered-tools.md) for the list
+and what each one sets up.
+
 ## `vm`
 
 ```yaml
@@ -109,9 +114,9 @@ Schemes, paths and ports are rejected.
 
 ## `cache`
 
-Registered tools (language package managers and build caches Kvarn knows about)
-are cached automatically and need no `cache:` block. These fields exist for
-unregistered tools or custom keying.
+[Registered tools](registered-tools.md) (language package managers and build
+caches Kvarn knows about) are cached automatically and need no `cache:` block.
+These fields exist for unregistered tools or custom keying.
 
 ```yaml
 cache:

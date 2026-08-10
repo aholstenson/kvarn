@@ -308,7 +308,9 @@ type TransferProgressEvent struct {
 
 func (TransferProgressEvent) isSessionEvent() {}
 
-// DependencyOutputEvent carries stdout/stderr from a dependency installation.
+// DependencyOutputEvent carries stdout/stderr from a dependency installation
+// or from a registered tool provisioning itself — one phase as far as a viewer
+// is concerned, and one event kind.
 type DependencyOutputEvent struct {
 	SessionID string
 	Stdout    string

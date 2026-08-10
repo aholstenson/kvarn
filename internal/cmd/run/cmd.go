@@ -259,16 +259,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 				lastProvisionItem = dependenciesItem
 			case sandbox.DependencyOutputEvent:
 				if dependenciesItem != nil {
-					for _, line := range strings.Split(strings.TrimRight(ev.Stdout, "\n"), "\n") {
-						if line != "" {
-							renderer.AppendOutput(dependenciesItem, line)
-						}
-					}
-					for _, line := range strings.Split(strings.TrimRight(ev.Stderr, "\n"), "\n") {
-						if line != "" {
-							renderer.AppendOutput(dependenciesItem, line)
-						}
-					}
+					renderer.AppendStreams(dependenciesItem, ev.Stdout, ev.Stderr)
 				}
 			case sandbox.DependenciesInstalledEvent:
 				if dependenciesItem != nil {
@@ -277,6 +268,23 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 						lastProvisionItem = nil
 					}
 					dependenciesItem = nil
+				}
+			case sandbox.ToolProvisioningEvent:
+				markLastProvisionDone()
+				toolProvisionItem = renderer.AddItem(fmt.Sprintf("Provisioning %s", ev.Tool))
+				renderer.SetStatus(toolProvisionItem, taskui.StatusRunning, "")
+				lastProvisionItem = toolProvisionItem
+			case sandbox.ToolProvisionOutputEvent:
+				if toolProvisionItem != nil {
+					renderer.AppendStreams(toolProvisionItem, ev.Stdout, ev.Stderr)
+				}
+			case sandbox.ToolProvisionedEvent:
+				if toolProvisionItem != nil {
+					renderer.SetStatus(toolProvisionItem, taskui.StatusPassed, "")
+					if lastProvisionItem == toolProvisionItem {
+						lastProvisionItem = nil
+					}
+					toolProvisionItem = nil
 				}
 			case sandbox.ImagePullingEvent:
 				markLastProvisionDone()

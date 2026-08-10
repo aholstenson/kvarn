@@ -1944,6 +1944,21 @@ func (s *Service) makeEventAdapter(ctx context.Context, sessionID string) func(s
 				Stderr:    ev.Stderr,
 			})
 			return
+		case sandbox.ToolProvisioningEvent:
+			state = session.StateInstallingDependencies
+			message = fmt.Sprintf("Provisioning %s", ev.Tool)
+		case sandbox.ToolProvisionedEvent:
+			return
+		case sandbox.ToolProvisionOutputEvent:
+			// Provisioning output rides the dependency-output event so a live
+			// `mise install` streams to a watching client without a new durable
+			// event kind for what a viewer reads as the same phase.
+			s.sessionMgr.EmitEvent(ctx, sessionID, session.DependencyOutputEvent{
+				SessionID: sessionID,
+				Stdout:    ev.Stdout,
+				Stderr:    ev.Stderr,
+			})
+			return
 		case sandbox.ImagePullingEvent:
 			state = session.StatePullingImage
 			message = fmt.Sprintf("Pulling image %s", ev.Image)

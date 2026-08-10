@@ -67,8 +67,10 @@ about the other.
 ## Tool caches
 
 Language package managers and build caches are captured after a run and restored
-into the next VM for the same project. Registered tools need no configuration;
-unregistered ones are added with a `cache:` block in `kvarn.yml` — see
+into the next VM for the same project. [Registered
+tools](../reference/registered-tools.md) need no configuration — declaring the
+nixpkgs attribute is enough. Unregistered ones are added with a `cache:` block in
+`kvarn.yml` — see
 [Configure a repository](configure-a-repository.md#cache-what-the-build-downloads).
 
 Quotas, swept LRU:

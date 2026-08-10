@@ -291,10 +291,10 @@ func (h *Handler) UploadFiles(ctx context.Context, req *connect.Request[v1.Uploa
 			}
 		}
 
-		// The kvarn-*.sh scripts in /etc/profile.d are sourced by the
+		// The scripts kvarn writes into /etc/profile.d are sourced by the
 		// kvarn user's login shell. Owning them as root would leave the
-		// 0600 secrets script unreadable (kvarn-tools.sh and kvarn-user.sh
-		// at 0644 would still work, but kvarn-secrets.sh would be skipped
+		// 0600 secrets script unreadable (the 0644 environment and PATH
+		// scripts would still work, but kvarn-secrets.sh would be skipped
 		// by the `[ -r ]` guard in /etc/profile). Chown to kvarn so the
 		// shell can actually read what we wrote. Root retains access.
 		if h.kvarnCred != nil && strings.HasPrefix(resolved, "/etc/profile.d/") {

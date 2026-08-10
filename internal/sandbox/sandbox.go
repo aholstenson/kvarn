@@ -41,6 +41,23 @@ type DependenciesInstalledEvent struct{}
 
 func (DependenciesInstalledEvent) isEvent() {}
 
+// ToolProvisioningEvent reports that a registered tool is running the command
+// that makes it usable — a version manager installing the toolchain it pins,
+// for instance. It is a distinct phase from dependency installation: the
+// dependency is already there, and this is the tool acting on the repository.
+type ToolProvisioningEvent struct {
+	Tool    string
+	Command string
+}
+
+func (ToolProvisioningEvent) isEvent() {}
+
+type ToolProvisionedEvent struct {
+	Tool string
+}
+
+func (ToolProvisionedEvent) isEvent() {}
+
 type ImagePullingEvent struct {
 	Image string
 }
@@ -82,6 +99,13 @@ type DependencyOutputEvent struct {
 }
 
 func (DependencyOutputEvent) isEvent() {}
+
+type ToolProvisionOutputEvent struct {
+	Stdout string
+	Stderr string
+}
+
+func (ToolProvisionOutputEvent) isEvent() {}
 
 type ContainerStartedEvent struct{}
 
@@ -538,6 +562,21 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		defer cancel()
 		runner.CloseSession(closeCtx, &v1.CloseSessionRequest{SessionId: sess.ShellSessionID})
 	})
+
+	// Provision registered tools last: the command runs in the shell session so
+	// it inherits the curated environment, and it needs the workspace it is
+	// about to read, which the transfer and checkout above have put in place.
+	// aug is empty in image mode, so nothing runs there — the container does not
+	// source the VM's profile.d and would provision into the wrong filesystem.
+	for _, step := range aug.Provision {
+		emit(opts, ToolProvisioningEvent{Tool: step.Tool, Command: step.Command})
+		if err := provisionTool(ctx, runner, sess.ShellSessionID, step, func(stdout, stderr string) {
+			emit(opts, ToolProvisionOutputEvent{Stdout: stdout, Stderr: stderr})
+		}); err != nil {
+			return nil, sess.annotateEgress(err)
+		}
+		emit(opts, ToolProvisionedEvent{Tool: step.Tool})
+	}
 
 	return sess, nil
 }
