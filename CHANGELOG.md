@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0](https://github.com/aholstenson/kvarn/compare/v0.4.0...v0.5.0) (2026-08-10)
+
+
+### Features
+
+* Allow VM images up to the 0.4 line ([5fd9b6d](https://github.com/aholstenson/kvarn/commit/5fd9b6d647b652043de5143315df239e1e8c4c8c))
+* **image:** Include tun in the VM image ([4019074](https://github.com/aholstenson/kvarn/commit/401907405ed6326c2a47e9c873c1721a63a1c3dd))
+* Improve network allowlist and reporting of denied requests ([6ecd8bf](https://github.com/aholstenson/kvarn/commit/6ecd8bf81304505d2177f269d615ba21b9b717f0))
+* Improve support for tools like Mise ([5ce16e1](https://github.com/aholstenson/kvarn/commit/5ce16e1e05d30765fd7f5081c29dc20c6d9b1346))
+* Support hiding work log on PRs ([0d17a40](https://github.com/aholstenson/kvarn/commit/0d17a400fc0cdec408a216dd63241698b80dd2ad))
+* Update llms-go to version supporting latest Claude models ([96a6bb7](https://github.com/aholstenson/kvarn/commit/96a6bb7e5cd3df86753dbe0f67e536a7c33138e1))
+
+
+### Bug Fixes
+
+* Move certificate management into orchestrator instead of cloud-init ([100a374](https://github.com/aholstenson/kvarn/commit/100a374096598fc02df3935f07335273a5540047))
+* Submit changes the agent committed inside the VM instead of reporting "no changes" ([917e11e](https://github.com/aholstenson/kvarn/commit/917e11ece1e35e19607395b4d7d88808b1749bd3))
+
 ## [0.4.0](https://github.com/aholstenson/kvarn/compare/v0.3.0...v0.4.0) (2026-08-09)
 
 
