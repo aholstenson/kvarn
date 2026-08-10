@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0](https://github.com/aholstenson/kvarn/compare/v0.3.0...v0.4.0) (2026-08-09)
+
+
+### Features
+
+* Allow projects to define custom modes via kvarn.yml ([eabb964](https://github.com/aholstenson/kvarn/commit/eabb96488f3ef3bae618c79e41b3c22e6395465a))
+* Let each sub-agent pick a model class instead of sharing one setting ([93847b2](https://github.com/aholstenson/kvarn/commit/93847b20025aa299133a6ea7bc8acc6e71953491))
+* Let job submissions carry caller metadata for record keeping ([ebe2184](https://github.com/aholstenson/kvarn/commit/ebe21840aeed9f5ae1b206696f6320b84ca441a4))
+
 ## [0.3.0](https://github.com/aholstenson/kvarn/compare/v0.2.0...v0.3.0) (2026-08-04)
 
 
