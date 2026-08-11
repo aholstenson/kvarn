@@ -9,7 +9,7 @@ import (
 
 var _ = Describe("ResolveBehavior", func() {
 	It("falls back to compiled-in constants when nothing is set", func() {
-		b := (&forgeconfig.ForgeConfig{}).ResolveBehavior(forgeconfig.Defaults{}, forgeconfig.Overrides{})
+		b := (&forgeconfig.ForgeConfig{}).ResolveBehavior(forgeconfig.Defaults{}, forgeconfig.Overrides{}, forgeconfig.RepoContent{})
 		Expect(b.BranchPrefix).To(Equal(forgeconfig.DefaultBranchPrefix))
 		Expect(b.CommitAuthorName).To(Equal(forgeconfig.DefaultCommitAuthorName))
 		Expect(b.CommitAuthorEmail).To(Equal(forgeconfig.DefaultCommitAuthorEmail))
@@ -23,7 +23,7 @@ var _ = Describe("ResolveBehavior", func() {
 			CommitAuthorEmail: "global@example.com",
 			Labels:            []string{"global"},
 		}
-		b := (&forgeconfig.ForgeConfig{}).ResolveBehavior(d, forgeconfig.Overrides{})
+		b := (&forgeconfig.ForgeConfig{}).ResolveBehavior(d, forgeconfig.Overrides{}, forgeconfig.RepoContent{})
 		Expect(b.BranchPrefix).To(Equal("bot"))
 		Expect(b.CommitAuthorName).To(Equal("Global Bot"))
 		Expect(b.CommitAuthorEmail).To(Equal("global@example.com"))
@@ -43,7 +43,7 @@ var _ = Describe("ResolveBehavior", func() {
 			CommitAuthorEmail: "org@example.com",
 			Labels:            []string{"org"},
 		}
-		b := fc.ResolveBehavior(d, forgeconfig.Overrides{})
+		b := fc.ResolveBehavior(d, forgeconfig.Overrides{}, forgeconfig.RepoContent{})
 		Expect(b.BranchPrefix).To(Equal("myorg"))
 		Expect(b.CommitAuthorName).To(Equal("Org Bot"))
 		Expect(b.CommitAuthorEmail).To(Equal("org@example.com"))
@@ -69,7 +69,7 @@ var _ = Describe("ResolveBehavior", func() {
 			CommitAuthorEmail: "project@example.com",
 			Labels:            []string{"project"},
 		}
-		b := fc.ResolveBehavior(d, o)
+		b := fc.ResolveBehavior(d, o, forgeconfig.RepoContent{})
 		Expect(b.BranchPrefix).To(Equal("proj"))
 		Expect(b.CommitAuthorName).To(Equal("Project Bot"))
 		Expect(b.CommitAuthorEmail).To(Equal("project@example.com"))
@@ -83,7 +83,7 @@ var _ = Describe("ResolveBehavior", func() {
 		d := forgeconfig.Defaults{CommitAuthorName: "Global Bot", Labels: []string{"global"}}
 		fc := &forgeconfig.ForgeConfig{BranchPrefix: "myorg"}
 		o := forgeconfig.Overrides{Labels: []string{"project"}}
-		b := fc.ResolveBehavior(d, o)
+		b := fc.ResolveBehavior(d, o, forgeconfig.RepoContent{})
 		Expect(b.BranchPrefix).To(Equal("myorg"))
 		Expect(b.CommitAuthorName).To(Equal("Global Bot"))
 		Expect(b.CommitAuthorEmail).To(Equal(forgeconfig.DefaultCommitAuthorEmail))
@@ -94,13 +94,13 @@ var _ = Describe("ResolveBehavior", func() {
 		d := forgeconfig.Defaults{Labels: []string{"global"}}
 		fc := &forgeconfig.ForgeConfig{Labels: []string{"forge"}}
 		o := forgeconfig.Overrides{Labels: []string{"only-this"}}
-		b := fc.ResolveBehavior(d, o)
+		b := fc.ResolveBehavior(d, o, forgeconfig.RepoContent{})
 		Expect(b.Labels).To(Equal([]string{"only-this"}))
 	})
 
 	It("handles a nil forge config (project without a forge)", func() {
 		var fc *forgeconfig.ForgeConfig
-		b := fc.ResolveBehavior(forgeconfig.Defaults{BranchPrefix: "bot"}, forgeconfig.Overrides{})
+		b := fc.ResolveBehavior(forgeconfig.Defaults{BranchPrefix: "bot"}, forgeconfig.Overrides{}, forgeconfig.RepoContent{})
 		Expect(b.BranchPrefix).To(Equal("bot"))
 		Expect(b.CommitAuthorName).To(Equal(forgeconfig.DefaultCommitAuthorName))
 		Expect(b.Labels).To(Equal(forgeconfig.DefaultLabels()))
@@ -109,7 +109,7 @@ var _ = Describe("ResolveBehavior", func() {
 	It("applies per-project overrides even with a nil forge config", func() {
 		var fc *forgeconfig.ForgeConfig
 		o := forgeconfig.Overrides{BranchPrefix: "proj", Labels: []string{"project"}}
-		b := fc.ResolveBehavior(forgeconfig.Defaults{BranchPrefix: "bot"}, o)
+		b := fc.ResolveBehavior(forgeconfig.Defaults{BranchPrefix: "bot"}, o, forgeconfig.RepoContent{})
 		Expect(b.BranchPrefix).To(Equal("proj"))
 		Expect(b.Labels).To(Equal([]string{"project"}))
 	})

@@ -175,4 +175,97 @@ branch_prefix = "bot"
 		Expect(err).NotTo(HaveOccurred())
 		Expect(d.BranchPrefix).To(Equal("bot"))
 	})
+
+	Describe("pull_request blocks", func() {
+		It("reads the block from [defaults] and from a named forge", func() {
+			path := filepath.Join(tmpDir, "forges.toml")
+			content := `[defaults.pull_request]
+title_instructions = "Use Conventional Commits."
+title_max_length = 60
+body_footer = "kvarn · {{ .SessionID }}"
+commit_trailers = ["Kvarn-Session: {{ .SessionID }}"]
+report_worklog_on_pr = false
+
+[forges.github-myorg]
+type = "github"
+
+[forges.github-myorg.pull_request]
+body_instructions = "Link the tracking issue."
+report_cost_on_pr = true
+`
+			Expect(os.WriteFile(path, []byte(content), 0644)).To(Succeed())
+
+			d, err := store.Defaults(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(d.PullRequest.TitleInstructions).To(Equal("Use Conventional Commits."))
+			Expect(*d.PullRequest.TitleMaxLength).To(Equal(60))
+			Expect(d.PullRequest.BodyFooter).To(Equal("kvarn · {{ .SessionID }}"))
+			Expect(d.PullRequest.CommitTrailers).To(Equal([]string{"Kvarn-Session: {{ .SessionID }}"}))
+			Expect(*d.PullRequest.ReportWorklog).To(BeFalse())
+			Expect(d.PullRequest.ReportCost).To(BeNil(), "an unset toggle must stay unset so it can inherit")
+
+			fc, err := store.Get(ctx, "github-myorg")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fc.PullRequest.BodyInstructions).To(Equal("Link the tracking issue."))
+			Expect(*fc.PullRequest.ReportCost).To(BeTrue())
+		})
+
+		It("round-trips a forge's block through Put", func() {
+			Expect(store.Put(ctx, &forgeconfig.ForgeConfig{
+				Name: "gh", Type: "github",
+				PullRequest: forgeconfig.PRContent{
+					BodyInstructions: "Be specific.",
+					CommitTrailers:   []string{"Kvarn-Mode: {{ .Mode }}"},
+					ReportCost:       boolPtr(false),
+				},
+			})).To(Succeed())
+
+			fc, err := store.Get(ctx, "gh")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fc.PullRequest.BodyInstructions).To(Equal("Be specific."))
+			Expect(fc.PullRequest.CommitTrailers).To(Equal([]string{"Kvarn-Mode: {{ .Mode }}"}))
+			Expect(*fc.PullRequest.ReportCost).To(BeFalse())
+		})
+
+		It("reads and round-trips the quote mode", func() {
+			path := filepath.Join(tmpDir, "forges.toml")
+			Expect(os.WriteFile(path, []byte(`[defaults.pull_request]
+quote_task = "collapsed"
+`), 0644)).To(Succeed())
+
+			d, err := store.Defaults(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(d.PullRequest.QuoteTask).To(Equal(forgeconfig.QuoteCollapsed))
+
+			Expect(store.Put(ctx, &forgeconfig.ForgeConfig{
+				Name: "gh", Type: "github",
+				PullRequest: forgeconfig.PRContent{QuoteTask: forgeconfig.QuoteOff},
+			})).To(Succeed())
+
+			fc, err := store.Get(ctx, "gh")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fc.PullRequest.QuoteTask).To(Equal(forgeconfig.QuoteOff))
+		})
+
+		It("fails the load on an unknown quote mode rather than ignoring it", func() {
+			path := filepath.Join(tmpDir, "forges.toml")
+			Expect(os.WriteFile(path, []byte(`[defaults.pull_request]
+quote_task = "sometimes"
+`), 0644)).To(Succeed())
+
+			_, err := store.Defaults(ctx)
+			Expect(err).To(MatchError(ContainSubstring("unknown quote mode")))
+		})
+
+		It("does not add an empty table for a forge that sets nothing", func() {
+			path := filepath.Join(tmpDir, "forges.toml")
+			Expect(store.Put(ctx, &forgeconfig.ForgeConfig{Name: "gh", Type: "github"})).To(Succeed())
+
+			raw, err := os.ReadFile(path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(raw)).NotTo(ContainSubstring("pull_request"))
+		})
+	})
 })
+
+func boolPtr(v bool) *bool { return &v }

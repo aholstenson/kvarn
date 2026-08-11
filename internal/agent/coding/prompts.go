@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
+	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 )
 
 // Mode is the high-level operating mode of a coding-agent run: what the agent
@@ -80,8 +81,14 @@ func (m *Mode) TaskHeading() string {
 }
 
 // SystemPrompt renders the full system prompt for a run: shared role intro +
-// environment block + mode-specific body + project/skills/sub-agents trailer.
-func (m *Mode) SystemPrompt(projectName, repoURL, branch string, rc *repocontext.RepoContext, subAgents SubAgents) string {
+// environment block + mode-specific body + comment conventions (for a mode
+// whose written result is posted) + project/skills/sub-agents trailer.
+//
+// content is the resolved pull-request configuration. Only its comment half is
+// used here: what a commit message and pull request body should say is settled
+// later, by the summary call, which sees the finished work rather than the
+// instructions the agent was given.
+func (m *Mode) SystemPrompt(projectName, repoURL, branch string, rc *repocontext.RepoContext, subAgents SubAgents, content forgeconfig.Content) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, `You are Kvarn, %s running in a sandboxed VM. There is no interactive user. You receive a single task message (separate from this system prompt).
 
@@ -94,8 +101,34 @@ func (m *Mode) SystemPrompt(projectName, repoURL, branch string, rc *repocontext
 
 `, m.role, projectName, repoURL, branch)
 	sb.WriteString(m.body)
+	m.appendCommentConventions(&sb, content)
 	appendContextBlocks(&sb, rc, subAgents)
 	return sb.String()
+}
+
+// appendCommentConventions appends how the run's written result should read,
+// for a mode that posts it as a pull request comment.
+//
+// Sections here are advisory in a way the pull request body's are not: this
+// text becomes a comment by being written into the agent's final reply, not
+// through a structured-output call, so kvarn cannot check that a heading came
+// back or put the headings in declared order. A mode that delivers a body gets
+// that guarantee; a mode that delivers a comment gets a clear request.
+func (m *Mode) appendCommentConventions(sb *strings.Builder, content forgeconfig.Content) {
+	if !m.DeliversTo(SinkPRComment) {
+		return
+	}
+	if content.CommentInstructions.Empty() && len(content.CommentSections) == 0 {
+		return
+	}
+
+	sb.WriteString("\n\n## Comment conventions\n\nYour written result is posted as a pull request comment. Follow these conventions when writing it.")
+	writeInstructionBlock(sb, "Organization conventions", content.CommentInstructions.Organization)
+	writeInstructionBlock(sb, "Repository conventions", content.CommentInstructions.Repository)
+	if len(content.CommentSections) > 0 {
+		sb.WriteString("\n\nStructure the result under these level-2 headings, in this order:\n")
+		writeSectionRequests(sb, content.CommentSections)
+	}
 }
 
 // builtin declares one of the modes kvarn ships with. Built-ins are their own

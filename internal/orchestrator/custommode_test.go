@@ -244,8 +244,8 @@ modes:
 
 			Expect(mockForgeInst.commentCalls).To(Equal(1))
 			Expect(mockForgeInst.lastCommentOpts.PRRef).To(Equal("42"))
-			Expect(mockForgeInst.lastCommentOpts.Body).To(ContainSubstring("## Task\n\nreview this"))
-			Expect(mockForgeInst.lastCommentOpts.Body).To(ContainSubstring("## Result\n\nApprove with comments"))
+			Expect(mockForgeInst.lastCommentOpts.Body).To(HavePrefix("## Result\n\nApprove with comments"))
+			Expect(mockForgeInst.lastCommentOpts.Body).To(ContainSubstring("## Task\n\n> review this"))
 		})
 
 		It("hands the agent the context blocks the mode asked for and no others", func() {

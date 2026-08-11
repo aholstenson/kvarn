@@ -84,8 +84,6 @@ its own:
 [defaults]
 max_cost_usd = 10.0
 warn_threshold = 0.8
-report_cost_on_pr = true
-report_worklog_on_pr = true
 max_validation_retries = 3
 
 [defaults.jobs.review]
@@ -99,8 +97,6 @@ max_validation_retries = 0
 | --- | --- | --- | --- |
 | `max_cost_usd` | float | `5.00` | Hard budget per job; the run is cancelled when reached. |
 | `warn_threshold` | float | `0.80` | Fraction of the budget at which the agent gets a soft warning. **User-level only** — there is no per-project knob. |
-| `report_cost_on_pr` | bool | `true` | Include the cost section in the PR comment a delivery posts. |
-| `report_worklog_on_pr` | bool | `true` | Include the collapsible work log in the PR comment a delivery posts. The log is still emitted as session events either way. |
 | `max_validation_retries` | int | `3` | Additional agent passes after a required validation step fails. |
 
 `[defaults.jobs.<mode>]` narrows `max_cost_usd` and `max_validation_retries` to
@@ -119,8 +115,13 @@ precedence first:
 4. `defaults` in this file
 5. the built-in fallback
 
-`report_cost_on_pr` and `report_worklog_on_pr` resolve project → `defaults` →
-built-in. `warn_threshold` resolves `defaults` → built-in.
+`warn_threshold` resolves `defaults` → built-in.
+
+`report_cost_on_pr` and `report_worklog_on_pr` used to live in this file's
+`[defaults]` block. They now resolve with the pull-request content they gate;
+see [`forges.toml`](forges-toml.md#pull-request-content). The spelling here is
+still read as the lowest layer, and kvarn logs a warning naming this file when
+it takes a value from it.
 
 Each layer is consulted per field, so setting only `max_cost_usd` on a project
 leaves its `max_validation_retries` inherited.

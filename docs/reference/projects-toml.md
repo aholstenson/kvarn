@@ -31,8 +31,6 @@ The table key (`my-project` above) is the project name clients pass to
 [projects.my-project]
 repo = "owner/repo"
 max_cost_usd = 5.0
-report_cost_on_pr = true
-report_worklog_on_pr = true
 max_validation_retries = 3
 
 [projects.my-project.jobs.review]
@@ -42,8 +40,6 @@ max_cost_usd = 1.0
 | Key | Type | Notes |
 | --- | --- | --- |
 | `max_cost_usd` | float | Hard budget for a job. The agent is warned as it approaches, and the run is cancelled when it is reached. |
-| `report_cost_on_pr` | bool | Include a cost section in the PR comment a delivery posts. |
-| `report_worklog_on_pr` | bool | Include the collapsible work log in the PR comment a delivery posts. The log is still emitted as session events either way. |
 | `max_validation_retries` | int | Additional agent passes allowed after a required validation step fails. `0` disables retries. |
 
 `[projects.<name>.jobs.<mode>]` overrides `max_cost_usd`,
@@ -51,10 +47,14 @@ max_cost_usd = 1.0
 `implement`, `fix`, `feedback`, `review`, `research`).
 
 Omitting these keys does **not** mean unlimited — the built-in fallbacks are
-`max_cost_usd = 5.00`, `max_validation_retries = 3`, `report_cost_on_pr = true`,
-`report_worklog_on_pr = true`.
+`max_cost_usd = 5.00` and `max_validation_retries = 3`.
 The full cascade, including the user-level defaults in `agents.toml`, is in
 [`agents.toml`](agents-toml.md#resolution-order).
+
+`report_cost_on_pr` and `report_worklog_on_pr` used to sit here too. They now
+live in the `pull_request` table below, with the content they gate. The old
+top-level spelling is still read, and kvarn logs a warning naming the file when
+it takes a value from it.
 
 ## Pull-request behavior
 
@@ -80,6 +80,31 @@ repositories and label sets and branch conventions vary between them. They are
 the highest-precedence layer; see
 [`forges.toml`](forges-toml.md#resolution-order). `labels` replaces the
 inherited list rather than extending it.
+
+## Pull request content
+
+`[projects.<name>.pull_request]` sets what this project's pull requests, commits
+and comments say. It is the most specific operator layer, above the forge and
+the global defaults.
+
+```toml
+[projects.my-project.pull_request]
+body_instructions = "This repo ships a CLI; note any user-visible flag change."
+body_footer = "🤖 kvarn · session {{ .SessionID }}"
+commit_trailers = ["Kvarn-Session: {{ .SessionID }}"]
+report_worklog_on_pr = true
+report_cost_on_pr = false
+quote_task = "collapsed"
+```
+
+The keys, the template fields available to `body_footer` and `commit_trailers`,
+and the rule that `*_instructions` concatenate across layers rather than
+overriding are documented once in
+[`forges.toml`](forges-toml.md#pull-request-content).
+
+Section structure — the headings a body must carry — is declared by the
+repository in [`kvarn.yml`](kvarn-yml.md#pull_request). So are the wording
+conventions a repository wants on top of the ones set here.
 
 ## Cloning
 

@@ -23,6 +23,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 	"github.com/aholstenson/kvarn/internal/cmd/imageutil"
 	credtoml "github.com/aholstenson/kvarn/internal/config/credential/tomlstore"
+	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 	modeltoml "github.com/aholstenson/kvarn/internal/config/model/tomlstore"
 	projectstore "github.com/aholstenson/kvarn/internal/config/project"
 	projecttoml "github.com/aholstenson/kvarn/internal/config/project/tomlstore"
@@ -486,6 +487,13 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		RepoContext: rc,
 		OnProgress:  progress,
 		Cost:        tracker,
+		// A local run has no forge and no operator config, so the repository's
+		// own `pull_request:` block is the only layer there is. It still
+		// applies: `kvarn run` produces the same summary the orchestrator would
+		// commit, and seeing it obey the block is how the block gets tested.
+		PullRequest: (*forgeconfig.ForgeConfig)(nil).ResolveBehavior(
+			forgeconfig.Defaults{}, forgeconfig.Overrides{},
+			cfg.PullRequest.Resolve(mode.Name)).PullRequest,
 	}
 
 	// Drive the agent through one Conversation so a validation-failure retry

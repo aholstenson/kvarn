@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"maps"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
@@ -126,45 +128,125 @@ func firstLine(s string) string {
 	return ""
 }
 
-// commentSections says which optional sections a delivery's PR comment carries.
-// Both are resolved per job from project and user config; they travel together
-// because every comment formatter needs the same answer for both.
+// commentSections says what the optional parts of a delivery's PR comment
+// carry. All three are resolved per job from project and user config; they
+// travel together because every comment formatter needs the same answers.
 type commentSections struct {
 	worklog bool
 	cost    bool
+	quote   forgeconfig.QuoteMode
 }
 
-// sectionsFrom reads the comment-section choices out of resolved job limits.
-func sectionsFrom(l limits.Limits) commentSections {
-	return commentSections{worklog: l.ReportWorklogOnPR, cost: l.ReportCostOnPR}
-}
+// Every comment a delivery posts is ordered outcome first, provenance last: the
+// result is bounded and is what a reviewer opened the comment for, while the
+// request that started the run is arbitrary-length user text. Leading with the
+// request pushes the answer off the screen on exactly the runs — long briefs,
+// pasted specs — where the answer matters most.
 
-// formatWorklogComment renders the original prompt and a collapsible work log
-// for posting as a PR comment. When sections.cost is set and report has any
-// recorded spend, a "## Cost" section is appended after the work log.
+// formatWorklogComment renders the comment posted alongside a new pull request:
+// the task that was given, and the collapsible work log and cost sections. The
+// agent's own account of the change is the pull request body, so it is not
+// repeated here.
 func formatWorklogComment(prompt string, entries []worklogEntry, sections commentSections, report cost.Report) string {
 	var sb strings.Builder
-	sb.WriteString("## Task\n\n")
-	sb.WriteString(strings.TrimSpace(prompt))
+	writeQuotedRequest(&sb, "Task", prompt, sections.quote)
 	writeWorklog(&sb, sections.worklog, entries)
 	writeCostSection(&sb, sections.cost, report)
-	return sb.String()
+	return finishComment(&sb)
 }
 
 // formatFollowupComment renders the comment posted after a feedback run: the
-// feedback that was addressed, the agent's own account of what it changed, and
+// agent's own account of what it changed, the feedback that prompted it, and
 // the same work log / cost sections a fresh run posts.
 func formatFollowupComment(feedback, summary string, entries []worklogEntry, sections commentSections, report cost.Report) string {
 	var sb strings.Builder
-	sb.WriteString("## Feedback addressed\n\n")
-	sb.WriteString(strings.TrimSpace(feedback))
-	if summary = strings.TrimSpace(summary); summary != "" {
-		sb.WriteString("\n\n## Changes\n\n")
-		sb.WriteString(summary)
-	}
+	writeSection(&sb, "Changes", summary)
+	writeQuotedRequest(&sb, "Feedback addressed", feedback, sections.quote)
 	writeWorklog(&sb, sections.worklog, entries)
 	writeCostSection(&sb, sections.cost, report)
-	return sb.String()
+	return finishComment(&sb)
+}
+
+// finishComment trims the assembled body. Every section writes its own leading
+// blank line so it does not depend on what came before it, which leaves the
+// first one to trim rather than each section having to know it is first.
+func finishComment(sb *strings.Builder) string {
+	return strings.TrimSpace(sb.String())
+}
+
+// writeSection appends a level-2 section, or nothing when there is no body to
+// put under the heading.
+func writeSection(sb *strings.Builder, heading, body string) {
+	if body = strings.TrimSpace(body); body == "" {
+		return
+	}
+	fmt.Fprintf(sb, "\n\n## %s\n\n%s", heading, body)
+}
+
+// The point past which QuoteAuto folds a request away. A request that fits
+// inside these reads as one glance of context; past them it is a wall of text
+// between the reader and the next section.
+const (
+	quoteAutoMaxLines = 3
+	quoteAutoMaxRunes = 280
+)
+
+// quoteTeaserRunes is how much of the first line survives into the summary of a
+// folded request, which has to stay on one line to be worth reading.
+const quoteTeaserRunes = 80
+
+// writeQuotedRequest appends the request that started the run — the task, or
+// the feedback a follow-up addressed — under the given heading, folded away
+// according to mode.
+//
+// A folded request keeps its first line in the summary: collapsing is meant to
+// stop a long brief from filling the screen, not to make the reader open a
+// block to find out whether it is the one they are looking for.
+func writeQuotedRequest(sb *strings.Builder, heading, request string, mode forgeconfig.QuoteMode) {
+	request = strings.TrimSpace(request)
+	if request == "" || mode == forgeconfig.QuoteOff {
+		return
+	}
+	if mode == forgeconfig.QuoteFull || (mode != forgeconfig.QuoteCollapsed && !isLongRequest(request)) {
+		writeSection(sb, heading, blockquote(request))
+		return
+	}
+	fmt.Fprintf(sb, "\n\n<details>\n<summary>%s — %s</summary>\n\n%s\n\n</details>",
+		html.EscapeString(heading),
+		html.EscapeString(truncateRunes(firstLine(request), quoteTeaserRunes)),
+		blockquote(request))
+}
+
+// isLongRequest reports whether a request is past the point where QuoteAuto
+// folds it away.
+func isLongRequest(request string) bool {
+	return strings.Count(request, "\n")+1 > quoteAutoMaxLines ||
+		utf8.RuneCountInString(request) > quoteAutoMaxRunes
+}
+
+// blockquote prefixes every line so the request reads as the quoted input it
+// is. It also contains the markup: a request carrying its own headings would
+// otherwise land as sections of the comment.
+func blockquote(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if line = strings.TrimRight(line, " \t"); line == "" {
+			// A bare ">" keeps a blank line inside the quote rather than
+			// ending it, which is what splits one request into two blocks.
+			lines[i] = ">"
+			continue
+		}
+		lines[i] = "> " + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+// truncateRunes cuts s to at most limit runes, marking what it dropped.
+func truncateRunes(s string, limit int) string {
+	if utf8.RuneCountInString(s) <= limit {
+		return s
+	}
+	return string([]rune(s)[:limit]) + "…"
 }
 
 // writeWorklog appends the collapsible work-log section, or nothing when the
@@ -1168,6 +1250,11 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	}
 	agentPrompt := mode.BuildPrompt(spec.agentContext)
 
+	// Settle what this run's pull request, commit and comments will say. Both
+	// the agent and the delivery read it, so it is resolved once, here, as soon
+	// as the repository's own block and the chosen mode are both known.
+	prBehavior := s.resolvePRBehavior(ctx, proj, forgeCfg, cfg, userDefaults, mode.Name, log)
+
 	// The footprint is known, so the clone permit has done its job. Handing it
 	// back here rather than at the end of the run is the whole point: held
 	// across the wait for capacity, the number of permits would cap the queue
@@ -1360,6 +1447,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		Mode:        mode,
 		Runner:      sess.GetRunner(),
 		RepoContext: rc,
+		PullRequest: prBehavior.PullRequest,
 		Cost:        tracker,
 		OnProgress: func(event agent.ProgressEvent) {
 			switch e := event.(type) {
@@ -1573,7 +1661,6 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		sessionID:   sessionID,
 		sandbox:     sess,
 		forgeImpl:   forgeImpl,
-		forgeCfg:    forgeCfg,
 		proj:        proj,
 		agentResult: agentResult,
 		baseBranch:  branch,
@@ -1587,7 +1674,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		valResult:        valResult,
 		validationFailed: requiredFailed,
 		cost:             tracker.Snapshot(),
-		sections:         sectionsFrom(costLimits),
+		behavior:         prBehavior,
 		log:              log,
 	})
 
@@ -1684,7 +1771,8 @@ func (s *Service) submitChanges(
 	forgeImpl forge.Forge,
 	agentResult *agent.Result,
 	proj *project.Project,
-	forgeCfg *forgeconfig.ForgeConfig,
+	behavior forgeconfig.Behavior,
+	modeName string,
 	branch string,
 	cloneURL string,
 	cloneDir string,
@@ -1692,7 +1780,6 @@ func (s *Service) submitChanges(
 	prompt string,
 	worklog []worklogEntry,
 	costReport cost.Report,
-	sections commentSections,
 	log *slog.Logger,
 ) error {
 	// Check if there are any changes.
@@ -1718,30 +1805,15 @@ func (s *Service) submitChanges(
 		return fmt.Errorf("extract changes from VM: %w", err)
 	}
 
-	// Resolve behavioral settings by layering, highest precedence first:
-	// per-project overrides, per-forge values, the global [defaults] block, and
-	// the compiled-in constants.
-	var forgeDefaults forgeconfig.Defaults
-	if s.forgeDefaults != nil {
-		if d, err := s.forgeDefaults.Defaults(ctx); err != nil {
-			log.Warn("failed to load forge defaults; using built-ins", "error", err)
-		} else {
-			forgeDefaults = d
-		}
-	}
-	behavior := forgeCfg.ResolveBehavior(forgeDefaults, forgeconfig.Overrides{
-		BranchPrefix:      proj.BranchPrefix,
-		CommitAuthorName:  proj.CommitAuthorName,
-		CommitAuthorEmail: proj.CommitAuthorEmail,
-		Labels:            proj.Labels,
-	})
 	prefix := behavior.BranchPrefix
 	authorName := behavior.CommitAuthorName
 	authorEmail := behavior.CommitAuthorEmail
 	labels := behavior.Labels
 
-	// Commit and push. The commit message and PR body are identical so the
-	// PR shows the same content that lands as the merge commit.
+	// Commit and push. The commit message and PR body share one body so the
+	// PR shows the same content that lands as the merge commit. Only the run
+	// metadata differs: trailers on the commit, where tooling looks for them,
+	// and a footer on the pull request, where a reader does.
 	//
 	// The branch name is derived from the commit title for readability, with a
 	// short slice of the session id as a suffix to keep it unique and git-ref
@@ -1758,6 +1830,18 @@ func (s *Service) submitChanges(
 	if body != "" {
 		commitMsg = title + "\n\n" + body
 	}
+
+	tmplData := prTemplateData{
+		Title:       title,
+		Description: body,
+		SessionID:   sessionID,
+		Branch:      prBranch,
+		Mode:        modeName,
+	}
+	commitMsg = coding.ApplyTrailers(commitMsg,
+		renderPRTemplates(behavior.PullRequest.CommitTrailers, tmplData, log))
+	prBody := coding.ApplyFooter(body,
+		renderPRTemplate(behavior.PullRequest.BodyFooter, tmplData, log))
 
 	if err := forgeImpl.SCM().CommitAndPush(ctx, scm.CommitAndPushOpts{
 		RepoDir:     cloneDir,
@@ -1777,7 +1861,7 @@ func (s *Service) submitChanges(
 		BaseBranch:  branch,
 		HeadBranch:  prBranch,
 		Title:       title,
-		Body:        body,
+		Body:        prBody,
 		Labels:      labels,
 		Credentials: creds,
 	})
@@ -1795,8 +1879,13 @@ func (s *Service) submitChanges(
 	s.sessionMgr.SetPullRequest(context.WithoutCancel(ctx), sessionID, pr.URL, pr.Ref, prBranch)
 
 	// Post task + work log as a PR comment so it stays out of any
-	// squash-merge commit message.
-	commentBody := formatWorklogComment(prompt, worklog, sections, costReport)
+	// squash-merge commit message. Configuration that turns off every section
+	// leaves nothing to say, and an empty comment is worse than none.
+	commentBody := formatWorklogComment(prompt, worklog, sectionsFrom(behavior.PullRequest), costReport)
+	if commentBody == "" {
+		log.Info("skipping task/work-log comment: every section is turned off")
+		return nil
+	}
 	if err := forgeImpl.PostComment(ctx, forge.PostCommentOpts{
 		RepoURL:     cloneURL,
 		PRRef:       pr.Ref,
@@ -1820,7 +1909,8 @@ func (s *Service) submitFollowup(
 	forgeImpl forge.Forge,
 	agentResult *agent.Result,
 	proj *project.Project,
-	forgeCfg *forgeconfig.ForgeConfig,
+	behavior forgeconfig.Behavior,
+	modeName string,
 	pr *prTarget,
 	cloneURL string,
 	cloneDir string,
@@ -1828,7 +1918,6 @@ func (s *Service) submitFollowup(
 	feedback string,
 	worklog []worklogEntry,
 	costReport cost.Report,
-	sections commentSections,
 	log *slog.Logger,
 ) error {
 	// The VM cloned the PR head, so the changed set is the follow-up delta.
@@ -1871,21 +1960,15 @@ func (s *Service) submitFollowup(
 	if agentResult.Description != "" {
 		commitMsg = title + "\n\n" + agentResult.Description
 	}
-
-	var forgeDefaults forgeconfig.Defaults
-	if s.forgeDefaults != nil {
-		if d, err := s.forgeDefaults.Defaults(ctx); err != nil {
-			log.Warn("failed to load forge defaults; using built-ins", "error", err)
-		} else {
-			forgeDefaults = d
-		}
-	}
-	behavior := forgeCfg.ResolveBehavior(forgeDefaults, forgeconfig.Overrides{
-		BranchPrefix:      proj.BranchPrefix,
-		CommitAuthorName:  proj.CommitAuthorName,
-		CommitAuthorEmail: proj.CommitAuthorEmail,
-		Labels:            proj.Labels,
-	})
+	commitMsg = coding.ApplyTrailers(commitMsg, renderPRTemplates(
+		behavior.PullRequest.CommitTrailers,
+		prTemplateData{
+			Title:       title,
+			Description: agentResult.Description,
+			SessionID:   sessionID,
+			Branch:      pr.headBranch,
+			Mode:        modeName,
+		}, log))
 
 	// Pushing the PR's own branch name is a fast-forward of one new commit.
 	if err := forgeImpl.SCM().CommitAndPush(ctx, scm.CommitAndPushOpts{
@@ -1903,7 +1986,12 @@ func (s *Service) submitFollowup(
 
 	log.Info("follow-up commit pushed", "branch", pr.headBranch, "url", pr.url)
 
-	commentBody := formatFollowupComment(feedback, agentResult.Description, worklog, sections, costReport)
+	commentBody := formatFollowupComment(feedback, agentResult.Description, worklog,
+		sectionsFrom(behavior.PullRequest), costReport)
+	if commentBody == "" {
+		log.Info("skipping follow-up comment: every section is turned off")
+		return nil
+	}
 	if err := forgeImpl.PostComment(ctx, forge.PostCommentOpts{
 		RepoURL:     cloneURL,
 		PRRef:       pr.ref,

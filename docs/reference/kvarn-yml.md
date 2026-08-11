@@ -26,6 +26,7 @@ The home directory is `/home/kvarn`.
 | `setup` | object | Steps and health checks run before the agent. |
 | `validation` | object | Steps run after the agent. |
 | `modes` | map | Agent modes this repository defines, beside the built-in ones. |
+| `pull_request` | object | What the pull requests, commits and comments a run produces should say. |
 
 All keys are optional; a repository with no `kvarn.yml` gets a bare VM with no
 setup and no validation.
@@ -334,6 +335,92 @@ guarantee the reviewer controls.
 A caller that needs a mode this file does not define can supply one with the
 request instead; see `kvarn jobs start --mode-spec` in
 [CLI reference](cli.md).
+
+## `pull_request`
+
+Steers what a run writes: the commit subject, the shared body that becomes both
+the commit message body and the pull request description, and the comment a
+delivery posts.
+
+```yaml
+pull_request:
+  title:
+    instructions: |
+      Use Conventional Commits: type(scope): subject.
+      Types: feat, fix, chore, docs, refactor, test, build.
+    max_length: 72
+  body:
+    instructions: Write for a reviewer who has not seen the task.
+    sections:
+      - name: Testing
+        description: Which commands ran and what they reported. Say "not run"
+                     and why if none were.
+        required: true
+      - name: Risks
+        description: Anything a reviewer should look at twice.
+  comment:
+    instructions: Lead with the verdict, then the detail.
+```
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `title.instructions` | string | Added to the conventions the summary is written under. |
+| `title.max_length` | int | Character budget for the subject line. Defaults to 72. |
+| `body.instructions` | string | As above, for the body. |
+| `body.sections` | list | Headings the body must carry; see below. |
+| `comment.instructions` | string | How the written result should read when it is posted as a comment. |
+| `comment.sections` | list | Headings that result should use. |
+| `modes` | map | Overrides the block above for one job mode. |
+
+### Sections
+
+Each entry has a `name` (the level-2 heading, required and unique within its
+list), an optional `description` of what belongs under it, and `required`.
+
+`body.sections` are filled in by a structured call, so kvarn can check them: a
+required section that comes back empty is asked for a second time, and if it is
+still empty the heading is rendered as `_(not provided)_` rather than dropped.
+Sections render in the order they are declared. Anything the agent returns that
+was not asked for is discarded.
+
+`comment.sections` are a request in the prompt rather than a checked structure.
+A comment is written as the agent's own reply, not through a structured call, so
+kvarn cannot verify the headings came back or reorder them.
+
+### Per-mode overrides
+
+`pull_request.modes.<mode>` layers on top of the block above it, so a mode adds
+to the repository's conventions instead of restating them:
+
+```yaml
+pull_request:
+  body:
+    instructions: Write for a reviewer who has not seen the task.
+  modes:
+    implement:
+      body:
+        instructions: Also list any new dependency and why it is needed.
+        sections:
+          - name: Migration
+            description: What an operator must do when deploying this.
+```
+
+Instructions concatenate, the top-level ones first. Sections merge by name: an
+entry replaces the top-level entry it shares a name with, keeping that entry's
+position, and a name the mode introduces is appended.
+
+### What this block cannot set
+
+Body footers, commit trailers, whether a comment carries the work log or the
+cost, and how much of the request that started the run it quotes back
+(`quote_task`) are configured by the operator in
+[`forges.toml`](forges-toml.md) and [`projects.toml`](projects-toml.md). This
+file is read from the branch a job runs on, the same trust boundary `modes` and
+`setup.steps` sit on, so a run that could set them would be able to rewrite its
+own attribution — or suppress the record of what it was asked to do.
+
+Operator instructions are not replaced by anything here. Both sets reach the
+summary, labelled by origin, and the repository's read last.
 
 ## Step fields
 

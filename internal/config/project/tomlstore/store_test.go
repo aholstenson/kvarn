@@ -8,6 +8,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 	"github.com/aholstenson/kvarn/internal/config/project"
 	"github.com/aholstenson/kvarn/internal/config/project/tomlstore"
 	generic "github.com/aholstenson/kvarn/internal/config/tomlstore"
@@ -168,4 +169,55 @@ var _ = Describe("Project TomlStore", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(proj.RepoURL).To(Equal("org/new"))
 	})
+
+	Describe("pull_request block", func() {
+		It("reads it alongside the superseded top-level toggles", func() {
+			path := filepath.Join(tmpDir, "projects.toml")
+			content := `[projects.app]
+repo = "org/app"
+report_worklog_on_pr = false
+
+[projects.app.pull_request]
+body_instructions = "Note user-visible flag changes."
+commit_trailers = ["Kvarn-Session: {{ .SessionID }}"]
+report_cost_on_pr = false
+`
+			Expect(os.WriteFile(path, []byte(content), 0644)).To(Succeed())
+
+			proj, err := store.Get(ctx, "app")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(proj.PullRequest.BodyInstructions).To(Equal("Note user-visible flag changes."))
+			Expect(proj.PullRequest.CommitTrailers).To(Equal([]string{"Kvarn-Session: {{ .SessionID }}"}))
+			Expect(*proj.PullRequest.ReportCost).To(BeFalse())
+			Expect(proj.PullRequest.ReportWorklog).To(BeNil(),
+				"the block did not set it; the top-level spelling is folded in later")
+			Expect(*proj.ReportWorklogOnPR).To(BeFalse())
+		})
+
+		It("round-trips through Put", func() {
+			Expect(store.Put(ctx, &project.Project{
+				Name: "app", RepoURL: "org/app",
+				PullRequest: forgeconfig.PRContent{
+					TitleInstructions: "Conventional Commits.",
+					TitleMaxLength:    intPtr(60),
+				},
+			})).To(Succeed())
+
+			proj, err := store.Get(ctx, "app")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(proj.PullRequest.TitleInstructions).To(Equal("Conventional Commits."))
+			Expect(*proj.PullRequest.TitleMaxLength).To(Equal(60))
+		})
+
+		It("does not add an empty table for a project that sets nothing", func() {
+			path := filepath.Join(tmpDir, "projects.toml")
+			Expect(store.Put(ctx, &project.Project{Name: "app", RepoURL: "org/app"})).To(Succeed())
+
+			raw, err := os.ReadFile(path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(raw)).NotTo(ContainSubstring("pull_request"))
+		})
+	})
 })
+
+func intPtr(v int) *int { return &v }

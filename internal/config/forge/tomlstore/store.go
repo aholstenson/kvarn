@@ -22,6 +22,7 @@ type defaultsEntry struct {
 	Labels            []string `toml:"labels,omitempty"`
 	CommitAuthorName  string   `toml:"commit_author_name,omitempty"`
 	CommitAuthorEmail string   `toml:"commit_author_email,omitempty"`
+	PullRequest       *prEntry `toml:"pull_request,omitempty"`
 }
 
 type forgeEntry struct {
@@ -31,6 +32,81 @@ type forgeEntry struct {
 	Labels            []string `toml:"labels,omitempty"`
 	CommitAuthorName  string   `toml:"commit_author_name,omitempty"`
 	CommitAuthorEmail string   `toml:"commit_author_email,omitempty"`
+	PullRequest       *prEntry `toml:"pull_request,omitempty"`
+}
+
+// prEntry mirrors a `pull_request` sub-table. It is a pointer everywhere it is
+// used so a config without the block round-trips through Put without gaining an
+// empty table.
+type prEntry struct {
+	TitleInstructions   string                `toml:"title_instructions,omitempty"`
+	TitleMaxLength      *int                  `toml:"title_max_length,omitempty"`
+	BodyInstructions    string                `toml:"body_instructions,omitempty"`
+	BodyFooter          string                `toml:"body_footer,omitempty"`
+	CommentInstructions string                `toml:"comment_instructions,omitempty"`
+	CommitTrailers      []string              `toml:"commit_trailers,omitempty"`
+	ReportWorklogOnPR   *bool                 `toml:"report_worklog_on_pr,omitempty"`
+	ReportCostOnPR      *bool                 `toml:"report_cost_on_pr,omitempty"`
+	QuoteTask           forgeconfig.QuoteMode `toml:"quote_task,omitempty"`
+}
+
+// toContent converts a parsed block to the domain type. A nil receiver is the
+// absent block and yields a zero PRContent, which contributes nothing to
+// ResolveBehavior.
+func (e *prEntry) toContent() forgeconfig.PRContent {
+	if e == nil {
+		return forgeconfig.PRContent{}
+	}
+	trailers := make([]string, len(e.CommitTrailers))
+	copy(trailers, e.CommitTrailers)
+	return forgeconfig.PRContent{
+		TitleInstructions:   e.TitleInstructions,
+		TitleMaxLength:      e.TitleMaxLength,
+		BodyInstructions:    e.BodyInstructions,
+		BodyFooter:          e.BodyFooter,
+		CommentInstructions: e.CommentInstructions,
+		CommitTrailers:      trailers,
+		ReportWorklog:       e.ReportWorklogOnPR,
+		ReportCost:          e.ReportCostOnPR,
+		QuoteTask:           e.QuoteTask,
+	}
+}
+
+// prEntryFrom converts the domain type back to a parsed block, returning nil
+// when nothing is set so an untouched config does not grow the table.
+func prEntryFrom(c forgeconfig.PRContent) *prEntry {
+	e := &prEntry{
+		TitleInstructions:   c.TitleInstructions,
+		TitleMaxLength:      c.TitleMaxLength,
+		BodyInstructions:    c.BodyInstructions,
+		BodyFooter:          c.BodyFooter,
+		CommentInstructions: c.CommentInstructions,
+		ReportWorklogOnPR:   c.ReportWorklog,
+		ReportCostOnPR:      c.ReportCost,
+		QuoteTask:           c.QuoteTask,
+	}
+	if len(c.CommitTrailers) > 0 {
+		e.CommitTrailers = make([]string, len(c.CommitTrailers))
+		copy(e.CommitTrailers, c.CommitTrailers)
+	}
+	if e.isZero() {
+		return nil
+	}
+	return e
+}
+
+// isZero reports whether the block sets nothing. It is written out by hand
+// because a slice field makes prEntry uncomparable.
+func (e *prEntry) isZero() bool {
+	return e.TitleInstructions == "" &&
+		e.TitleMaxLength == nil &&
+		e.BodyInstructions == "" &&
+		e.BodyFooter == "" &&
+		e.CommentInstructions == "" &&
+		len(e.CommitTrailers) == 0 &&
+		e.ReportWorklogOnPR == nil &&
+		e.ReportCostOnPR == nil &&
+		e.QuoteTask == forgeconfig.QuoteInherit
 }
 
 // Store is a TOML file-backed forge config store.
@@ -95,6 +171,7 @@ func entryToConfig(name string, e *forgeEntry) (*forgeconfig.ForgeConfig, error)
 		Labels:            labels,
 		CommitAuthorName:  e.CommitAuthorName,
 		CommitAuthorEmail: e.CommitAuthorEmail,
+		PullRequest:       e.PullRequest.toContent(),
 	}, nil
 }
 
@@ -108,6 +185,7 @@ func configToEntry(fc *forgeconfig.ForgeConfig) (string, *forgeEntry) {
 		Labels:            labels,
 		CommitAuthorName:  fc.CommitAuthorName,
 		CommitAuthorEmail: fc.CommitAuthorEmail,
+		PullRequest:       prEntryFrom(fc.PullRequest),
 	}
 }
 
@@ -145,5 +223,6 @@ func (s *Store) Defaults(ctx context.Context) (forgeconfig.Defaults, error) {
 		CommitAuthorName:  fd.Defaults.CommitAuthorName,
 		CommitAuthorEmail: fd.Defaults.CommitAuthorEmail,
 		Labels:            labels,
+		PullRequest:       fd.Defaults.PullRequest.toContent(),
 	}, nil
 }

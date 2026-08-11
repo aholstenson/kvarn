@@ -1,6 +1,10 @@
 package project
 
-import "context"
+import (
+	"context"
+
+	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
+)
 
 // JobLimits is the per-job-mode override block for a project. Today it only
 // carries a max-cost cap, but the shape is designed to take per-mode model
@@ -23,11 +27,11 @@ type Project struct {
 	// Nil means "inherit from defaults". Resolution order is documented on
 	// internal/config/limits.
 	MaxCostUSD *float64
-	// ReportCostOnPR overrides whether a delivery's PR comment includes a
-	// cost section. Nil means "inherit from defaults".
-	ReportCostOnPR *bool
-	// ReportWorklogOnPR overrides whether a delivery's PR comment includes the
-	// collapsible work log. Nil means "inherit from defaults".
+	// ReportCostOnPR and ReportWorklogOnPR are the superseded top-level
+	// spellings of the same settings in PullRequest. They are still read so
+	// existing configs keep working, and the block below wins when both are
+	// present; `kvarn` warns when it takes a value from here.
+	ReportCostOnPR    *bool
 	ReportWorklogOnPR *bool
 	// MaxValidationRetries overrides the user-level default for how many
 	// additional agent attempts to allow after a required validation step
@@ -46,6 +50,10 @@ type Project struct {
 	Labels            []string
 	CommitAuthorName  string
 	CommitAuthorEmail string
+	// PullRequest is the `[projects.<name>.pull_request]` block: what the pull
+	// requests and comments this project's jobs produce should say. It is the
+	// most specific operator layer, above the forge and the global defaults.
+	PullRequest forgeconfig.PRContent
 	// CloneDepth overrides the default shallow-clone depth. Nil inherits
 	// scm.DefaultCloneDepth. A positive value caps history to that many
 	// commits; 0 means a full clone (use for projects whose tooling needs

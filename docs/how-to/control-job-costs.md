@@ -85,14 +85,15 @@ defaults to `0` there, since you are watching.
 ## Choose what the pull-request comment carries
 
 ```toml
-[projects.my-project]
+[projects.my-project.pull_request]
 report_cost_on_pr = true
 report_worklog_on_pr = true
+quote_task = "auto"
 ```
 
-Both are on by default and control one section each of the comment Kvarn posts
-on the PR: `report_cost_on_pr` the cost summary, `report_worklog_on_pr` the
-collapsible work log of what the agent did.
+The first two are on by default and control one section each of the comment
+Kvarn posts on the PR: `report_cost_on_pr` the cost summary,
+`report_worklog_on_pr` the collapsible work log of what the agent did.
 
 Turn the cost section off for repositories where the figure would be visible to
 people who shouldn't see it. Turn the work log off where it is noise — a busy
@@ -100,8 +101,18 @@ run's log is long, and on a repository whose reviewers only want the result it
 buries it. Neither switch changes what is recorded: the work log is also
 emitted as session events, so `kvarn jobs events <session-id>` still shows it.
 
-Both resolve project → `[defaults]` in `agents.toml` → built-in, so set them
-once in `agents.toml` to change the habit everywhere and override per project.
+`quote_task` does the same job for the task or feedback the comment quotes back.
+It defaults to `auto`, which shows a short request and folds a long one into a
+collapsed block; `collapsed` always folds, `full` never does, and `off` leaves
+it out. See
+[`forges.toml`](../reference/forges-toml.md#comment-layout) for the full
+behaviour.
+
+All three resolve with the content they gate — `[projects.<name>.pull_request]`
+→ `[forges.<name>.pull_request]` → `[defaults.pull_request]` in
+[`forges.toml`](../reference/forges-toml.md#pull-request-content) → built-in —
+so set them once in `forges.toml` to change the habit everywhere and override
+per project.
 
 ## What a cap trip looks like
 

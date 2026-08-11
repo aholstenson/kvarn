@@ -11,6 +11,7 @@ import (
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/agent/coding"
+	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 )
 
 // fakeModel is a minimal llms.Model implementation for testing spawn_agent.
@@ -236,25 +237,25 @@ var _ = Describe("Mode", func() {
 			coding.Explore.Name: coding.Explore,
 			coding.Plan.Name:    coding.Plan,
 		}
-		prompt := coding.ModeImplement.SystemPrompt("proj", "url", "main", nil, subs)
+		prompt := coding.ModeImplement.SystemPrompt("proj", "url", "main", nil, subs, forgeconfig.Content{})
 		Expect(prompt).To(ContainSubstring("<available_sub_agents>"))
 		Expect(prompt).To(ContainSubstring(coding.Explore.Name))
 		Expect(prompt).To(ContainSubstring(coding.Plan.Name))
 	})
 
 	It("omits sub-agent section when no sub-agents are provided", func() {
-		prompt := coding.ModeImplement.SystemPrompt("proj", "url", "main", nil, nil)
+		prompt := coding.ModeImplement.SystemPrompt("proj", "url", "main", nil, nil, forgeconfig.Content{})
 		Expect(prompt).NotTo(ContainSubstring("<available_sub_agents>"))
 	})
 
 	It("identifies the agent as Kvarn in the opening line", func() {
-		prompt := coding.ModeImplement.SystemPrompt("proj", "url", "main", nil, nil)
+		prompt := coding.ModeImplement.SystemPrompt("proj", "url", "main", nil, nil, forgeconfig.Content{})
 		Expect(prompt).To(ContainSubstring("You are Kvarn, an autonomous coding agent"))
 	})
 
 	It("includes the shared operating principles in write and read-only modes", func() {
-		write := coding.ModeImplement.SystemPrompt("proj", "url", "main", nil, nil)
-		readOnly := coding.ModeReview.SystemPrompt("proj", "url", "main", nil, nil)
+		write := coding.ModeImplement.SystemPrompt("proj", "url", "main", nil, nil, forgeconfig.Content{})
+		readOnly := coding.ModeReview.SystemPrompt("proj", "url", "main", nil, nil, forgeconfig.Content{})
 		Expect(write).To(ContainSubstring("## Operating principles"))
 		Expect(readOnly).To(ContainSubstring("## Operating principles"))
 	})

@@ -8,6 +8,7 @@ import (
 
 	"github.com/aholstenson/kvarn/internal/agent/coding"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
+	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 )
 
 var _ = Describe("ModeByName", func() {
@@ -123,7 +124,7 @@ var _ = Describe("Mode axes", func() {
 
 var _ = Describe("SystemPrompt", func() {
 	It("frames the mode's body with the role and environment block", func() {
-		prompt := coding.ModeReview.SystemPrompt("acme", "git@example.com:acme/web.git", "main", nil, nil)
+		prompt := coding.ModeReview.SystemPrompt("acme", "git@example.com:acme/web.git", "main", nil, nil, forgeconfig.Content{})
 		Expect(prompt).To(HavePrefix("You are Kvarn, a read-only code review agent running in a sandboxed VM."))
 		Expect(prompt).To(ContainSubstring("- Project: acme"))
 		Expect(prompt).To(ContainSubstring("- Repository: git@example.com:acme/web.git"))
@@ -132,8 +133,8 @@ var _ = Describe("SystemPrompt", func() {
 	})
 
 	It("gives a write mode the editing rules and a read-only mode none", func() {
-		Expect(coding.ModeImplement.SystemPrompt("p", "r", "b", nil, nil)).To(ContainSubstring("## Editing rules"))
-		Expect(coding.ModeReview.SystemPrompt("p", "r", "b", nil, nil)).NotTo(ContainSubstring("## Editing rules"))
+		Expect(coding.ModeImplement.SystemPrompt("p", "r", "b", nil, nil, forgeconfig.Content{})).To(ContainSubstring("## Editing rules"))
+		Expect(coding.ModeReview.SystemPrompt("p", "r", "b", nil, nil, forgeconfig.Content{})).NotTo(ContainSubstring("## Editing rules"))
 	})
 })
 
@@ -255,8 +256,8 @@ var _ = Describe("Registry", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			prompt := reg["audit"].SystemPrompt("p", "r", "b", nil, nil)
-			base := coding.ModeReview.SystemPrompt("p", "r", "b", nil, nil)
+			prompt := reg["audit"].SystemPrompt("p", "r", "b", nil, nil, forgeconfig.Content{})
+			base := coding.ModeReview.SystemPrompt("p", "r", "b", nil, nil, forgeconfig.Content{})
 			Expect(prompt).To(ContainSubstring("## Operating principles"), "the inherited body survives")
 			Expect(prompt).To(ContainSubstring("## Additional instructions\n\nCheck the egress allowlist."))
 			Expect(len(prompt)).To(BeNumerically(">", len(base)), "it adds rather than replaces")
@@ -269,7 +270,7 @@ var _ = Describe("Registry", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			prompt := reg["audit"].SystemPrompt("p", "r", "b",
-				&repocontext.RepoContext{Instructions: "House rules."}, nil)
+				&repocontext.RepoContext{Instructions: "House rules."}, nil, forgeconfig.Content{})
 			Expect(prompt).To(ContainSubstring("Check the egress allowlist."))
 			Expect(strings.Index(prompt, "## Project Instructions")).To(
 				BeNumerically(">", strings.Index(prompt, "Check the egress allowlist.")))
@@ -281,7 +282,7 @@ var _ = Describe("Registry", func() {
 				"b": {Extends: "a", Prompt: "Second."},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			prompt := reg["b"].SystemPrompt("p", "r", "b", nil, nil)
+			prompt := reg["b"].SystemPrompt("p", "r", "b", nil, nil, forgeconfig.Content{})
 			Expect(prompt).To(ContainSubstring("First."))
 			Expect(prompt).To(ContainSubstring("Second."))
 			Expect(strings.Index(prompt, "Second.")).To(BeNumerically(">", strings.Index(prompt, "First.")))
@@ -304,7 +305,7 @@ var _ = Describe("Registry", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(m.Name).To(Equal("inline"))
 			Expect(m.Deliver).To(Equal([]coding.Sink{coding.SinkPRComment}))
-			Expect(m.SystemPrompt("p", "r", "b", nil, nil)).To(ContainSubstring("House rules."))
+			Expect(m.SystemPrompt("p", "r", "b", nil, nil, forgeconfig.Content{})).To(ContainSubstring("House rules."))
 		})
 
 		It("refuses an inline spec that shadows a built-in", func() {

@@ -23,7 +23,6 @@ type deliveryRequest struct {
 	sessionID   string
 	sandbox     Sandbox
 	forgeImpl   forge.Forge
-	forgeCfg    *forgeconfig.ForgeConfig
 	proj        *project.Project
 	agentResult *agent.Result
 	// baseBranch is the branch a new pull request targets.
@@ -48,9 +47,9 @@ type deliveryRequest struct {
 	// just established that what it produced does not pass.
 	validationFailed bool
 	cost             cost.Report
-	// sections says which optional sections the comments this delivery posts
-	// carry, resolved from project and user config.
-	sections commentSections
+	// behavior is the resolved forge behavior for this run: branch prefix,
+	// labels, commit author, and what the pull request and its comments say.
+	behavior forgeconfig.Behavior
 	log      *slog.Logger
 }
 
@@ -130,8 +129,8 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 		switch sink {
 		case coding.SinkNewPullRequest:
 			if err := s.submitChanges(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
-				req.proj, req.forgeCfg, req.baseBranch, req.cloneURL, req.cloneDir, req.creds,
-				req.userPrompt, req.worklog, req.cost, req.sections, req.log); err != nil {
+				req.proj, req.behavior, req.mode.Name, req.baseBranch, req.cloneURL, req.cloneDir, req.creds,
+				req.userPrompt, req.worklog, req.cost, req.log); err != nil {
 				return err
 			}
 			commented = true
@@ -141,8 +140,8 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 				return fmt.Errorf("mode %q delivers a follow-up commit but the run has no pull request to commit onto", req.mode.Name)
 			}
 			if err := s.submitFollowup(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
-				req.proj, req.forgeCfg, req.pr, req.cloneURL, req.cloneDir, req.creds,
-				req.userPrompt, req.worklog, req.cost, req.sections, req.log); err != nil {
+				req.proj, req.behavior, req.mode.Name, req.pr, req.cloneURL, req.cloneDir, req.creds,
+				req.userPrompt, req.worklog, req.cost, req.log); err != nil {
 				return err
 			}
 			commented = true
@@ -185,7 +184,13 @@ func (s *Service) postResultComment(ctx context.Context, req deliveryRequest) er
 		result = req.agentResult.Description
 	}
 	body := formatResultComment(req.userPrompt, result, req.valResult,
-		req.worklog, req.sections, req.cost)
+		req.worklog, sectionsFrom(req.behavior.PullRequest), req.cost)
+	if body == "" {
+		// The comment is this mode's entire output, so there is nothing left to
+		// deliver — but an empty comment says even less than none.
+		req.log.Info("skipping result comment: the run produced nothing to say")
+		return nil
+	}
 	if err := req.forgeImpl.PostComment(ctx, forge.PostCommentOpts{
 		RepoURL:     req.cloneURL,
 		PRRef:       prRef,
@@ -207,23 +212,19 @@ const maxCommentBody = 65536
 const truncationNote = "\n\n_(truncated: the full result is available with `kvarn jobs result`)_"
 
 // formatResultComment renders what the run produced as a pull request comment:
-// the task it was given, the agent's written result, how the project's
-// validation steps went, and the same collapsible work log and cost sections
-// every other comment carries.
+// the agent's written result, how the project's validation steps went, the task
+// it was given, and the same collapsible work log and cost sections every other
+// comment carries.
 func formatResultComment(prompt, result string, val *sandbox.ValidationResult,
 	entries []worklogEntry, sections commentSections, report cost.Report,
 ) string {
 	var sb strings.Builder
-	sb.WriteString("## Task\n\n")
-	sb.WriteString(strings.TrimSpace(prompt))
-	if result = strings.TrimSpace(result); result != "" {
-		sb.WriteString("\n\n## Result\n\n")
-		sb.WriteString(result)
-	}
+	writeSection(&sb, "Result", result)
 	writeValidation(&sb, val)
+	writeQuotedRequest(&sb, "Task", prompt, sections.quote)
 	writeWorklog(&sb, sections.worklog, entries)
 	writeCostSection(&sb, sections.cost, report)
-	return trimCommentBody(sb.String())
+	return trimCommentBody(finishComment(&sb))
 }
 
 // writeValidation appends what the project's validation steps did, or nothing

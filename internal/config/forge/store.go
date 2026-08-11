@@ -28,6 +28,9 @@ type ForgeConfig struct {
 	Labels            []string
 	CommitAuthorName  string
 	CommitAuthorEmail string
+	// PullRequest is the `[forges.<name>.pull_request]` block: what the pull
+	// requests opened through this forge say.
+	PullRequest PRContent
 }
 
 // Defaults holds forge-wide default behavior applied to every forge unless the
@@ -38,6 +41,9 @@ type Defaults struct {
 	CommitAuthorName  string
 	CommitAuthorEmail string
 	Labels            []string
+	// PullRequest is the `[defaults.pull_request]` block: the house style every
+	// forge starts from.
+	PullRequest PRContent
 }
 
 // Overrides holds per-project overrides applied above the per-forge values.
@@ -51,6 +57,8 @@ type Overrides struct {
 	CommitAuthorName  string
 	CommitAuthorEmail string
 	Labels            []string
+	// PullRequest is the `[projects.<name>.pull_request]` block.
+	PullRequest PRContent
 }
 
 // Behavior is the effective forge behavior after layering: per-forge override →
@@ -60,6 +68,9 @@ type Behavior struct {
 	CommitAuthorName  string
 	CommitAuthorEmail string
 	Labels            []string
+	// PullRequest is the resolved content configuration: what the title, body
+	// and comments a delivery produces should say and carry.
+	PullRequest Content
 }
 
 // ResolveBehavior layers, from lowest to highest precedence: the compiled-in
@@ -67,7 +78,12 @@ type Behavior struct {
 // overrides. The receiver may be nil (a project without a forge), in which case
 // the forge layer is skipped. Each field resolves independently; Labels are
 // replaced wholesale at each layer rather than merged.
-func (fc *ForgeConfig) ResolveBehavior(d Defaults, o Overrides) Behavior {
+//
+// repo is the repository's own `pull_request:` block, which sits above every
+// operator layer for content and contributes nothing else. Its instruction
+// fields concatenate with the operator ones instead of replacing them; see
+// resolveContent.
+func (fc *ForgeConfig) ResolveBehavior(d Defaults, o Overrides, repo RepoContent) Behavior {
 	b := Behavior{
 		BranchPrefix:      DefaultBranchPrefix,
 		CommitAuthorName:  DefaultCommitAuthorName,
@@ -118,6 +134,13 @@ func (fc *ForgeConfig) ResolveBehavior(d Defaults, o Overrides) Behavior {
 	if len(o.Labels) > 0 {
 		b.Labels = o.Labels
 	}
+
+	layers := []PRContent{d.PullRequest}
+	if fc != nil {
+		layers = append(layers, fc.PullRequest)
+	}
+	layers = append(layers, o.PullRequest)
+	b.PullRequest = resolveContent(layers, repo)
 
 	return b
 }

@@ -5,6 +5,7 @@ import (
 
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
+	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 )
 
@@ -84,6 +85,10 @@ type Context struct {
 	Mode        Mode // optional; agent supplies its own default when nil
 	Runner      sandbox.RunnerProxy
 	RepoContext *repocontext.RepoContext
+	// PullRequest is the resolved pull-request content configuration for this
+	// run: the conventions the summary should follow and the sections its body
+	// should carry. The zero value asks for the built-in shape.
+	PullRequest forgeconfig.Content
 	OnProgress  func(event ProgressEvent)
 	// Cost is the per-job spend tracker. When non-nil the agent should record
 	// LLM token usage through it and consult it for budget enforcement.
