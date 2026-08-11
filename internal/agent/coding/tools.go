@@ -255,10 +255,19 @@ func (t *execCommandTool) Render(o *ExecCommandOutput) llms.ToolResult {
 
 // read_file
 
+// defaultReadLines bounds a single read, and is both the window a read gets
+// when it asks for no particular one and the longest window it can ask for.
+//
+// A file this long is one to navigate rather than to hold: the anchors of the
+// window that was read stay valid, so continuing from where the last read
+// stopped costs one more call, while a whole-file read of something generated
+// costs the rest of the conversation.
+const defaultReadLines = 2000
+
 type ReadFileInput struct {
 	Path      string `json:"path" jsonschema:"description=Path to the file. Relative to the workspace root; an absolute path inside the workspace also works."`
-	StartLine int    `json:"start_line,omitempty" jsonschema:"description=1-indexed start line. Omit or set to 0 for whole file."`
-	EndLine   int    `json:"end_line,omitempty" jsonschema:"description=1-indexed inclusive end line. Omit or set to 0 for whole file."`
+	StartLine int    `json:"start_line,omitempty" jsonschema:"description=1-indexed start line. Omit or set to 0 to start at the top of the file."`
+	EndLine   int    `json:"end_line,omitempty" jsonschema:"description=1-indexed inclusive end line. Omit or set to 0 for the rest of the window."`
 }
 
 // TaggedLineView is the public representation of a TaggedLine in tool output.
@@ -289,16 +298,18 @@ Anchors are deterministic, single-word labels of the line's content. When two di
 
 The first line of the output is "version: <hash>" — you may pass that back as expected_version on edit_file as an advisory check, but it is not required.
 
-Optional start_line / end_line (1-indexed, inclusive) limit the response to a window. The version always covers the whole file.`
+A read returns at most 2000 lines. Files shorter than that come back whole; for longer ones the response says which lines you got and where to continue, and start_line / end_line (1-indexed, inclusive) read any other window. The version and total_lines always describe the whole file.`
 }
 func (t *readFileTool) Schema() *ReadFileInput { return &ReadFileInput{} }
 
 func (t *readFileTool) Execute(ctx context.Context, input *ReadFileInput) (*ReadFileOutput, error) {
+	start, end := readWindow(input.StartLine, input.EndLine)
+
 	resp, err := t.toolkit.runner.ReadFile(ctx, &v1.ReadFileRequest{
 		WorkingDir: t.toolkit.workingDir,
 		Path:       input.Path,
-		StartLine:  int32(input.StartLine),
-		EndLine:    int32(input.EndLine),
+		StartLine:  int32(start),
+		EndLine:    int32(end),
 	})
 	if err != nil {
 		return nil, err
@@ -316,12 +327,43 @@ func (t *readFileTool) Execute(ctx context.Context, input *ReadFileInput) (*Read
 	return out, nil
 }
 
+// readWindow resolves the window a read actually asks the runner for. An
+// unspecified start is the top of the file, and an unspecified or over-long end
+// is defaultReadLines further on — so a read of an unfamiliar file is bounded
+// whether or not the caller thought about how long it might be.
+func readWindow(startLine, endLine int) (start, end int) {
+	start = startLine
+	if start <= 0 {
+		start = 1
+	}
+	end = endLine
+	if last := start + defaultReadLines - 1; end <= 0 || end > last {
+		end = last
+	}
+	return start, end
+}
+
 func (t *readFileTool) Render(o *ReadFileOutput) llms.ToolResult {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "version: %s\n", o.Version)
 	fmt.Fprintf(&sb, "total_lines: %d\n", o.TotalLines)
 	for _, l := range o.Lines {
 		fmt.Fprintf(&sb, "%d:%s|%s\n", l.Line, l.Hash, l.Content)
+	}
+
+	// A window that does not cover the file says so, and says where to pick the
+	// file up again — a read that silently stops short is one the model has no
+	// reason to continue.
+	if len(o.Lines) > 0 {
+		first := o.Lines[0].Line
+		last := o.Lines[len(o.Lines)-1].Line
+		if first > 1 || last < o.TotalLines {
+			fmt.Fprintf(&sb, "\n[kvarn: showing lines %d-%d of %d.", first, last, o.TotalLines)
+			if last < o.TotalLines {
+				fmt.Fprintf(&sb, " Continue with start_line=%d.", last+1)
+			}
+			sb.WriteString("]\n")
+		}
 	}
 	return llms.TextToolResult(sb.String())
 }

@@ -30,6 +30,7 @@ const (
 	ErrPathEscape
 	ErrMixedNewline
 	ErrFileEncoding
+	ErrFileTooLarge
 )
 
 // AnchoredError carries a structured failure from the anchored file editing
@@ -61,9 +62,43 @@ func (c AnchoredErrorCode) String() string {
 		return "mixed_newline"
 	case ErrFileEncoding:
 		return "file_encoding"
+	case ErrFileTooLarge:
+		return "file_too_large"
 	default:
 		return "unknown"
 	}
+}
+
+// maxAnchoredFileBytes bounds the files the anchored read/edit API will load.
+//
+// Anchors are unique across the whole file, so tagging even a small window of a
+// file means reading all of it and walking every line — a windowed read is not a
+// cheaper read. The limit therefore protects the guest's memory rather than the
+// caller's budget, and it is generous: source files do not approach it, and the
+// data files that do are ones to inspect with a command, not to anchor.
+const maxAnchoredFileBytes = 8 * 1024 * 1024
+
+// readAnchorableFile loads a file for anchoring, refusing one large enough to
+// threaten the runner. The refusal names the size and points at the tool that
+// can still make progress, because no choice of window would make this read
+// succeed.
+//
+// It returns an *AnchoredError for the size refusal and the raw os error
+// otherwise, leaving the caller to classify a missing or unreadable file.
+func readAnchorableFile(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxAnchoredFileBytes {
+		return nil, &AnchoredError{
+			Code: ErrFileTooLarge,
+			Detail: fmt.Sprintf(
+				"file is %s, over the %s limit for reading and editing by anchor; inspect it with exec_command instead (for example: sed -n '1,100p' <path>)",
+				formatBytes(info.Size()), formatBytes(maxAnchoredFileBytes)),
+		}
+	}
+	return os.ReadFile(path)
 }
 
 // toConnectError marshals an AnchoredError to a connect.Error with an

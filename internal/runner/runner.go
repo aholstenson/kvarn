@@ -406,10 +406,14 @@ func (h *Handler) ReadFile(ctx context.Context, req *connect.Request[v1.ReadFile
 		return nil, err
 	}
 
-	content, err := os.ReadFile(resolved)
+	content, err := readAnchorableFile(resolved)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("file not found: %s", msg.Path))
+		}
+		var ae *AnchoredError
+		if errors.As(err, &ae) {
+			return nil, ae.toConnectError()
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -503,8 +507,12 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 
-	content, err := os.ReadFile(resolved)
+	content, err := readAnchorableFile(resolved)
 	if err != nil {
+		var ae *AnchoredError
+		if errors.As(err, &ae) {
+			return nil, ae.toConnectError()
+		}
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 

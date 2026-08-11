@@ -166,6 +166,111 @@ var _ = Describe("CodingToolkit", func() {
 			Expect(output.Lines).To(HaveLen(3))
 			Expect(output.Lines[0].Hash).To(Equal("cedar"))
 		})
+
+		It("bounds a read that asks for no particular window", func() {
+			runner.readFileFunc = func(_ context.Context, req *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
+				Expect(req.StartLine).To(Equal(int32(1)))
+				Expect(req.EndLine).To(Equal(int32(2000)))
+				return &v1.ReadFileResponse{}, nil
+			}
+
+			_, err := tools["read_file"].Execute(ctx, &coding.ReadFileInput{Path: "main.go"})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("bounds a read that names a start but no end", func() {
+			runner.readFileFunc = func(_ context.Context, req *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
+				Expect(req.StartLine).To(Equal(int32(500)))
+				Expect(req.EndLine).To(Equal(int32(2499)))
+				return &v1.ReadFileResponse{}, nil
+			}
+
+			_, err := tools["read_file"].Execute(ctx, &coding.ReadFileInput{Path: "main.go", StartLine: 500})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("shortens a window longer than the ceiling", func() {
+			runner.readFileFunc = func(_ context.Context, req *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
+				Expect(req.StartLine).To(Equal(int32(1)))
+				Expect(req.EndLine).To(Equal(int32(2000)))
+				return &v1.ReadFileResponse{}, nil
+			}
+
+			_, err := tools["read_file"].Execute(ctx, &coding.ReadFileInput{
+				Path: "main.go", StartLine: 1, EndLine: 99999,
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("says where to continue when the window stops short of the file", func() {
+			runner.readFileFunc = func(_ context.Context, _ *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
+				return &v1.ReadFileResponse{
+					Version:    "abc123",
+					TotalLines: 12043,
+					Lines: []*v1.TaggedLine{
+						{Line: 1, Hash: "cedar", Content: "package main"},
+						{Line: 2000, Hash: "maple", Content: "}"},
+					},
+				}, nil
+			}
+
+			result, err := tools["read_file"].Execute(ctx, &coding.ReadFileInput{Path: "big.go"})
+			Expect(err).NotTo(HaveOccurred())
+
+			text := tools["read_file"].Render(result).Text
+			Expect(text).To(ContainSubstring("total_lines: 12043"))
+			Expect(text).To(ContainSubstring("showing lines 1-2000 of 12043"))
+			Expect(text).To(ContainSubstring("Continue with start_line=2001"))
+		})
+
+		It("says nothing extra when the whole file was returned", func() {
+			runner.readFileFunc = func(_ context.Context, _ *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
+				return &v1.ReadFileResponse{
+					Version:    "abc123",
+					TotalLines: 2,
+					Lines: []*v1.TaggedLine{
+						{Line: 1, Hash: "cedar", Content: "a"},
+						{Line: 2, Hash: "maple", Content: "b"},
+					},
+				}, nil
+			}
+
+			result, err := tools["read_file"].Execute(ctx, &coding.ReadFileInput{Path: "small.go"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tools["read_file"].Render(result).Text).NotTo(ContainSubstring("kvarn:"))
+		})
+
+		It("marks a window that ends at the file's end but starts past its beginning", func() {
+			runner.readFileFunc = func(_ context.Context, _ *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
+				return &v1.ReadFileResponse{
+					Version:    "abc123",
+					TotalLines: 300,
+					Lines: []*v1.TaggedLine{
+						{Line: 299, Hash: "cedar", Content: "a"},
+						{Line: 300, Hash: "maple", Content: "b"},
+					},
+				}, nil
+			}
+
+			result, err := tools["read_file"].Execute(ctx, &coding.ReadFileInput{
+				Path: "mid.go", StartLine: 299,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			text := tools["read_file"].Render(result).Text
+			Expect(text).To(ContainSubstring("showing lines 299-300 of 300"))
+			Expect(text).NotTo(ContainSubstring("Continue with"))
+		})
+
+		It("renders an empty file without a window note", func() {
+			runner.readFileFunc = func(_ context.Context, _ *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
+				return &v1.ReadFileResponse{Version: "abc123", TotalLines: 0}, nil
+			}
+
+			result, err := tools["read_file"].Execute(ctx, &coding.ReadFileInput{Path: "empty.go"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tools["read_file"].Render(result).Text).NotTo(ContainSubstring("kvarn:"))
+		})
 	})
 
 	Describe("edit_file", func() {

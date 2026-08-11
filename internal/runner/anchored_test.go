@@ -439,6 +439,55 @@ var _ = Describe("Anchored editing", func() {
 		Expect(oks).To(Equal(1))
 		Expect(fails).To(Equal(1))
 	})
+
+	Describe("oversized files", func() {
+		writeHuge := func(name string) {
+			f, err := os.Create(filepath.Join(workDir, name))
+			Expect(err).NotTo(HaveOccurred())
+			defer f.Close()
+			// Sparse: only the size matters, the guard runs before any read.
+			Expect(f.Truncate(9 * 1024 * 1024)).To(Succeed())
+		}
+
+		It("refuses to read a file too large to anchor", func() {
+			writeHuge("huge.json")
+
+			_, err := h.ReadFile(ctx, connect.NewRequest(&v1.ReadFileRequest{
+				WorkingDir: workDir, Path: "huge.json",
+			}))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("file_too_large"))
+			Expect(err.Error()).To(ContainSubstring("9.0M"))
+			Expect(err.Error()).To(ContainSubstring("exec_command"))
+		})
+
+		It("refuses a windowed read of the same file, since anchoring reads all of it", func() {
+			writeHuge("huge.json")
+
+			_, err := h.ReadFile(ctx, connect.NewRequest(&v1.ReadFileRequest{
+				WorkingDir: workDir, Path: "huge.json", StartLine: 1, EndLine: 10,
+			}))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("file_too_large"))
+		})
+
+		It("refuses to edit a file too large to anchor", func() {
+			writeHuge("huge.json")
+
+			_, err := doEdit("huge.json", "", []*v1.EditOperation{
+				{Op: v1.EditOp_EDIT_OP_REPLACE, Line: 1, Hash: "cedar", Lines: []string{"x"}},
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("file_too_large"))
+		})
+
+		It("still reads a file under the limit", func() {
+			writeFile("normal.txt", strings.Repeat("line\n", 1000))
+
+			r := doRead("normal.txt")
+			Expect(r.TotalLines).To(Equal(int32(1000)))
+		})
+	})
 })
 
 // asConnectError walks err looking for a *connect.Error and copies it into dst.
