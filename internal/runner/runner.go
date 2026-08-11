@@ -218,9 +218,18 @@ func (h *Handler) Exec(ctx context.Context, req *connect.Request[v1.ExecRequest]
 	}), nil
 }
 
-// safePath resolves relPath within workingDir and ensures it doesn't escape.
-func safePath(workingDir, relPath string) (string, error) {
-	if relPath == "" {
+// safePath resolves path within workingDir and ensures it doesn't escape.
+//
+// path is normally relative to the working directory, but a model driving these
+// tools regularly reaches for the full path it saw in a command's output
+// instead. An absolute path naming a file inside the working directory is
+// therefore accepted as the equivalent relative path; joining it blindly would
+// double the prefix and report a file that plainly exists as missing. Both
+// spellings of the directory are matched — the one the caller was handed and
+// the one it resolves to — so a symlinked workspace still recognizes its own
+// files. Anything genuinely outside is still rejected.
+func safePath(workingDir, path string) (string, error) {
+	if path == "" {
 		return "", connect.NewError(connect.CodeInvalidArgument, errors.New("path must not be empty"))
 	}
 
@@ -229,20 +238,59 @@ func safePath(workingDir, relPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	absDir, err = filepath.EvalSymlinks(absDir)
+	resolvedDir, err := filepath.EvalSymlinks(absDir)
 	if err != nil {
 		return "", err
 	}
 
+	rel := path
+	if filepath.IsAbs(rel) {
+		inside, ok := relativeToAny(rel, resolvedDir, absDir)
+		if !ok {
+			return "", connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("absolute path %s is outside the working directory %s; pass a path relative to it", path, absDir))
+		}
+		rel = inside
+	}
+
 	// Clean the joined path without following symlinks first
-	joined := filepath.Clean(filepath.Join(absDir, relPath))
+	joined := filepath.Clean(filepath.Join(resolvedDir, rel))
 
 	// Check the cleaned path stays within the working directory
-	if !strings.HasPrefix(joined, absDir+string(filepath.Separator)) {
+	if joined == resolvedDir {
+		return "", connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("path %s is the working directory itself, not a file", path))
+	}
+	if !strings.HasPrefix(joined, withSeparator(resolvedDir)) {
 		return "", connect.NewError(connect.CodeInvalidArgument, errors.New("path escapes working directory"))
 	}
 
 	return joined, nil
+}
+
+// relativeToAny returns path relative to the first of dirs that contains it,
+// reporting whether any did. A path equal to one of the dirs yields ".".
+func relativeToAny(path string, dirs ...string) (string, bool) {
+	clean := filepath.Clean(path)
+	for _, dir := range dirs {
+		if clean == dir {
+			return ".", true
+		}
+		if rest, ok := strings.CutPrefix(clean, withSeparator(dir)); ok {
+			return rest, true
+		}
+	}
+	return "", false
+}
+
+// withSeparator returns dir with a trailing separator so that prefix
+// comparisons match whole path elements rather than partial names, leaving an
+// already-terminated dir (such as the root) alone.
+func withSeparator(dir string) string {
+	if strings.HasSuffix(dir, string(filepath.Separator)) {
+		return dir
+	}
+	return dir + string(filepath.Separator)
 }
 
 func (h *Handler) UploadFiles(ctx context.Context, req *connect.Request[v1.UploadFilesRequest]) (*connect.Response[v1.UploadFilesResponse], error) {

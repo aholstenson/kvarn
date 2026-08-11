@@ -239,7 +239,7 @@ func (t *execCommandTool) Render(o *ExecCommandOutput) llms.ToolResult {
 // read_file
 
 type ReadFileInput struct {
-	Path      string `json:"path" jsonschema:"description=Path to the file relative to the workspace root"`
+	Path      string `json:"path" jsonschema:"description=Path to the file. Relative to the workspace root; an absolute path inside the workspace also works."`
 	StartLine int    `json:"start_line,omitempty" jsonschema:"description=1-indexed start line. Omit or set to 0 for whole file."`
 	EndLine   int    `json:"end_line,omitempty" jsonschema:"description=1-indexed inclusive end line. Omit or set to 0 for whole file."`
 }
@@ -331,7 +331,7 @@ type EditOperationInput struct {
 }
 
 type EditFileInput struct {
-	Path            string               `json:"path" jsonschema:"description=Path to the file relative to the workspace root"`
+	Path            string               `json:"path" jsonschema:"description=Path to the file. Relative to the workspace root; an absolute path inside the workspace also works."`
 	ExpectedVersion string               `json:"expected_version,omitempty" jsonschema:"description=Optional/advisory version from the most recent read_file. If supplied and stale the edit still applies when every anchor resolves, and version_drift is reported."`
 	Operations      []EditOperationInput `json:"operations" jsonschema:"description=Ordered list of anchor-resolved edits to apply atomically"`
 	ContextLines    int                  `json:"context_lines,omitempty" jsonschema:"description=Fresh tagged context lines around each edit in the response. Default 5."`
@@ -490,7 +490,7 @@ func extractSnapshot(err error) *v1.ReadFileResponse {
 // write_file
 
 type WriteFileInput struct {
-	Path            string `json:"path" jsonschema:"description=Path to the file relative to the workspace root"`
+	Path            string `json:"path" jsonschema:"description=Path to the file. Relative to the workspace root; an absolute path inside the workspace also works."`
 	Content         string `json:"content" jsonschema:"description=The full content to write to the file"`
 	ExpectedVersion string `json:"expected_version,omitempty" jsonschema:"description=Version from the most recent read_file. Omit when creating a new file; required when overwriting."`
 }

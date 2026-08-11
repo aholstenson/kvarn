@@ -233,6 +233,77 @@ var _ = Describe("Runner", func() {
 			}))
 			Expect(err).To(HaveOccurred())
 		})
+
+		Context("with an absolute path", func() {
+			BeforeEach(func() {
+				_, err := client.UploadFiles(context.Background(), connect.NewRequest(&v1.UploadFilesRequest{
+					WorkingDir: workDir,
+					Files: []*v1.FileContent{
+						{Path: "src/Core/App.php", Content: []byte("hello\nworld\n")},
+					},
+				}))
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("reads a file named by its full path", func() {
+				resp, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+					WorkingDir: workDir,
+					Path:       filepath.Join(workDir, "src/Core/App.php"),
+				}))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.Msg.TotalLines).To(Equal(int32(2)))
+				Expect(resp.Msg.Lines[0].Content).To(Equal("hello"))
+			})
+
+			It("reads a file named through the resolved working directory", func() {
+				// Temp dirs sit behind a symlink on macOS (/var -> /private/var),
+				// so the path a shell reports differs from the one handed to the
+				// runner. Both have to resolve to the same file.
+				resolved, err := filepath.EvalSymlinks(workDir)
+				Expect(err).NotTo(HaveOccurred())
+
+				resp, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+					WorkingDir: workDir,
+					Path:       filepath.Join(resolved, "src/Core/App.php"),
+				}))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.Msg.TotalLines).To(Equal(int32(2)))
+			})
+
+			It("rejects a path outside the working directory", func() {
+				_, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+					WorkingDir: workDir,
+					Path:       "/etc/passwd",
+				}))
+				Expect(err).To(HaveOccurred())
+				Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
+				Expect(err.Error()).To(ContainSubstring("outside the working directory"))
+			})
+
+			It("rejects a sibling directory sharing the working directory's name prefix", func() {
+				sibling := workDir + "-sibling"
+				Expect(os.MkdirAll(sibling, 0o755)).To(Succeed())
+				DeferCleanup(func() { os.RemoveAll(sibling) })
+				Expect(os.WriteFile(filepath.Join(sibling, "secret.txt"), []byte("nope\n"), 0o644)).To(Succeed())
+
+				_, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+					WorkingDir: workDir,
+					Path:       filepath.Join(sibling, "secret.txt"),
+				}))
+				Expect(err).To(HaveOccurred())
+				Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
+			})
+
+			It("rejects the working directory itself", func() {
+				_, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+					WorkingDir: workDir,
+					Path:       workDir,
+				}))
+				Expect(err).To(HaveOccurred())
+				Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
+				Expect(err.Error()).To(ContainSubstring("not a file"))
+			})
+		})
 	})
 
 	Describe("EditFile", func() {
@@ -401,6 +472,19 @@ var _ = Describe("Runner", func() {
 			content, err := os.ReadFile(filepath.Join(workDir, "a.txt"))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(content)).To(Equal("second\n"))
+		})
+
+		It("creates a file named by its full path", func() {
+			_, err := client.WriteFile(context.Background(), connect.NewRequest(&v1.WriteFileRequest{
+				WorkingDir: workDir,
+				Path:       filepath.Join(workDir, "nested/new.txt"),
+				Content:    []byte("hello\n"),
+			}))
+			Expect(err).NotTo(HaveOccurred())
+
+			content, err := os.ReadFile(filepath.Join(workDir, "nested/new.txt"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(content)).To(Equal("hello\n"))
 		})
 	})
 })
