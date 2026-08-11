@@ -3,6 +3,7 @@ package coding
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 )
@@ -58,8 +59,7 @@ func writeInstructionBlock(sb *strings.Builder, heading string, parts ...string)
 func summaryPrompt(content forgeconfig.Content, recentCommits []string) string {
 	var sb strings.Builder
 	sb.WriteString("Summarize the work you just completed for a git commit and pull request.\n\n")
-	sb.WriteString("Provide:\n")
-	fmt.Fprintf(&sb, "- title: an imperative-mood subject line, max %d chars, no trailing period.\n", content.TitleMaxLength)
+	sb.WriteString("Provide, in this order:\n")
 	sb.WriteString("- description: a commit body suitable as both the commit message body and the PR description. " +
 		"Write a few short paragraphs in past tense explaining what changed and why. Wrap lines at ~72 chars. " +
 		"Do not repeat the title. Do not list every file touched. " +
@@ -68,11 +68,18 @@ func summaryPrompt(content forgeconfig.Content, recentCommits []string) string {
 	if len(content.BodySections) > 0 {
 		sb.WriteString("- sections: one entry per requested section below, each with the name exactly as given " +
 			"and markdown content. Do not invent sections that are not listed. " +
-			"Keep this material out of the description; it belongs in its own section.\n\n")
-		sb.WriteString("Requested sections:\n")
-		writeSectionRequests(&sb, content.BodySections)
+			"Keep this material out of the description; it belongs in its own section.\n")
 	} else {
 		sb.WriteString("- sections: leave empty; none are requested.\n")
+	}
+
+	fmt.Fprintf(&sb, "- title: an imperative-mood subject line naming the change you just described, "+
+		"max %d chars, no trailing period. Write the real title; there is no later pass to fix it up.\n",
+		content.TitleMaxLength)
+
+	if len(content.BodySections) > 0 {
+		sb.WriteString("\nRequested sections:\n")
+		writeSectionRequests(&sb, content.BodySections)
 	}
 
 	if len(recentCommits) > 0 {
@@ -101,17 +108,55 @@ func writeSectionRequests(sb *strings.Builder, sections []forgeconfig.Section) {
 	}
 }
 
+// titleStubs are the fillers a model writes when it has to produce a title
+// before it knows what to call the change. They are indistinguishable from a
+// real title by length, so they need naming explicitly.
+var titleStubs = map[string]bool{
+	"placeholder":    true,
+	"todo":           true,
+	"tbd":            true,
+	"title":          true,
+	"subject":        true,
+	"summary":        true,
+	"commit title":   true,
+	"commit message": true,
+	"n/a":            true,
+	"none":           true,
+	"untitled":       true,
+}
+
+// stubTitle reports whether a title is filler rather than a description of the
+// change. Leading and trailing punctuation is stripped before matching, so a
+// stub that trails structural JSON characters — the model trying to abandon its
+// answer and start over, which constrained generation renders as literal text
+// inside the string — is recognised as the same thing.
+func stubTitle(title string) bool {
+	norm := strings.ToLower(strings.TrimFunc(title, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}))
+	return titleStubs[norm]
+}
+
 // summaryProblems lists what is wrong with a returned summary in the words the
 // model needs to fix it. An empty result means the summary is usable.
 //
-// Only two things are worth a second call: a title over the configured budget,
-// and a required section that came back missing or empty. Both are cheap to
-// state and cheap to fix, and neither can be corrected on the host without
-// inventing text.
+// Only three things are worth a second call: a title that does not name the
+// change, a title over the configured budget, and a required section that came
+// back missing or empty. All are cheap to state and cheap to fix, and none can
+// be corrected on the host without inventing text.
 func summaryProblems(s AgentSummary, content forgeconfig.Content) []string {
 	var problems []string
 
-	if n := len([]rune(strings.TrimSpace(s.Title))); n > content.TitleMaxLength {
+	title := strings.TrimSpace(s.Title)
+	switch {
+	case title == "":
+		problems = append(problems, "the title is empty")
+	case stubTitle(title):
+		problems = append(problems, fmt.Sprintf(
+			"the title %q is a placeholder rather than a description of the change", title))
+	}
+
+	if n := len([]rune(title)); n > content.TitleMaxLength {
 		problems = append(problems, fmt.Sprintf(
 			"the title is %d characters; it must be at most %d", n, content.TitleMaxLength))
 	}

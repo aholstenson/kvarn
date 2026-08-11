@@ -1,6 +1,7 @@
 package coding
 
 import (
+	"reflect"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -67,6 +68,27 @@ var _ = Describe("summaryPrompt", func() {
 		out := summaryPrompt(forgeconfig.Content{TitleMaxLength: 72}, []string{"feat: add retries"})
 		Expect(out).To(ContainSubstring("feat: add retries"))
 	})
+
+	It("asks for the description before the title, as the schema orders them", func() {
+		out := summaryPrompt(forgeconfig.Content{TitleMaxLength: 72}, nil)
+		Expect(strings.Index(out, "- description:")).To(
+			BeNumerically("<", strings.Index(out, "- title:")))
+	})
+})
+
+var _ = Describe("AgentSummary", func() {
+	It("declares the title last so it is generated after the body", func() {
+		t := reflect.TypeOf(AgentSummary{})
+		var title, last int
+		for i := range t.NumField() {
+			if t.Field(i).Name == "Title" {
+				title = i
+			}
+			last = i
+		}
+		Expect(title).To(Equal(last),
+			"constrained generation fills schema properties in declaration order and cannot revise them")
+	})
 })
 
 var _ = Describe("summaryProblems", func() {
@@ -114,6 +136,34 @@ var _ = Describe("summaryProblems", func() {
 	It("does not mind an optional section being left out", func() {
 		Expect(summaryProblems(AgentSummary{
 			Title:    "ok",
+			Sections: []SummarySection{{Name: "Testing", Content: "ran"}},
+		}, content)).To(BeEmpty())
+	})
+
+	It("reports an empty title", func() {
+		Expect(summaryProblems(AgentSummary{
+			Title:    "   ",
+			Sections: []SummarySection{{Name: "Testing", Content: "ran"}},
+		}, content)).To(ContainElement(ContainSubstring("the title is empty")))
+	})
+
+	DescribeTable("reports a filler title",
+		func(title string) {
+			Expect(summaryProblems(AgentSummary{
+				Title:    title,
+				Sections: []SummarySection{{Name: "Testing", Content: "ran"}},
+			}, content)).To(ContainElement(ContainSubstring("is a placeholder")))
+		},
+		Entry("the bare word", "placeholder"),
+		Entry("cased", "Placeholder"),
+		Entry("trailing json punctuation from an abandoned answer", "placeholder}{"),
+		Entry("angle-bracketed", "<TODO>"),
+		Entry("naming the field instead of filling it", "Commit message"),
+	)
+
+	It("leaves a real title that merely mentions a filler word alone", func() {
+		Expect(summaryProblems(AgentSummary{
+			Title:    "fix: drop TODO",
 			Sections: []SummarySection{{Name: "Testing", Content: "ran"}},
 		}, content)).To(BeEmpty())
 	})

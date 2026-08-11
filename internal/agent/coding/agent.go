@@ -19,9 +19,18 @@ import (
 // summaryMaxOutputTokens bounds the summary call. It is well above what a
 // title and a few paragraphs need because a repository can request sections,
 // and a body truncated mid-section would land on the pull request that way.
-const summaryMaxOutputTokens = 4096
+// The call also reasons before it answers, and that budget is spent from the
+// same allowance, so the headroom covers both.
+const summaryMaxOutputTokens = 16384
 
 // AgentSummary is the structured output format for the summary call.
+//
+// Field order is load-bearing. The schema is generated from this struct with
+// its fields in declaration order, and constrained JSON generation fills the
+// properties in schema order and cannot revise what it has already emitted.
+// The title therefore comes last: naming a change is easier once the change has
+// been described, and a title generated first — before a single word of the
+// body — is where filler like "placeholder" comes from.
 //
 // Sections is a list rather than a field per declared section because the
 // schema is derived from this type at compile time: what a repository asks for
@@ -29,9 +38,9 @@ const summaryMaxOutputTokens = 4096
 // renderBody puts them back in declared order, so the ordering the model
 // happens to return them in does not matter.
 type AgentSummary struct {
-	Title       string           `json:"title"              jsonschema:"description=Imperative-mood summary of the change, within the character budget stated in the request"`
 	Description string           `json:"description"        jsonschema:"description=Commit body: a few short paragraphs in past tense describing what changed and why. Wrap lines at ~72 chars. No bullet-list of files. No trailing footer."`
 	Sections    []SummarySection `json:"sections,omitempty" jsonschema:"description=One entry per section named in the request. Empty when the request names none."`
+	Title       string           `json:"title"              jsonschema:"description=Imperative-mood summary of the change just described, within the character budget stated in the request"`
 }
 
 // SummarySection is one filled-in section of the body.
@@ -235,11 +244,12 @@ func (c *codingConversation) Summarize(ctx context.Context) (*agent.Result, erro
 		return fallback(), nil
 	}
 
-	// A title over budget or a missing required section cannot be fixed on the
-	// host without inventing text, so the model gets one more chance with the
-	// problems named. One retry, not a loop: the second answer is either better
-	// or the configuration is asking for something the run cannot supply, and
-	// both the title and the placeholder below degrade honestly.
+	// A title that does not name the change, a title over budget, or a missing
+	// required section cannot be fixed on the host without inventing text, so
+	// the model gets one more chance with the problems named. One retry, not a
+	// loop: the second answer is either better or the configuration is asking
+	// for something the run cannot supply, and both the title and the
+	// placeholder below degrade honestly.
 	if problems := summaryProblems(*summary, content); len(problems) > 0 {
 		slog.Info("summary did not meet the configured requirements; asking again", "problems", problems)
 		retryMessages := append(messages,
@@ -256,8 +266,18 @@ func (c *codingConversation) Summarize(ctx context.Context) (*agent.Result, erro
 		}
 	}
 
+	// A title that survives the retry as filler is worse than no title at all:
+	// it goes on the pull request and the commit, where it stays. The generic
+	// fallback at least says what the run was. The body is kept either way —
+	// its problems, if any, are already rendered as such.
+	title := strings.TrimSpace(summary.Title)
+	if title == "" || stubTitle(title) {
+		slog.Warn("summary title is still a placeholder; using the default title", "title", title)
+		title = fallback().Title
+	}
+
 	return &agent.Result{
-		Title:       summary.Title,
+		Title:       title,
 		Description: renderBody(summary.Description, content.BodySections, summary.Sections),
 		Cost:        finalCost(),
 	}, nil
@@ -266,16 +286,26 @@ func (c *codingConversation) Summarize(ctx context.Context) (*agent.Result, erro
 // requestSummary makes one structured-output call and returns the parsed
 // summary alongside the raw JSON, which a retry feeds back as the assistant
 // turn it is correcting.
+//
+// The call runs at the main loop's reasoning effort. Constrained generation
+// leaves no room to think inside the answer — every token emitted is already
+// part of the JSON — so reasoning beforehand is the only chance the model gets
+// to work out what the change was before it has to write it down.
 func (c *codingConversation) requestSummary(
 	ctx context.Context, system string, messages []*llms.Message,
 ) (*AgentSummary, string, error) {
-	mainModel := c.agent.models.Classes[ModelMain]
-	result, err := mainModel.GenerateContent(ctx,
+	opts := []llms.GenerateOption{
 		llms.WithSystemPrompt(system),
 		llms.WithMessages(messages...),
 		llms.WithResponseSchema[AgentSummary](),
 		llms.WithMaxOutputTokens(summaryMaxOutputTokens),
-	)
+	}
+	if c.mainCfg.ReasoningEffort != "" {
+		opts = append(opts, llms.WithReasoningEffort(c.mainCfg.ReasoningEffort))
+	}
+
+	mainModel := c.agent.models.Classes[ModelMain]
+	result, err := mainModel.GenerateContent(ctx, opts...)
 	if c.agentCtx.Cost != nil {
 		c.agentCtx.Cost.CheckBudget()
 	}
