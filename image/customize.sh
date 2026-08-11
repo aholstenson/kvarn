@@ -162,6 +162,13 @@ chroot "$ROOTFS" apt-get install -y -qq --no-install-recommends \
     fonts-noto-color-emoji \
     >/dev/null 2>&1
 
+# certutil, for putting the egress proxy CA where Chromium looks for it. NSS
+# clients never read /etc/ssl/certs, so without this the orchestrator can only
+# establish trust for everything that isn't a browser.
+chroot "$ROOTFS" apt-get install -y -qq --no-install-recommends \
+    libnss3-tools \
+    >/dev/null 2>&1
+
 echo "==> Removing unnecessary packages..."
 chroot "$ROOTFS" apt-get purge -y -qq \
     unattended-upgrades \
@@ -222,11 +229,21 @@ cat > "$ROOTFS/etc/containers/containers.conf" <<'CONTAINERS'
 [containers]
 log_driver = "k8s-file"
 
+# Podman defaults /dev/shm to 64 MiB, which is well under what a Chromium tab
+# needs for its shared memory buffers: the renderer dies mid-page with a bare
+# "Target closed". The VM's own /dev/shm is half of RAM and needs no help.
+shm_size = "1g"
+
 # Trust the kvarn egress proxy CA inside every container.
-# /etc/ssl/certs/ca-certificates.crt is the combined bundle produced by
-# update-ca-certificates on first boot (cloud-init drops the kvarn cert at
-# /usr/local/share/ca-certificates/kvarn-proxy.crt). NODE_EXTRA_CA_CERTS
+# /etc/ssl/certs/ca-certificates.crt is the combined bundle produced by the
+# update-ca-certificates run the orchestrator drives before the job starts,
+# after it writes the per-VM CA to
+# /usr/local/share/ca-certificates/kvarn-proxy.crt. NODE_EXTRA_CA_CERTS
 # appends rather than replaces, so it gets the single-cert file.
+#
+# This reaches OpenSSL, curl, git, Python and Node. A browser in a container
+# is on its own: NSS reads trust from a per-user database that only exists in
+# the VM, so a containerised Chromium needs --ignore-certificate-errors.
 env = [
   "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
   "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",

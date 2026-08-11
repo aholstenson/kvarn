@@ -40,9 +40,36 @@ var _ = Describe("InstallProxyCA", func() {
 		err := sandbox.InstallProxyCA(ctx, proxy, caPEM)
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(proxy.execCalls).To(HaveLen(1))
+		Expect(proxy.execCalls).NotTo(BeEmpty())
 		Expect(proxy.execCalls[0].Command).To(Equal("update-ca-certificates"))
 		Expect(proxy.execCalls[0].Privileged).To(BeTrue())
+	})
+
+	It("adds the certificate to the job user's NSS database", func() {
+		err := sandbox.InstallProxyCA(ctx, proxy, caPEM)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(proxy.execCalls).To(HaveLen(2))
+		cmd := proxy.execCalls[1].Command
+		Expect(cmd).To(ContainSubstring("mkdir -p /home/kvarn/.pki/nssdb"))
+		Expect(cmd).To(ContainSubstring(`certutil -d sql:/home/kvarn/.pki/nssdb -A -t "C,," ` +
+			`-n kvarn-egress-proxy -i /usr/local/share/ca-certificates/kvarn-proxy.crt`))
+
+		// Unprivileged so the database lands under the job user's own home
+		// and ownership.
+		Expect(proxy.execCalls[1].Privileged).To(BeFalse())
+	})
+
+	It("keeps the job running when the NSS database cannot be updated", func() {
+		// Only browsers depend on that store, and the accepted image range
+		// reaches back past certutil being installed.
+		proxy.pushExecResponse(&v1.ExecResponse{ExitCode: 0}, nil)
+		proxy.pushExecResponse(&v1.ExecResponse{
+			ExitCode: 127,
+			Stderr:   "certutil: not found\n",
+		}, nil)
+
+		Expect(sandbox.InstallProxyCA(ctx, proxy, caPEM)).To(Succeed())
 	})
 
 	It("does nothing when the provider supplies no CA", func() {
