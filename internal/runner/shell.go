@@ -26,14 +26,12 @@ type shellSession struct {
 
 	// Fields for respawning on shell death.
 	initialDir string
-	container  string
 	kvarnCred  *kvarnCredential
 }
 
-func newShellSession(initialDir string, container string, kvarnCred *kvarnCredential) (*shellSession, error) {
+func newShellSession(initialDir string, kvarnCred *kvarnCredential) (*shellSession, error) {
 	s := &shellSession{
 		initialDir: initialDir,
-		container:  container,
 		kvarnCred:  kvarnCred,
 	}
 
@@ -62,9 +60,7 @@ func newShellSession(initialDir string, container string, kvarnCred *kvarnCreden
 }
 
 func (s *shellSession) spawn() error {
-	if s.container != "" {
-		s.cmd = exec.Command("podman", "exec", "-i", s.container, "sh", "-l")
-	} else if s.kvarnCred != nil {
+	if s.kvarnCred != nil {
 		s.cmd = exec.Command("su", "-l", "-s", "/bin/sh", "--", "kvarn")
 	} else {
 		s.cmd = exec.Command("sh", "-l")

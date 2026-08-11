@@ -133,8 +133,6 @@ message WriteFileResponse {
 
 message CreateSessionRequest {
   string working_dir = 1;
-  // If set, run the session shell inside this container via podman exec.
-  string container = 2;
 }
 
 message CreateSessionResponse {

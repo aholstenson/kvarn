@@ -16,7 +16,6 @@ The home directory is `/home/kvarn`.
 
 | Key | Type | Purpose |
 | --- | --- | --- |
-| `image` | string | OCI image to run steps in. Mutually exclusive with `dependencies`. |
 | `dependencies` | map | Nix flake sources mapped to attribute names to install. |
 | `vm` | object | VM sizing overrides. |
 | `network` | object | Outbound egress allowlist and in-VM hostname aliases. |
@@ -30,19 +29,6 @@ The home directory is `/home/kvarn`.
 
 All keys are optional; a repository with no `kvarn.yml` gets a bare VM with no
 setup and no validation.
-
-## `image`
-
-```yaml
-image: node:22-alpine
-```
-
-Steps run inside this container image rather than a Nix environment. Cannot be
-combined with `dependencies` — shell sessions in an `image:` job run via `podman
-exec`, where host-installed Nix binaries are invisible.
-
-Images are pulled through the host's OCI image cache; see
-[Speed up job startup](../how-to/speed-up-job-startup.md).
 
 ## `dependencies`
 
@@ -157,9 +143,9 @@ address is allowed but changes nothing about egress control — those packets
 still go through the proxy, which judges them by hostname, so the name also
 needs an `allowed_hosts` entry.
 
-In an `image:` job the entries reach the container too, which shares the VM's
-network namespace and its resolver. A dev server on loopback is reachable by
-name whether it was started inside the container or beside it.
+A container a step starts on the VM's network namespace inherits the same
+resolver, so a dev server on loopback is reachable by name whether it was
+started inside that container or beside it.
 
 ## `cache`
 

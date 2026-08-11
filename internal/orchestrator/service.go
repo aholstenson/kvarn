@@ -356,7 +356,6 @@ type Service struct {
 	agent            agent.Agent
 	transferer       transfer.Transferer
 	workspaceDir     string                 // VM workspace path; defaults to "/home/kvarn/workspace"
-	registryMirrors  []string               // Docker registry mirrors
 	cacheProvider    cache.Provider         // optional cache provider
 	cacheQuota       cache.Quota            // LRU sweep limits; zero fields = unbounded
 	cacheNamespace   string                 // cache namespace; "" is the shared pool
@@ -419,7 +418,6 @@ type ServiceOpts struct {
 	Agent               agent.Agent
 	Transferer          transfer.Transferer
 	WorkspaceDir        string                 // VM workspace path; defaults to "/home/kvarn/workspace"
-	RegistryMirrors     []string               // Docker registry mirrors (infrastructure config)
 	CacheProvider       cache.Provider         // optional cache provider
 	CacheQuota          cache.Quota            // LRU sweep limits; zero fields = unbounded
 	Namespace           string                 // cache namespace; "" is the shared pool
@@ -486,7 +484,6 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		agent:            opts.Agent,
 		transferer:       opts.Transferer,
 		workspaceDir:     wsDir,
-		registryMirrors:  opts.RegistryMirrors,
 		cacheProvider:    opts.CacheProvider,
 		cacheQuota:       opts.CacheQuota,
 		cacheNamespace:   opts.Namespace,
@@ -1398,16 +1395,15 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		SourceDir:  cloneDir,
 		// The clone is untouched at this point, so its worktree is exactly
 		// HEAD: ship the repository alone and let the guest write the files.
-		PristineClone:   true,
-		WorkingDir:      s.workspaceDir,
-		Registry:        s.registry,
-		BridgeHandler:   s.bridgeHandler,
-		RegistryMirrors: s.registryMirrors,
-		CacheProvider:   s.cacheProvider,
-		ProjectID:       cache.ProjectID(proj.RepoURL),
-		Namespace:       s.cacheNamespace,
-		Secrets:         secretEnv,
-		OnEvent:         s.makeEventAdapter(ctx, sessionID),
+		PristineClone: true,
+		WorkingDir:    s.workspaceDir,
+		Registry:      s.registry,
+		BridgeHandler: s.bridgeHandler,
+		CacheProvider: s.cacheProvider,
+		ProjectID:     cache.ProjectID(proj.RepoURL),
+		Namespace:     s.cacheNamespace,
+		Secrets:       secretEnv,
+		OnEvent:       s.makeEventAdapter(ctx, sessionID),
 	})
 	if err != nil {
 		log.Error("sandbox start failed", "error", err)
@@ -2067,15 +2063,6 @@ func (s *Service) makeEventAdapter(ctx context.Context, sessionID string) func(s
 				Stderr:    ev.Stderr,
 			})
 			return
-		case sandbox.ImagePullingEvent:
-			state = session.StatePullingImage
-			message = fmt.Sprintf("Pulling image %s", ev.Image)
-		case sandbox.ContainerStartingEvent:
-			state = session.StatePullingImage
-			message = "Starting container"
-		case sandbox.ContainerStartedEvent:
-			state = session.StatePullingImage
-			message = "Container started"
 		case sandbox.CacheRestoringEvent:
 			state = session.StateSetup
 			message = "Restoring cache"

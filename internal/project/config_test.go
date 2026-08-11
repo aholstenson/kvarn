@@ -487,19 +487,6 @@ var _ = Describe("Image and Dependencies", func() {
 		os.RemoveAll(dir)
 	})
 
-	It("parses image field", func() {
-		writeYAML(dir, "kvarn.yml", `
-image: node:20
-setup:
-  steps:
-    - name: Build
-      run: npm run build
-`)
-		cfg, err := project.Load(dir)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.Image).To(Equal("node:20"))
-	})
-
 	It("parses dependencies field with multiple sources", func() {
 		writeYAML(dir, "kvarn.yml", `
 dependencies:
@@ -578,35 +565,6 @@ setup:
 		Expect(resolved[0].Host).To(Equal("example.com"))
 	})
 
-	It("rejects both image and dependencies set", func() {
-		writeYAML(dir, "kvarn.yml", `
-image: node:20
-dependencies:
-  nixpkgs:
-    - hello
-setup:
-  steps:
-    - name: Build
-      run: echo ok
-`)
-		_, err := project.Load(dir)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
-	})
-
-	It("rejects whitespace-only image", func() {
-		writeYAML(dir, "kvarn.yml", `
-image: "   "
-setup:
-  steps:
-    - name: Build
-      run: echo ok
-`)
-		_, err := project.Load(dir)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("whitespace-only"))
-	})
-
 	It("rejects unknown source forms", func() {
 		writeYAML(dir, "kvarn.yml", `
 dependencies:
@@ -664,6 +622,19 @@ setup:
 		_, err := project.Load(dir)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("`tools:` has been replaced by `dependencies:`"))
+	})
+
+	It("returns the migration error when the removed image field is present", func() {
+		writeYAML(dir, "kvarn.yml", `
+image: node:20
+setup:
+  steps:
+    - name: Build
+      run: npm run build
+`)
+		_, err := project.Load(dir)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("`image:` is no longer supported"))
 	})
 
 	It("rejects /nix as a cache path", func() {

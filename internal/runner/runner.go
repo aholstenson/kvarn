@@ -89,7 +89,7 @@ func (h *Handler) CreateSession(_ context.Context, req *connect.Request[v1.Creat
 		return nil, connect.NewError(connect.CodeResourceExhausted, fmt.Errorf("too many sessions (%d), limit is %d", count, maxSessions))
 	}
 
-	sess, err := newShellSession(msg.WorkingDir, msg.Container, h.kvarnCred)
+	sess, err := newShellSession(msg.WorkingDir, h.kvarnCred)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create shell session: %w", err))
 	}

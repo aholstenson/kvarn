@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -58,16 +57,6 @@ type ToolProvisionedEvent struct {
 
 func (ToolProvisionedEvent) isEvent() {}
 
-type ImagePullingEvent struct {
-	Image string
-}
-
-func (ImagePullingEvent) isEvent() {}
-
-type ContainerStartingEvent struct{}
-
-func (ContainerStartingEvent) isEvent() {}
-
 type SessionCreatingEvent struct{}
 
 func (SessionCreatingEvent) isEvent() {}
@@ -116,10 +105,6 @@ type EgressDeniedEvent struct {
 }
 
 func (EgressDeniedEvent) isEvent() {}
-
-type ContainerStartedEvent struct{}
-
-func (ContainerStartedEvent) isEvent() {}
 
 type SessionCreatedEvent struct{}
 
@@ -174,8 +159,6 @@ type Opts struct {
 	// creates its own.
 	Registry      *dispatch.Registry
 	BridgeHandler *dispatch.Handler
-
-	RegistryMirrors []string
 
 	CacheProvider cache.Provider
 	ProjectID     string
@@ -411,18 +394,10 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		}
 	}
 
-	// Curation runs against the VM filesystem and profile.d, so it is
-	// skipped in image mode (container exec doesn't source the VM's
-	// /etc/profile.d).
-	var aug augmentations
-	if opts.Config != nil && opts.Config.Image == "" {
-		aug = computeAugmentations(deps)
-	}
+	aug := computeAugmentations(deps)
 
 	// Derive the content-addressed cache layers from the resolved deps and
-	// user config. Tool layers come from registered nixpkgs deps (empty in
-	// image mode, where deps are disallowed), so image jobs get only the
-	// user-configured layers.
+	// user config.
 	var cacheLayers []cache.Layer
 	if opts.CacheProvider != nil && opts.ProjectID != "" && opts.Config != nil {
 		cacheLayers, err = cache.DeriveLayers(
@@ -467,14 +442,6 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		}
 	}
 	allowedHosts = append(allowedHosts, aug.Hosts...)
-	for _, mirror := range opts.RegistryMirrors {
-		// Extract the bare hostname from each mirror URL.
-		if u, err := url.Parse(mirror); err == nil && u.Hostname() != "" {
-			allowedHosts = append(allowedHosts, u.Hostname())
-		} else if mirror != "" {
-			allowedHosts = append(allowedHosts, mirror)
-		}
-	}
 	createOpts.Network.AllowedHosts = append(createOpts.Network.AllowedHosts, allowedHosts...)
 	if opts.Config != nil {
 		// Every alias goes to the VM's DNS forwarder, wildcard or not, so the
@@ -534,17 +501,18 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 
 	// Establish trust in the egress proxy before anything below it opens a
 	// TLS connection from inside the VM. Everything that follows — the file
-	// transfer's git operations, the cache restore, `nix profile add`, the
-	// container image pull — reaches the network only through the MITM
-	// proxy, so this has to be the first command the guest runs.
+	// transfer's git operations, the cache restore, `nix profile add`, and every
+	// pull a step makes — reaches the network only through the MITM proxy, so
+	// this has to be the first command the guest runs.
 	if err := InstallProxyCA(ctx, proxy, instance.ProxyCAPEM); err != nil {
 		return nil, fmt.Errorf("install proxy CA: %w", err)
 	}
 
 	// Map the project's development hostnames before anything in the guest can
-	// resolve a name: the container below seeds its own hosts file from this
-	// one when it is created, and every step runs after that point. Wildcards
-	// are not expressible here and are served by the DNS forwarder instead.
+	// resolve a name: a container a step starts seeds its own hosts file from
+	// this one when it is created, and every step runs after this point.
+	// Wildcards are not expressible here and are served by the DNS forwarder
+	// instead.
 	if opts.Config != nil {
 		if err := ConfigureHostAliases(ctx, proxy, opts.Config.Network.ExactHostAliases()); err != nil {
 			return nil, fmt.Errorf("configure host aliases: %w", err)
@@ -568,9 +536,8 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		}
 
 		// Materialize the worktree before anything else in this function
-		// touches the workspace: the cache restore, dependency install, image
-		// pull and container start below all assume a populated directory, and
-		// the container bind-mounts this same path.
+		// touches the workspace: the cache restore and dependency install below
+		// both assume a populated directory.
 		if opts.PristineClone {
 			if err := CheckoutWorktree(ctx, proxy, workingDir); err != nil {
 				return nil, fmt.Errorf("check out worktree in guest: %w", err)
@@ -611,50 +578,18 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	}
 
 	// Write curated, user, and secret environment to /etc/profile.d so
-	// privileged `su -l` execs pick them up. Skipped in image mode
-	// (container exec doesn't source the VM's profile.d).
-	if opts.Config != nil && opts.Config.Image == "" {
+	// privileged `su -l` execs pick them up.
+	if opts.Config != nil {
 		if err := writeProfileScripts(ctx, proxy, aug, opts.Config.Environment, opts.Secrets); err != nil {
 			return nil, fmt.Errorf("write profile.d scripts: %w", err)
 		}
 	}
 
-	// Configure registry mirrors and pull image if configured.
-	cfg := opts.Config
-	if cfg != nil && strings.TrimSpace(cfg.Image) != "" {
-		if len(opts.RegistryMirrors) > 0 {
-			if err := configureRegistryMirrors(ctx, proxy, opts.RegistryMirrors); err != nil {
-				return nil, fmt.Errorf("configure registry mirrors: %w", err)
-			}
-		}
-
-		emit(opts, ImagePullingEvent{Image: cfg.Image})
-		if err := PullImage(ctx, proxy, cfg.Image); err != nil {
-			return nil, fmt.Errorf("pull image: %w", err)
-		}
-	}
-
-	// Start container if image is configured.
-	var runner RunnerProxy = proxy
-	if cfg != nil && strings.TrimSpace(cfg.Image) != "" {
-		emit(opts, ContainerStartingEvent{})
-		containerProxy := NewContainerProxy(proxy, "kvarn-workspace")
-		if err := containerProxy.Start(ctx, cfg.Image, workingDir, cfg.Network.ExactHostAliases()); err != nil {
-			return nil, fmt.Errorf("start container: %w", err)
-		}
-		emit(opts, ContainerStartedEvent{})
-		sess.addCloser(func() {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			containerProxy.Stop(stopCtx)
-		})
-		runner = containerProxy
-	}
-	sess.Runner = runner
+	sess.Runner = proxy
 
 	// Create persistent shell session.
 	emit(opts, SessionCreatingEvent{})
-	sessionResp, err := runner.CreateSession(ctx, &v1.CreateSessionRequest{
+	sessionResp, err := proxy.CreateSession(ctx, &v1.CreateSessionRequest{
 		WorkingDir: workingDir,
 	})
 	if err != nil {
@@ -665,17 +600,15 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	sess.addCloser(func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		runner.CloseSession(closeCtx, &v1.CloseSessionRequest{SessionId: sess.ShellSessionID})
+		proxy.CloseSession(closeCtx, &v1.CloseSessionRequest{SessionId: sess.ShellSessionID})
 	})
 
 	// Provision registered tools last: the command runs in the shell session so
 	// it inherits the curated environment, and it needs the workspace it is
 	// about to read, which the transfer and checkout above have put in place.
-	// aug is empty in image mode, so nothing runs there — the container does not
-	// source the VM's profile.d and would provision into the wrong filesystem.
 	for _, step := range aug.Provision {
 		emit(opts, ToolProvisioningEvent{Tool: step.Tool, Command: step.Command})
-		if err := provisionTool(ctx, runner, sess.ShellSessionID, step, func(stdout, stderr string) {
+		if err := provisionTool(ctx, proxy, sess.ShellSessionID, step, func(stdout, stderr string) {
 			emit(opts, ToolProvisionOutputEvent{Stdout: stdout, Stderr: stderr})
 		}); err != nil {
 			return nil, sess.annotateEgress(err)
@@ -712,24 +645,4 @@ func appendUnique(base []string, extra []string) []string {
 		}
 	}
 	return base
-}
-
-// configureRegistryMirrors uploads a Podman registries.conf with mirrors.
-func configureRegistryMirrors(ctx context.Context, proxy RunnerProxy, mirrors []string) error {
-	var toml strings.Builder
-	for _, mirror := range mirrors {
-		fmt.Fprintf(&toml, "[[registry]]\nlocation = \"docker.io\"\n\n[[registry.mirror]]\nlocation = \"%s\"\n\n", mirror)
-	}
-
-	_, err := proxy.UploadFiles(ctx, &v1.UploadFilesRequest{
-		WorkingDir: "/etc/containers",
-		Files: []*v1.FileContent{
-			{Path: "registries.conf", Content: []byte(toml.String()), Mode: 0o644},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("upload registries.conf: %w", err)
-	}
-
-	return nil
 }

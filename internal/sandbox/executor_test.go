@@ -479,25 +479,6 @@ var _ = Describe("Step execution", func() {
 	})
 })
 
-var _ = Describe("PullImage", func() {
-	It("sends podman pull command", func() {
-		runner := newMockRunner()
-		err := sandbox.PullImage(context.Background(), runner, "node:20")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(runner.execCalls).To(HaveLen(1))
-		Expect(runner.execCalls[0].Command).To(Equal("podman"))
-		Expect(runner.execCalls[0].Args).To(Equal([]string{"pull", "node:20"}))
-	})
-
-	It("returns error on non-zero exit", func() {
-		runner := newMockRunner()
-		runner.execResponses["podman pull node:20"] = &v1.ExecResponse{ExitCode: 1, Stderr: "not found"}
-		err := sandbox.PullImage(context.Background(), runner, "node:20")
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("failed"))
-	})
-})
-
 var _ = Describe("ShouldRun (via RunValidation)", func() {
 	var (
 		runner *mockRunnerProxy

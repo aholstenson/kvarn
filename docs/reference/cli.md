@@ -280,7 +280,7 @@ Manages the per-project tool caches restored into each VM.
 
 ## `kvarn image-cache`
 
-Manages the pull-through OCI image cache used by `image:` jobs.
+Manages the pull-through OCI image cache every image a job pulls goes through.
 
 | Command | Flags |
 | --- | --- |

@@ -130,8 +130,9 @@ with `kvarn cache list`.
 
 ## `[image-cache]`
 
-The pull-through OCI registry cache that serves `image:` jobs from the per-VM
-gateway.
+The pull-through OCI registry cache. It is reachable on the per-VM gateway and
+registered as a mirror in the guest's container configuration at boot, so every
+image a job pulls goes through it.
 
 | Key | Type | Default |
 | --- | --- | --- |

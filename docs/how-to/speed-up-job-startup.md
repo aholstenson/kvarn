@@ -89,8 +89,10 @@ kvarn cache clear my-project
 
 ## OCI image cache
 
-Projects that use `image:` pull through a host-side registry cache rather than
-hitting the upstream registry from every VM:
+Container images are pulled through a host-side registry cache rather than from
+the upstream registry in every VM. The mirror is written into the guest's
+container configuration at boot, so it covers every pull a job makes — anything
+a step pulls through `docker`/`podman` or a compose file:
 
 ```toml
 [image-cache]

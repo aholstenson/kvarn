@@ -43,23 +43,6 @@ type OnStepDone func(result StepResult, phase string)
 // OnOutput is called with incremental stdout/stderr output from a running step.
 type OnOutput func(stepName string, phase string, stdout string, stderr string)
 
-// PullImage pulls a container image on the VM via the runner proxy.
-func PullImage(ctx context.Context, runner RunnerProxy, image string) error {
-	resp, err := runner.Exec(ctx, &v1.ExecRequest{
-		Command:    "podman",
-		Args:       []string{"pull", image},
-		WorkingDir: "/",
-		Privileged: false,
-	})
-	if err != nil {
-		return fmt.Errorf("podman pull %s: %w", image, err)
-	}
-	if resp.ExitCode != 0 {
-		return fmt.Errorf("podman pull %s failed (exit %d): %s", image, resp.ExitCode, resp.Stderr)
-	}
-	return nil
-}
-
 // RunSetup executes setup steps followed by health checks.
 // Setup short-circuits on the first failing step. Health checks run only if all setup steps pass.
 func RunSetup(ctx context.Context, runner RunnerProxy, cfg *project.Config, sessionID string, onDone OnStepDone, onOutput OnOutput) (*SetupResult, error) {

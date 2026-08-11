@@ -61,7 +61,6 @@ const (
 
 // Config represents a project-level configuration file (kvarn.yml).
 type Config struct {
-	Image        string            `yaml:"image,omitempty"`
 	Dependencies Dependencies      `yaml:"dependencies,omitempty"`
 	VM           VM                `yaml:"vm"`
 	Network      Network           `yaml:"network"`
@@ -478,13 +477,18 @@ func Load(dir string) (*Config, error) {
 		}
 
 		// yaml.v3 silently drops unknown fields on the typed unmarshal; sniff
-		// for the legacy `tools:` key so users get a clear migration error
-		// instead of silently losing their tool list.
+		// for keys that used to mean something so users get a clear migration
+		// error rather than a VM that quietly lacks the environment they asked
+		// for.
 		var raw map[string]yaml.Node
 		if unmarshalErr := yaml.Unmarshal(data, &raw); unmarshalErr == nil {
 			if _, ok := raw["tools"]; ok {
 				return nil, fmt.Errorf("`tools:` has been replaced by `dependencies:` in %s; "+
 					"see https://github.com/aholstenson/kvarn for migration", name)
+			}
+			if _, ok := raw["image"]; ok {
+				return nil, fmt.Errorf("`image:` is no longer supported in %s; "+
+					"declare the toolchain with `dependencies:` instead", name)
 			}
 		}
 
@@ -794,18 +798,6 @@ func (s ModeSpec) validate(name string) error {
 }
 
 func (c *Config) validate() error {
-	// image and dependencies are mutually exclusive: shell sessions inside an
-	// image: job run via `podman exec`, so host-installed Nix binaries are
-	// invisible.
-	if strings.TrimSpace(c.Image) != "" && len(c.Dependencies) > 0 {
-		return errors.New("image and dependencies are mutually exclusive")
-	}
-
-	// Validate image is not whitespace-only if present.
-	if c.Image != "" && strings.TrimSpace(c.Image) == "" {
-		return errors.New("image must not be whitespace-only")
-	}
-
 	// Surface dependency schema errors at load time.
 	if len(c.Dependencies) > 0 {
 		if _, err := c.Dependencies.Resolve(); err != nil {

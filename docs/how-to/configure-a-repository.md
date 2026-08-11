@@ -6,7 +6,7 @@ this guide is the path from empty file to one you trust.
 
 ## Pick an environment
 
-Either Nix packages:
+Name the toolchain the project needs as Nix packages:
 
 ```yaml
 dependencies:
@@ -15,16 +15,10 @@ dependencies:
     - nodejs
 ```
 
-or an OCI image:
-
-```yaml
-image: node:22-alpine
-```
-
-The two are mutually exclusive — in an `image:` job, steps run via `podman exec`
-where host-installed Nix binaries are invisible. Choose Nix when you want a
-declarative toolchain; choose an image when the project already has one and you
-want the same environment CI uses.
+They are installed into the VM before any step runs, so every step and the agent
+find them on `PATH`. Anything else a project needs from a container — a database,
+a service the tests talk to — a setup step can start itself with `podman` or
+`docker compose`.
 
 ## Add setup and validation
 

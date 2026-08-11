@@ -220,16 +220,6 @@ func (c *Cmd) Run() error {
 					}
 					toolProvisionItem = nil
 				}
-			case sandbox.ImagePullingEvent:
-				markLastProvisionDone()
-				lastProvisionItem = renderer.AddItem(fmt.Sprintf("Pulling image %s", ev.Image))
-				renderer.SetStatus(lastProvisionItem, taskui.StatusRunning, "")
-			case sandbox.ContainerStartingEvent:
-				markLastProvisionDone()
-				lastProvisionItem = renderer.AddItem("Starting container")
-				renderer.SetStatus(lastProvisionItem, taskui.StatusRunning, "")
-			case sandbox.ContainerStartedEvent:
-				markLastProvisionDone()
 			case sandbox.CacheRestoringEvent:
 				markLastProvisionDone()
 				lastProvisionItem = renderer.AddItem("Restoring cache")

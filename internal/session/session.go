@@ -23,7 +23,6 @@ const (
 	StateProvisioning           State = "provisioning"
 	StateTransferring           State = "transferring"
 	StateInstallingDependencies State = "installing_dependencies"
-	StatePullingImage           State = "pulling_image"
 	StateSetup                  State = "setup"
 	StateRunning                State = "running"
 	StateValidating             State = "validating"
@@ -46,7 +45,6 @@ var allStates = []State{
 	StateProvisioning,
 	StateTransferring,
 	StateInstallingDependencies,
-	StatePullingImage,
 	StateSetup,
 	StateRunning,
 	StateValidating,
@@ -93,9 +91,10 @@ func TerminalStates() []State {
 //
 // The line is drawn where a run starts producing effects the host cannot take
 // back. Everything up to and including setup has done nothing but read: a
-// clone, a wait for capacity, a VM boot, an image pull, a cache restore. The
-// VM is gone and its work is worthless, but re-running from the start reaches
-// the same place, so a restart during a burst costs latency and nothing else.
+// clone, a wait for capacity, a VM boot, a dependency install, a cache restore.
+// The VM is gone and its work is worthless, but re-running from the start
+// reaches the same place, so a restart during a burst costs latency and nothing
+// else.
 //
 // Past that point it is no longer true. StateRunning and StateValidating have
 // spent budget against the job's cost cap and hold agent work that only exists
@@ -114,7 +113,6 @@ var restartableStates = []State{
 	StateProvisioning,
 	StateTransferring,
 	StateInstallingDependencies,
-	StatePullingImage,
 	StateSetup,
 }
 

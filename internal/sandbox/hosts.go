@@ -29,9 +29,9 @@ type hostEntry struct {
 }
 
 // sortedHostEntries orders a kvarn.yml `network.host_aliases` map by name.
-// YAML maps have no order of their own, and both consumers — the /etc/hosts
-// block and podman's --add-host flags — are byte-compared in tests and read by
-// humans inside the VM, so the order has to come from somewhere stable.
+// YAML maps have no order of their own, and the /etc/hosts block built from
+// them is byte-compared in tests and read by humans inside the VM, so the order
+// has to come from somewhere stable.
 func sortedHostEntries(aliases map[string]string) []hostEntry {
 	entries := make([]hostEntry, 0, len(aliases))
 	for name, addr := range aliases {
@@ -62,12 +62,10 @@ func renderHostsBlock(entries []hostEntry) []byte {
 // content maps localhost and the VM's own hostname, and a program that cannot
 // resolve either behaves far worse than one missing a project alias.
 //
-// This has to run before the container starts. Podman seeds a container's
-// hosts file from the VM's at creation time, so an entry added afterwards
-// would reach the VM but not the image-mode shell where the steps actually
-// run. ContainerProxy.Start passes the same entries as --add-host for the
-// same reason, which makes the container's copy explicit rather than
-// dependent on podman's base_hosts_file default.
+// This has to run before any step does. Podman seeds a container's hosts file
+// from the VM's at creation time, so a project that brings up its own
+// containers only inherits the aliases that are already in place when it starts
+// them.
 func ConfigureHostAliases(ctx context.Context, runner RunnerProxy, aliases map[string]string) error {
 	entries := sortedHostEntries(aliases)
 	if len(entries) == 0 {

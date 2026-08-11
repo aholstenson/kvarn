@@ -6,13 +6,8 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "image": {
-      "description": "OCI container image to run steps in (e.g. \"node:22-alpine\"). Mutually exclusive with 'dependencies'.",
-      "type": "string",
-      "minLength": 1
-    },
     "dependencies": {
-      "description": "Nix flake sources mapped to the attribute names to install. Keys are flake references: \"nixpkgs\", \"nixpkgs/<channel>\", \"github:owner/repo\", \"gitlab:owner/repo\", \"git+https://...\", \"git+ssh://...\", \"https://...\", or \"tarball+https://...\". Mutually exclusive with 'image'.",
+      "description": "Nix flake sources mapped to the attribute names to install. Keys are flake references: \"nixpkgs\", \"nixpkgs/<channel>\", \"github:owner/repo\", \"gitlab:owner/repo\", \"git+https://...\", \"git+ssh://...\", \"https://...\", or \"tarball+https://...\".",
       "type": "object",
       "additionalProperties": {
         "type": "array",
