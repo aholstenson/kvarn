@@ -27,17 +27,28 @@ func NewContainerProxy(inner RunnerProxy, containerName string) *ContainerProxy 
 }
 
 // Start launches a long-running container with the workspace bind-mounted.
-func (c *ContainerProxy) Start(ctx context.Context, image string, workspaceDir string) error {
+//
+// aliases carries the project's exact `network.host_aliases` entries, which
+// are passed as --add-host so the container resolves the project's development
+// names the same way the VM does. The container shares the VM's network
+// namespace, so a name mapped to 127.0.0.1 reaches a server bound to loopback
+// on either side, and wildcard entries need nothing here: they resolve through
+// the same DNS forwarder the container inherits along with that namespace.
+func (c *ContainerProxy) Start(ctx context.Context, image string, workspaceDir string, aliases map[string]string) error {
+	args := []string{
+		"run", "-d",
+		"--name", c.containerName,
+		"-v", workspaceDir + ":" + workspaceDir,
+		"--network", "host",
+	}
+	for _, e := range sortedHostEntries(aliases) {
+		args = append(args, "--add-host", e.Name+":"+e.Address)
+	}
+	args = append(args, image, "tail", "-f", "/dev/null")
+
 	resp, err := c.inner.Exec(ctx, &v1.ExecRequest{
-		Command: "podman",
-		Args: []string{
-			"run", "-d",
-			"--name", c.containerName,
-			"-v", workspaceDir + ":" + workspaceDir,
-			"--network", "host",
-			image,
-			"tail", "-f", "/dev/null",
-		},
+		Command:    "podman",
+		Args:       args,
 		WorkingDir: "/",
 		Privileged: false,
 	})

@@ -309,7 +309,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	gatewayMAC := tcpip.LinkAddress("\x02\x00\x00\x00\x00\x01")
 	ethEndpoint := link.NewEthernetEndpoint(rw, gatewayMAC, "", link.DefaultMTU)
 
-	network, err = link.New(link.Config{Endpoint: ethEndpoint})
+	network, err = link.New(link.Config{Endpoint: ethEndpoint, HostAliases: opts.Network.HostAliases})
 	if err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()

@@ -82,6 +82,13 @@ type NetworkConfig struct {
 	// honoured by the proxy's allowlist.
 	AllowedHosts []string
 
+	// HostAliases maps names to the IP addresses they resolve to inside the
+	// VM, from the project's `network.host_aliases`. A key is one literal
+	// name or a "*.suffix" wildcard; values are IP addresses in string form.
+	// The VM's DNS forwarder answers these itself rather than asking the host
+	// resolver.
+	HostAliases map[string]string
+
 	// SecretInjector enriches outbound proxied requests with credentials
 	// before they are sent upstream. May be nil to forward unmodified.
 	SecretInjector egressproxy.SecretInjector

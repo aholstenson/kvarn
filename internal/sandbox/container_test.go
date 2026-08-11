@@ -108,7 +108,7 @@ var _ = Describe("ContainerProxy", func() {
 
 	Describe("Start", func() {
 		It("sends podman run with workspace mount and network host", func() {
-			err := proxy.Start(ctx, "node:20", "/home/kvarn/workspace")
+			err := proxy.Start(ctx, "node:20", "/home/kvarn/workspace", nil)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(inner.execCalls).To(HaveLen(1))
 
@@ -123,16 +123,36 @@ var _ = Describe("ContainerProxy", func() {
 			Expect(args).To(ContainSubstring("tail -f /dev/null"))
 		})
 
+		It("passes network.host_aliases entries as --add-host in name order", func() {
+			err := proxy.Start(ctx, "node:20", "/home/kvarn/workspace", map[string]string{
+				"dev-shop.example.local":  "127.0.0.1",
+				"dev-admin.example.local": "127.0.0.1",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			args := strings.Join(inner.execCalls[0].Args, " ")
+			Expect(args).To(ContainSubstring(
+				"--add-host dev-admin.example.local:127.0.0.1 --add-host dev-shop.example.local:127.0.0.1"))
+			// The image and its command must stay the last operands.
+			Expect(args).To(HaveSuffix("node:20 tail -f /dev/null"))
+		})
+
+		It("adds no --add-host flags when no aliases are configured", func() {
+			err := proxy.Start(ctx, "node:20", "/home/kvarn/workspace", nil)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.Join(inner.execCalls[0].Args, " ")).NotTo(ContainSubstring("--add-host"))
+		})
+
 		It("returns error when podman run fails", func() {
 			inner.pushExecResponse(&v1.ExecResponse{ExitCode: 1, Stderr: "image not found"}, nil)
-			err := proxy.Start(ctx, "node:20", "/home/kvarn/workspace")
+			err := proxy.Start(ctx, "node:20", "/home/kvarn/workspace", nil)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("start container failed"))
 		})
 
 		It("returns error when exec itself fails", func() {
 			inner.pushExecResponse(nil, fmt.Errorf("connection lost"))
-			err := proxy.Start(ctx, "node:20", "/home/kvarn/workspace")
+			err := proxy.Start(ctx, "node:20", "/home/kvarn/workspace", nil)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("start container"))
 		})

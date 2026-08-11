@@ -19,7 +19,7 @@ The home directory is `/home/kvarn`.
 | `image` | string | OCI image to run steps in. Mutually exclusive with `dependencies`. |
 | `dependencies` | map | Nix flake sources mapped to attribute names to install. |
 | `vm` | object | VM sizing overrides. |
-| `network` | object | Outbound egress allowlist. |
+| `network` | object | Outbound egress allowlist and in-VM hostname aliases. |
 | `cache` | object | Extra guest paths to persist across runs. |
 | `environment` | map | Environment variables injected into every step. |
 | `secrets` | list | Runtime secrets the project needs. |
@@ -121,6 +121,45 @@ dies on "unexpected EOF" still tells you which host to add here.
 Matching is per hostname, and a redirect is a new connection to a new host: a
 download that starts at an allowed host and redirects to a CDN needs the CDN
 allowed too.
+
+### `network.host_aliases`
+
+```yaml
+network:
+  host_aliases:
+    dev-shop.example.local: 127.0.0.1
+    "*.dev.example.local": 127.0.0.1
+```
+
+Names a project's development hostnames resolve to inside the VM, in place
+before any step runs. A server listening on `127.0.0.1` in the VM is then
+reachable as `http://dev-shop.example.local`, which is what a project needs when
+its dev tooling routes by hostname (virtual hosts, per-tenant subdomains,
+cookies scoped to a domain).
+
+A key is either one literal hostname or a `*.domain` wildcard matching any
+subdomain of that suffix — `*.dev.example.local` covers `shop.dev.example.local`
+and `a.b.dev.example.local`, but not `dev.example.local` itself. Values must be
+IP addresses. Where two entries could answer the same name the more specific one
+wins: an exact entry beats any wildcard, and a longer wildcard suffix beats a
+shorter one, so a single subdomain can be pointed elsewhere without giving up
+the wildcard covering its siblings.
+
+Whether a name is served from `/etc/hosts` or by kvarn's DNS forwarder is an
+implementation detail — exact names get both, wildcards can only be a DNS answer
+— but it explains one thing worth knowing: a program that resolves names itself
+rather than through the C library still sees the wildcards, because they are a
+real DNS answer.
+
+Loopback addresses are the point of the feature and stay entirely inside the VM;
+that traffic never reaches the egress proxy. Mapping a name to a non-loopback
+address is allowed but changes nothing about egress control — those packets
+still go through the proxy, which judges them by hostname, so the name also
+needs an `allowed_hosts` entry.
+
+In an `image:` job the entries reach the container too, which shares the VM's
+network namespace and its resolver. A dev server on loopback is reachable by
+name whether it was started inside the container or beside it.
 
 ## `cache`
 

@@ -51,6 +51,15 @@ type Config struct {
 	// allowlist.
 	AllowedDNS []string
 
+	// HostAliases maps names to the addresses the DNS forwarder answers with
+	// instead of asking the host resolver. A key is one literal name or a
+	// "*.suffix" wildcard; values are IP addresses in string form.
+	//
+	// These are a project's own development names, so they are answered ahead
+	// of AllowedDNS: the allowlist governs what the VM may reach across the
+	// network, and an address the VM is talking to itself on is not that.
+	HostAliases map[string]string
+
 	// Logger; defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -228,6 +237,7 @@ func (n *Network) startDNS(ctx context.Context) (interface{ Close() error }, err
 	srv := &dnsForwarder{
 		conn:    conn,
 		allowed: n.cfg.AllowedDNS,
+		aliases: normalizeAliases(n.cfg.HostAliases),
 		log:     n.log,
 	}
 	go srv.run(ctx)

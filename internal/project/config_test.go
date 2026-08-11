@@ -941,6 +941,135 @@ setup:
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("not a valid hostname"))
 	})
+
+	Describe("hosts", func() {
+		It("accepts hostnames mapped to IP addresses", func() {
+			writeYAML(dir, "kvarn.yml", `
+network:
+  host_aliases:
+    dev-shop.sws.local: 127.0.0.1
+    dev-admin.sws.local: "::1"
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+			cfg, err := project.Load(dir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Network.HostAliases).To(Equal(map[string]string{
+				"dev-shop.sws.local":  "127.0.0.1",
+				"dev-admin.sws.local": "::1",
+			}))
+		})
+
+		It("accepts a wildcard name", func() {
+			writeYAML(dir, "kvarn.yml", `
+network:
+  host_aliases:
+    "*.sws.local": 127.0.0.1
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+			cfg, err := project.Load(dir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Network.HostAliases).To(HaveKeyWithValue("*.sws.local", "127.0.0.1"))
+		})
+
+		It("rejects a star outside the leading label", func() {
+			writeYAML(dir, "kvarn.yml", `
+network:
+  host_aliases:
+    "dev-*.sws.local": 127.0.0.1
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+			_, err := project.Load(dir)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("leading"))
+		})
+
+		It("keeps only the exact entries for the guest hosts file", func() {
+			writeYAML(dir, "kvarn.yml", `
+network:
+  host_aliases:
+    "*.sws.local": 127.0.0.1
+    dev-shop.sws.local: 127.0.0.9
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+			cfg, err := project.Load(dir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Network.ExactHostAliases()).To(Equal(map[string]string{
+				"dev-shop.sws.local": "127.0.0.9",
+			}))
+		})
+
+		It("has no exact entries when every mapping is a wildcard", func() {
+			writeYAML(dir, "kvarn.yml", `
+network:
+  host_aliases:
+    "*.sws.local": 127.0.0.1
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+			cfg, err := project.Load(dir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Network.ExactHostAliases()).To(BeEmpty())
+		})
+
+		It("rejects a hostname as the value", func() {
+			writeYAML(dir, "kvarn.yml", `
+network:
+  host_aliases:
+    dev-shop.sws.local: localhost
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+			_, err := project.Load(dir)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must map to an IP address"))
+		})
+
+		It("rejects an empty address", func() {
+			writeYAML(dir, "kvarn.yml", `
+network:
+  host_aliases:
+    dev-shop.sws.local: ""
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+			_, err := project.Load(dir)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("empty address"))
+		})
+
+		It("rejects a name with a port", func() {
+			writeYAML(dir, "kvarn.yml", `
+network:
+  host_aliases:
+    "dev-shop.sws.local:8080": 127.0.0.1
+setup:
+  steps:
+    - name: Build
+      run: echo ok
+`)
+			_, err := project.Load(dir)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("port"))
+		})
+	})
 })
 
 var _ = Describe("Environment config", func() {

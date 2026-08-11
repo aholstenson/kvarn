@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+// DNS question types this forwarder understands. Everything else is answered
+// with NXDOMAIN.
+const (
+	qtypeA    uint16 = 1
+	qtypeAAAA uint16 = 28
+)
+
 // dnsForwarder is a minimal UDP DNS forwarder. It parses the question name,
 // optionally filters against an allowlist (responding with NXDOMAIN), and
 // forwards everything else to the host resolver. It is defense in depth on
@@ -16,6 +23,7 @@ import (
 type dnsForwarder struct {
 	conn    net.PacketConn
 	allowed []string // exact and "*.suffix"; nil means allow everything
+	aliases map[string]string
 	log     *slog.Logger
 }
 
@@ -44,6 +52,18 @@ func (d *dnsForwarder) handle(ctx context.Context, src net.Addr, req []byte) {
 		return
 	}
 
+	// A project's own hostnames are answered here, before the allowlist. They
+	// name something inside the VM rather than a destination to reach across
+	// the network, so the egress policy has nothing to say about them.
+	if ip, ok := d.localAddress(name); ok && (qtype == qtypeA || qtype == qtypeAAAA) {
+		// buildAnswer keeps only the addresses matching qtype, so an AAAA
+		// query against an IPv4 mapping yields an empty NOERROR — "this name
+		// exists, just not in that family", which is what stops a resolver
+		// from treating the name as unknown and moving on.
+		_, _ = d.conn.WriteTo(buildAnswer(req, name, qtype, []net.IP{ip}), src)
+		return
+	}
+
 	if !d.permit(name) {
 		d.log.Info("dns blocked", "name", name)
 		_, _ = d.conn.WriteTo(buildNXDOMAIN(req), src)
@@ -56,6 +76,58 @@ func (d *dnsForwarder) handle(ctx context.Context, src net.Addr, req []byte) {
 		return
 	}
 	_, _ = d.conn.WriteTo(resp, src)
+}
+
+// normalizeAliases lowercases the configured names once, at construction, so
+// that every lookup can compare against an already-folded key. DNS names are
+// case-insensitive and a query arrives in whatever case the caller typed.
+func normalizeAliases(aliases map[string]string) map[string]string {
+	if len(aliases) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(aliases))
+	for name, addr := range aliases {
+		out[strings.ToLower(strings.TrimSuffix(name, "."))] = strings.TrimSpace(addr)
+	}
+	return out
+}
+
+// localAddress resolves a name against the configured aliases. An exact entry
+// wins over a wildcard, so a project can point one subdomain somewhere else
+// without giving up the wildcard covering its siblings. Among wildcards the
+// longest suffix wins, which is the only ordering that lets a more specific
+// "*.dev.example.local" override "*.example.local" — map iteration has no
+// order to fall back on.
+func (d *dnsForwarder) localAddress(name string) (net.IP, bool) {
+	if len(d.aliases) == 0 {
+		return nil, false
+	}
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+
+	if addr, ok := d.aliases[name]; ok {
+		if ip := net.ParseIP(addr); ip != nil {
+			return ip, true
+		}
+	}
+
+	var bestIP net.IP
+	var bestLen int
+	for pattern, addr := range d.aliases {
+		if !strings.HasPrefix(pattern, "*.") {
+			continue
+		}
+		suffix := strings.ToLower(pattern[1:]) // ".example.local"
+		if !strings.HasSuffix(name, suffix) || len(name) <= len(suffix) {
+			continue
+		}
+		if len(suffix) <= bestLen {
+			continue
+		}
+		if ip := net.ParseIP(addr); ip != nil {
+			bestIP, bestLen = ip, len(suffix)
+		}
+	}
+	return bestIP, bestIP != nil
 }
 
 func (d *dnsForwarder) permit(name string) bool {
@@ -85,13 +157,13 @@ func (d *dnsForwarder) forward(ctx context.Context, req []byte, name string, qty
 	defer cancel()
 
 	switch qtype {
-	case 1: // A
+	case qtypeA:
 		ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", name)
 		if err != nil {
 			return nil, err
 		}
 		return buildAnswer(req, name, qtype, ips), nil
-	case 28: // AAAA
+	case qtypeAAAA:
 		ips, err := net.DefaultResolver.LookupIP(ctx, "ip6", name)
 		if err != nil {
 			return nil, err
@@ -143,9 +215,9 @@ func buildAnswer(req []byte, name string, qtype uint16, ips []net.IP) []byte {
 	// Count answers.
 	var count int
 	for _, ip := range ips {
-		if qtype == 1 && ip.To4() != nil {
+		if qtype == qtypeA && ip.To4() != nil {
 			count++
-		} else if qtype == 28 && ip.To4() == nil {
+		} else if qtype == qtypeAAAA && ip.To4() == nil {
 			count++
 		}
 	}
@@ -157,13 +229,13 @@ func buildAnswer(req []byte, name string, qtype uint16, ips []net.IP) []byte {
 	for _, ip := range ips {
 		var rdata []byte
 		switch qtype {
-		case 1:
+		case qtypeA:
 			ip4 := ip.To4()
 			if ip4 == nil {
 				continue
 			}
 			rdata = ip4
-		case 28:
+		case qtypeAAAA:
 			if ip.To4() != nil {
 				continue
 			}

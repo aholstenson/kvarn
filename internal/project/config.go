@@ -134,6 +134,37 @@ type CacheEntry struct {
 // Network defines network egress controls for the VM.
 type Network struct {
 	AllowedHosts []string `yaml:"allowed_hosts,omitempty"`
+
+	// HostAliases maps a hostname to the IP address it resolves to inside the
+	// VM. Its purpose is local development names — a dev server on 127.0.0.1
+	// reachable as dev-shop.example.local.
+	//
+	// A key is either one literal name or the "*.domain" wildcard form, which
+	// matches any subdomain of that suffix. The two are answered by different
+	// machinery in the guest (see ExactHostAliases), but they are one key here
+	// because they are one idea to whoever writes the file.
+	HostAliases map[string]string `yaml:"host_aliases,omitempty"`
+}
+
+// ExactHostAliases returns the entries naming one literal host, which are the
+// only ones expressible as /etc/hosts lines. Wildcards are left out: that file
+// matches exactly and has no syntax for a suffix, so those entries are served
+// by kvarn's DNS forwarder instead. Every entry, wildcard or not, reaches the
+// forwarder, so the two never disagree about a name they both cover.
+func (n Network) ExactHostAliases() map[string]string {
+	if len(n.HostAliases) == 0 {
+		return nil
+	}
+	exact := make(map[string]string, len(n.HostAliases))
+	for name, addr := range n.HostAliases {
+		if !strings.HasPrefix(name, "*.") {
+			exact[name] = addr
+		}
+	}
+	if len(exact) == 0 {
+		return nil
+	}
+	return exact
 }
 
 // SecretRef is a single entry in the kvarn.yml `secrets:` list. It declares a
@@ -543,6 +574,35 @@ func validateHostPattern(field, host string) error {
 	return nil
 }
 
+// validateHostName validates a single name being mapped to an address. It
+// accepts one literal hostname or the "*.domain" wildcard form. Unlike
+// validateHostPattern it rejects a bare IP address, which names nothing and
+// would silently map an address to itself. field is used for error context.
+func validateHostName(field, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%s contains an empty hostname", field)
+	}
+	if strings.Contains(name, "://") {
+		return fmt.Errorf("%s entry %q must not contain a scheme", field, name)
+	}
+	if strings.ContainsAny(name, "/:") {
+		return fmt.Errorf("%s entry %q must not contain a path or port", field, name)
+	}
+	// Only a leading "*." is a wildcard; a star anywhere else is a name the
+	// guest could never be asked to resolve.
+	check := strings.TrimPrefix(name, "*.")
+	if strings.Contains(check, "*") {
+		return fmt.Errorf("%s entry %q may only use a wildcard as a leading \"*.\" label", field, name)
+	}
+	if net.ParseIP(check) != nil {
+		return fmt.Errorf("%s entry %q is an IP address, not a hostname", field, name)
+	}
+	if !hostnameRe.MatchString(check) {
+		return fmt.Errorf("%s entry %q is not a valid hostname", field, name)
+	}
+	return nil
+}
+
 // secretSchemes is the set of accepted kvarn.yml secret schemes. The empty
 // string is accepted and defaults to bearer at resolution time.
 var secretSchemes = map[string]bool{"": true, "bearer": true, "basic": true, "oauth": true}
@@ -781,6 +841,21 @@ func (c *Config) validate() error {
 	for _, host := range c.Network.AllowedHosts {
 		if err := validateHostPattern("network.allowed_hosts", host); err != nil {
 			return err
+		}
+	}
+
+	// Validate network host_aliases. The value is stricter than an allowlist
+	// entry: it is the literal address the name resolves to, so a hostname
+	// there would resolve to nothing.
+	for name, addr := range c.Network.HostAliases {
+		if err := validateHostName("network.host_aliases", name); err != nil {
+			return err
+		}
+		if strings.TrimSpace(addr) == "" {
+			return fmt.Errorf("network.host_aliases entry %q has an empty address", name)
+		}
+		if net.ParseIP(strings.TrimSpace(addr)) == nil {
+			return fmt.Errorf("network.host_aliases entry %q must map to an IP address, got %q", name, addr)
 		}
 	}
 

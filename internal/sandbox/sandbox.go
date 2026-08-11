@@ -476,6 +476,12 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		}
 	}
 	createOpts.Network.AllowedHosts = append(createOpts.Network.AllowedHosts, allowedHosts...)
+	if opts.Config != nil {
+		// Every alias goes to the VM's DNS forwarder, wildcard or not, so the
+		// two resolution paths in the guest agree on the names they both
+		// cover. Only the exact ones can also become /etc/hosts lines.
+		createOpts.Network.HostAliases = opts.Config.Network.HostAliases
+	}
 	createOpts.Network.OnEgressDenied = func(host string) {
 		sess.recordEgressDenied(host)
 		emit(opts, EgressDeniedEvent{Host: host})
@@ -533,6 +539,16 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	// proxy, so this has to be the first command the guest runs.
 	if err := InstallProxyCA(ctx, proxy, instance.ProxyCAPEM); err != nil {
 		return nil, fmt.Errorf("install proxy CA: %w", err)
+	}
+
+	// Map the project's development hostnames before anything in the guest can
+	// resolve a name: the container below seeds its own hosts file from this
+	// one when it is created, and every step runs after that point. Wildcards
+	// are not expressible here and are served by the DNS forwarder instead.
+	if opts.Config != nil {
+		if err := ConfigureHostAliases(ctx, proxy, opts.Config.Network.ExactHostAliases()); err != nil {
+			return nil, fmt.Errorf("configure host aliases: %w", err)
+		}
 	}
 
 	// Transfer files.
@@ -623,7 +639,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	if cfg != nil && strings.TrimSpace(cfg.Image) != "" {
 		emit(opts, ContainerStartingEvent{})
 		containerProxy := NewContainerProxy(proxy, "kvarn-workspace")
-		if err := containerProxy.Start(ctx, cfg.Image, workingDir); err != nil {
+		if err := containerProxy.Start(ctx, cfg.Image, workingDir, cfg.Network.ExactHostAliases()); err != nil {
 			return nil, fmt.Errorf("start container: %w", err)
 		}
 		emit(opts, ContainerStartedEvent{})

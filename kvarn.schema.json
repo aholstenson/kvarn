@@ -45,7 +45,7 @@
       }
     },
     "network": {
-      "description": "Network egress controls for the VM.",
+      "description": "Network controls for the VM: what it may reach, and what names resolve inside it.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -55,6 +55,17 @@
           "items": {
             "type": "string",
             "pattern": "^[a-zA-Z0-9._-]+$"
+          }
+        },
+        "host_aliases": {
+          "description": "Hostnames mapped to the IP they resolve to inside the VM. Intended for local development names pointing at 127.0.0.1. A key is one literal hostname or a \"*.domain\" wildcard matching any subdomain; each value must be an IP address.",
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^(\\*\\.)?[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }
