@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.6.0](https://github.com/aholstenson/kvarn/compare/v0.5.0...v0.6.0) (2026-08-11)
+
+
+### Features
+
+* Add a version command reporting the running build ([de76aca](https://github.com/aholstenson/kvarn/commit/de76aca0bf1f73fd80e91e6e632d5e9b6407e51a))
+* Add configurable pull request, commit and comment content ([531fe95](https://github.com/aholstenson/kvarn/commit/531fe951223cba9dbddce0b8b7dacce0b8ba2edd))
+* Add network.host_aliases for resolving project hostnames in the VM ([32c9c3f](https://github.com/aholstenson/kvarn/commit/32c9c3f2e62b441d9110e48c88c4368543fe477e))
+* Default nixpkgs dependencies to the nixos-26.05 channel ([b0e9027](https://github.com/aholstenson/kvarn/commit/b0e90272fd9ff1755ff7937b3a5f185e968cb5af))
+* Drop kvarn.yml `image:` support ([684d36d](https://github.com/aholstenson/kvarn/commit/684d36d7b660bd29c41d7115f2ade96aa50f890a))
+* **image:** Ship fonts in image for things like headless browsers ([97a34db](https://github.com/aholstenson/kvarn/commit/97a34db9a4ce2e446be7c482ca176417d66d5351))
+* Trust the egress proxy CA in the NSS store ([63ffa70](https://github.com/aholstenson/kvarn/commit/63ffa7084abbfa3ce74b391d1a27b09d22659b45))
+* Use image 0.5 range ([f70fb2b](https://github.com/aholstenson/kvarn/commit/f70fb2b525489ae84f9ed407b2807d8136284df0))
+
+
+### Bug Fixes
+
+* **runner:** Accept absolute in-workspace paths in the file tools ([fc133dd](https://github.com/aholstenson/kvarn/commit/fc133dde8d3a14d533bf87a9b4a9174aa4d1acc3))
+* **runner:** Keep workspace files readable by the containers a job starts ([c9fb961](https://github.com/aholstenson/kvarn/commit/c9fb96167b5552ce51fc9642579823731a65496f))
+
 ## [0.5.0](https://github.com/aholstenson/kvarn/compare/v0.4.0...v0.5.0) (2026-08-10)
 
 
