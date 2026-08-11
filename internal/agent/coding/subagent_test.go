@@ -322,8 +322,14 @@ var _ = Describe("SubAgent definitions", func() {
 
 	It("bounds sub-agent tool results too", func() {
 		runner := &mockRunner{
-			execFunc: func(_ context.Context, _ *v1.ExecRequest) (*v1.ExecResponse, error) {
-				return &v1.ExecResponse{Stdout: strings.Repeat("./some/path.go\n", 100000)}, nil
+			readFileFunc: func(_ context.Context, _ *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
+				lines := make([]*v1.TaggedLine, 0, 2000)
+				for i := range 2000 {
+					lines = append(lines, &v1.TaggedLine{
+						Line: int32(i + 1), Hash: "cedar", Content: strings.Repeat("x", 500),
+					})
+				}
+				return &v1.ReadFileResponse{Version: "v1", TotalLines: 2000, Lines: lines}, nil
 			},
 		}
 		deps := coding.SubAgentDeps{
@@ -332,19 +338,19 @@ var _ = Describe("SubAgent definitions", func() {
 			SessionID:  "sub-sess",
 		}
 
-		var listFiles llms.ToolDef
+		var readFile llms.ToolDef
 		for _, t := range coding.Explore.Tools(deps) {
-			if t.Name() == "list_files" {
-				listFiles = t
+			if t.Name() == "read_file" {
+				readFile = t
 			}
 		}
-		Expect(listFiles).NotTo(BeNil())
+		Expect(readFile).NotTo(BeNil())
 
-		result, err := listFiles.Execute(context.Background(), &coding.ListFilesInput{})
+		result, err := readFile.Execute(context.Background(), &coding.ReadFileInput{Path: "generated.go"})
 		Expect(err).NotTo(HaveOccurred())
 
-		rendered := listFiles.Render(result)
-		Expect(len(rendered.Text)).To(BeNumerically("<", 40*1024))
+		rendered := readFile.Render(result)
+		Expect(len(rendered.Text)).To(BeNumerically("<", 160*1024))
 		Expect(rendered.Text).To(ContainSubstring("of this result omitted"))
 	})
 })

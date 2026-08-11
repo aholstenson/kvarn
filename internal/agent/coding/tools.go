@@ -611,13 +611,59 @@ func (t *writeFileTool) Render(o *WriteFileOutput) llms.ToolResult {
 
 // list_files
 
+const (
+	// defaultListEntries is how many entries a listing returns by default, and
+	// maxListEntries the ceiling on max_entries. A directory with more entries
+	// than this is one to approach through a subdirectory or a search, not to
+	// read end to end.
+	defaultListEntries = 500
+	maxListEntries     = 2000
+	// defaultListDepth keeps a listing to the directory asked for. Depth is the
+	// cheapest way to look before leaping: one level shows the shape, and the
+	// interesting subtree can then be asked for by name.
+	defaultListDepth = 1
+)
+
+// prunedDirs are never listed or descended into. They hold version-control
+// internals and dependency or tool caches — content that is machinery rather
+// than part of the project, and voluminous enough to bury it.
+//
+// Directories that merely tend to be large (vendor, target, dist, build) are
+// deliberately absent: they hold real code often enough that hiding them would
+// cost more than listing them, and the entry cap already bounds what a big one
+// can do to a response.
+var prunedDirs = []string{
+	".git",
+	"node_modules",
+	"__pycache__",
+	".venv",
+	".tox",
+	".mypy_cache",
+	".pytest_cache",
+	".ruff_cache",
+	".gradle",
+	".terraform",
+}
+
 type ListFilesInput struct {
-	Path     string `json:"path,omitempty" jsonschema:"description=Directory path relative to workspace root. Defaults to root if empty."`
-	MaxDepth int    `json:"max_depth,omitempty" jsonschema:"description=Maximum depth to list files. Defaults to 1."`
+	Path       string `json:"path,omitempty" jsonschema:"description=Directory path relative to workspace root. Defaults to the workspace root."`
+	MaxDepth   int    `json:"max_depth,omitempty" jsonschema:"description=How many directory levels to descend. Defaults to 1, which lists just the given directory."`
+	MaxEntries int    `json:"max_entries,omitempty" jsonschema:"description=Maximum entries to return. Defaults to 500 and is capped at 2000."`
+}
+
+// ListOverflow describes a listing that did not fit.
+type ListOverflow struct {
+	TotalEntries int
 }
 
 type ListFilesOutput struct {
-	Output string
+	// Entries are formatted paths: a directory ends in "/", a symlink in "@",
+	// and a directory that was not descended into is marked "(skipped)".
+	Entries []string
+	// Overflow is set only when entries were left out.
+	Overflow *ListOverflow
+	// Failure carries what find complained about when nothing was listed.
+	Failure string
 }
 
 type listFilesTool struct {
@@ -626,26 +672,32 @@ type listFilesTool struct {
 
 func (t *listFilesTool) Name() string { return "list_files" }
 func (t *listFilesTool) Description() string {
-	return "List files in the workspace. Use this to explore the project structure and understand the codebase layout."
+	return `List the contents of a directory. Directories end in "/" and symlinks in "@", so one listing shows both what is here and where to look next.
+
+Descends one level by default; raise max_depth to see further down. Version-control internals and dependency caches (.git, node_modules, __pycache__, .venv and similar) are listed but not descended into, marked "(skipped)".
+
+Listings are capped at 500 entries by default (max_entries up to 2000); when there are more, the response says how many there are in total.`
 }
 func (t *listFilesTool) Schema() *ListFilesInput { return &ListFilesInput{} }
 
 func (t *listFilesTool) Execute(ctx context.Context, input *ListFilesInput) (*ListFilesOutput, error) {
-	dir := "."
-	if input.Path != "" {
-		dir = input.Path
+	entries := input.MaxEntries
+	if entries <= 0 {
+		entries = defaultListEntries
+	}
+	entries = min(entries, maxListEntries)
+
+	depth := input.MaxDepth
+	if depth <= 0 {
+		depth = defaultListDepth
 	}
 
-	args := []string{dir, "-type", "f"}
-	if input.MaxDepth > 0 {
-		args = append(args, "-maxdepth", strconv.Itoa(input.MaxDepth))
-	} else {
-		args = append(args, "-maxdepth", "1")
-	}
+	out := &ListFilesOutput{}
 
+	// As in search_files, one entry beyond the cap is requested so a listing
+	// that exactly fills it is not reported as truncated.
 	resp, err := t.toolkit.runner.Exec(ctx, &v1.ExecRequest{
-		Command:        "find",
-		Args:           args,
+		Command:        t.listCommand(input.Path, depth, entries+1),
 		WorkingDir:     t.toolkit.workingDir,
 		MaxOutputBytes: uint32(limitForTool(t.Name()).bytes),
 	})
@@ -653,15 +705,139 @@ func (t *listFilesTool) Execute(ctx context.Context, input *ListFilesInput) (*Li
 		return nil, err
 	}
 
-	output := resp.Stdout
-	if resp.Stderr != "" {
-		output += "\n" + resp.Stderr
+	lines := splitNonEmptyLines(resp.Stdout)
+	if len(lines) == 0 {
+		if stderr := strings.TrimSpace(resp.Stderr); stderr != "" {
+			out.Failure = stderr
+		}
+		return out, nil
 	}
-	return &ListFilesOutput{Output: output}, nil
+
+	for _, line := range lines {
+		if entry, ok := formatListEntry(line); ok {
+			out.Entries = append(out.Entries, entry)
+		}
+	}
+
+	if len(out.Entries) > entries {
+		out.Entries = out.Entries[:entries]
+		out.Overflow = t.countEntries(ctx, input.Path, depth)
+	}
+	return out, nil
+}
+
+// listCommand builds the find pipeline for one listing. The entry limit is
+// applied by head so that find stops walking once the answer is full, which is
+// what keeps a listing of a directory holding a huge tree cheap.
+func (t *listFilesTool) listCommand(path string, depth, entries int) string {
+	args := append(t.walkArgs(path, depth),
+		"-prune", "-printf", shellQuote(`p %p\n`),
+		"-o", "-printf", shellQuote(`%y %p\n`),
+	)
+	return strings.Join(args, " ") + " | head -n " + strconv.Itoa(entries)
+}
+
+// countEntries counts everything the listing would have shown, so an overflowing
+// listing can say how much it left out. A failure costs the count, not the
+// listing.
+func (t *listFilesTool) countEntries(ctx context.Context, path string, depth int) *ListOverflow {
+	args := append(t.walkArgs(path, depth), "-prune", "-print", "-o", "-print")
+
+	resp, err := t.toolkit.runner.Exec(ctx, &v1.ExecRequest{
+		Command:        strings.Join(args, " ") + " | wc -l",
+		WorkingDir:     t.toolkit.workingDir,
+		MaxOutputBytes: uint32(limitForTool(t.Name()).bytes),
+	})
+	if err != nil {
+		return nil
+	}
+
+	total, convErr := strconv.Atoi(strings.TrimSpace(resp.Stdout))
+	if convErr != nil {
+		return nil
+	}
+	return &ListOverflow{TotalEntries: total}
+}
+
+// walkArgs are the find arguments shared by the listing and the count, up to
+// and including the prune test — so both describe the same walk.
+//
+// -mindepth 1 leaves out the directory being listed, which is not news to
+// whoever asked for it.
+func (t *listFilesTool) walkArgs(path string, depth int) []string {
+	args := []string{
+		"find", shellQuote(findPath(path)),
+		"-mindepth", "1",
+		"-maxdepth", strconv.Itoa(depth),
+		`\(`,
+	}
+	for i, name := range prunedDirs {
+		if i > 0 {
+			args = append(args, "-o")
+		}
+		args = append(args, "-name", shellQuote(name))
+	}
+	return append(args, `\)`)
+}
+
+// findPath prepares a path for find, which has no way to mark the end of its
+// options: a directory whose name starts with a dash is spelled relative to the
+// current directory so that find reads it as a path.
+func findPath(path string) string {
+	if path == "" {
+		return "."
+	}
+	if strings.HasPrefix(path, "-") {
+		return "./" + path
+	}
+	return path
+}
+
+// formatListEntry turns one "<type> <path>" line from find into a display
+// entry. A line that does not carry a type is the output cap's marker and is
+// dropped.
+func formatListEntry(line string) (string, bool) {
+	kind, path, found := strings.Cut(line, " ")
+	if !found || path == "" {
+		return "", false
+	}
+	path = strings.TrimPrefix(path, "./")
+	if path == "" {
+		return "", false
+	}
+
+	switch kind {
+	case "d":
+		return path + "/", true
+	case "l":
+		return path + "@", true
+	case "f":
+		return path, true
+	case "p":
+		return path + "/ (skipped)", true
+	default:
+		return "", false
+	}
 }
 
 func (t *listFilesTool) Render(o *ListFilesOutput) llms.ToolResult {
-	return llms.TextToolResult(o.Output)
+	if o.Failure != "" {
+		return llms.TextToolResult("list_files failed: " + o.Failure)
+	}
+	if len(o.Entries) == 0 {
+		return llms.TextToolResult("Empty directory.")
+	}
+
+	var sb strings.Builder
+	for _, e := range o.Entries {
+		sb.WriteString(e)
+		sb.WriteString("\n")
+	}
+	if o.Overflow != nil {
+		fmt.Fprintf(&sb, "\n[kvarn: showing %d of %d entries. List a subdirectory, or lower max_depth.]\n",
+			len(o.Entries), o.Overflow.TotalEntries)
+	}
+	return llms.TextToolResult(sb.String())
 }
 
 // search_files

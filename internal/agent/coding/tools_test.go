@@ -395,29 +395,127 @@ var _ = Describe("CodingToolkit", func() {
 	})
 
 	Describe("list_files", func() {
-		It("runs find command via runner", func() {
+		It("walks one level of the workspace root by default", func() {
 			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
-				Expect(req.Command).To(Equal("find"))
-				Expect(req.Args).To(ContainElement("-maxdepth"))
-				Expect(req.Args).To(ContainElement("1"))
+				Expect(req.Command).To(HavePrefix("find '.' -mindepth 1 -maxdepth 1 "))
+				Expect(req.Command).To(HaveSuffix("| head -n 501"))
 				Expect(req.WorkingDir).To(Equal("/home/kvarn/workspace"))
-				return &v1.ExecResponse{ExitCode: 0, Stdout: "./main.go\n./go.mod\n"}, nil
+				return &v1.ExecResponse{Stdout: "f ./main.go\nf ./go.mod\n"}, nil
+			}
+
+			result, err := tools["list_files"].Execute(ctx, &coding.ListFilesInput{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.(*coding.ListFilesOutput).Entries).To(Equal([]string{"main.go", "go.mod"}))
+		})
+
+		It("marks directories, symlinks and the directories it does not descend into", func() {
+			runner.execFunc = func(_ context.Context, _ *v1.ExecRequest) (*v1.ExecResponse, error) {
+				return &v1.ExecResponse{Stdout: "d ./internal\nl ./link\nf ./go.mod\np ./node_modules\np ./.git\n"}, nil
+			}
+
+			result, err := tools["list_files"].Execute(ctx, &coding.ListFilesInput{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tools["list_files"].Render(result).Text).To(Equal(
+				"internal/\nlink@\ngo.mod\nnode_modules/ (skipped)\n.git/ (skipped)\n"))
+		})
+
+		It("prunes dependency and version-control machinery", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				Expect(req.Command).To(ContainSubstring(`\( -name '.git' -o -name 'node_modules'`))
+				Expect(req.Command).To(ContainSubstring(`-name '.venv'`))
+				Expect(req.Command).To(ContainSubstring(`\) -prune -printf 'p %p\n' -o -printf '%y %p\n'`))
+				return &v1.ExecResponse{}, nil
+			}
+
+			_, err := tools["list_files"].Execute(ctx, &coding.ListFilesInput{})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("uses custom path and depth when provided", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				Expect(req.Command).To(HavePrefix("find 'src' -mindepth 1 -maxdepth 3 "))
+				return &v1.ExecResponse{}, nil
+			}
+
+			_, err := tools["list_files"].Execute(ctx, &coding.ListFilesInput{Path: "src", MaxDepth: 3})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("spells a dash-leading path so find reads it as a path", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				Expect(req.Command).To(HavePrefix("find './-weird' "))
+				return &v1.ExecResponse{}, nil
+			}
+
+			_, err := tools["list_files"].Execute(ctx, &coding.ListFilesInput{Path: "-weird"})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("caps max_entries at the ceiling", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				Expect(req.Command).To(HaveSuffix("| head -n 2001"))
+				return &v1.ExecResponse{}, nil
+			}
+
+			_, err := tools["list_files"].Execute(ctx, &coding.ListFilesInput{MaxEntries: 99999})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("says how many entries it left out", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				if strings.HasSuffix(req.Command, "| wc -l") {
+					Expect(req.Command).To(ContainSubstring("-prune -print -o -print"))
+					return &v1.ExecResponse{Stdout: "  48210\n"}, nil
+				}
+				var sb strings.Builder
+				for i := range 501 {
+					fmt.Fprintf(&sb, "f ./file%d.go\n", i)
+				}
+				return &v1.ExecResponse{Stdout: sb.String()}, nil
+			}
+
+			result, err := tools["list_files"].Execute(ctx, &coding.ListFilesInput{})
+			Expect(err).NotTo(HaveOccurred())
+
+			output := result.(*coding.ListFilesOutput)
+			Expect(output.Entries).To(HaveLen(500))
+			Expect(output.Overflow.TotalEntries).To(Equal(48210))
+			Expect(tools["list_files"].Render(result).Text).To(ContainSubstring("showing 500 of 48210 entries"))
+		})
+
+		It("keeps the entries when the count pass fails", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				if strings.HasSuffix(req.Command, "| wc -l") {
+					return nil, errors.New("runner is gone")
+				}
+				return &v1.ExecResponse{Stdout: strings.Repeat("f ./x.go\n", 501)}, nil
 			}
 
 			result, err := tools["list_files"].Execute(ctx, &coding.ListFilesInput{})
 			Expect(err).NotTo(HaveOccurred())
 			output := result.(*coding.ListFilesOutput)
-			Expect(output.Output).To(ContainSubstring("main.go"))
+			Expect(output.Entries).To(HaveLen(500))
+			Expect(output.Overflow).To(BeNil())
 		})
 
-		It("uses custom path when provided", func() {
-			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
-				Expect(req.Args[0]).To(Equal("src"))
-				return &v1.ExecResponse{ExitCode: 0, Stdout: ""}, nil
+		It("reports an empty directory plainly", func() {
+			runner.execFunc = func(_ context.Context, _ *v1.ExecRequest) (*v1.ExecResponse, error) {
+				return &v1.ExecResponse{}, nil
 			}
 
-			_, err := tools["list_files"].Execute(ctx, &coding.ListFilesInput{Path: "src"})
+			result, err := tools["list_files"].Execute(ctx, &coding.ListFilesInput{Path: "empty"})
 			Expect(err).NotTo(HaveOccurred())
+			Expect(tools["list_files"].Render(result).Text).To(Equal("Empty directory."))
+		})
+
+		It("surfaces what find complained about", func() {
+			runner.execFunc = func(_ context.Context, _ *v1.ExecRequest) (*v1.ExecResponse, error) {
+				return &v1.ExecResponse{Stderr: "find: 'nope': No such file or directory\n"}, nil
+			}
+
+			result, err := tools["list_files"].Execute(ctx, &coding.ListFilesInput{Path: "nope"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tools["list_files"].Render(result).Text).To(ContainSubstring("No such file or directory"))
 		})
 	})
 
@@ -649,8 +747,15 @@ var _ = Describe("CodingToolkit", func() {
 		})
 
 		It("clamps read-only tools too", func() {
-			runner.execFunc = func(_ context.Context, _ *v1.ExecRequest) (*v1.ExecResponse, error) {
-				return &v1.ExecResponse{Stdout: strings.Repeat("./file\n", 200000)}, nil
+			// A window's worth of very long lines: bounded in lines, not bytes.
+			runner.readFileFunc = func(_ context.Context, _ *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
+				lines := make([]*v1.TaggedLine, 0, 2000)
+				for i := range 2000 {
+					lines = append(lines, &v1.TaggedLine{
+						Line: int32(i + 1), Hash: "cedar", Content: strings.Repeat("x", 500),
+					})
+				}
+				return &v1.ReadFileResponse{Version: "v1", TotalLines: 2000, Lines: lines}, nil
 			}
 
 			readOnly := make(map[string]llms.ToolDef)
@@ -658,12 +763,13 @@ var _ = Describe("CodingToolkit", func() {
 				readOnly[t.Name()] = t
 			}
 
-			result, err := readOnly["list_files"].Execute(ctx, &coding.ListFilesInput{})
+			result, err := readOnly["read_file"].Execute(ctx, &coding.ReadFileInput{Path: "generated.go"})
 			Expect(err).NotTo(HaveOccurred())
 
-			rendered := readOnly["list_files"].Render(result)
-			Expect(len(rendered.Text)).To(BeNumerically("<", 40*1024))
+			rendered := readOnly["read_file"].Render(result)
+			Expect(len(rendered.Text)).To(BeNumerically("<", 160*1024))
 			Expect(rendered.Text).To(ContainSubstring("of this result omitted"))
+			Expect(rendered.Text).To(ContainSubstring("start_line"))
 		})
 	})
 
