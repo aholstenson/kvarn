@@ -148,6 +148,20 @@ chroot "$ROOTFS" apt-get install -y -qq --no-install-recommends \
     tar \
     >/dev/null 2>&1
 
+# Fonts. Headless Chromium aborts (FATAL in SkFontMgr_FontConfigInterface) the moment
+# Skia asks fontconfig for a face and gets nothing back, so a browser is unusable on a
+# font-less image however it was installed. fontconfig-config is what puts /etc/fonts in
+# place, which is where a browser from apt, npm, Nix or a container all look. Liberation
+# earns its 4 MB by being metric-compatible with Arial/Times New Roman/Courier New: pages
+# ask for those constantly, and substituted metrics shift line breaks enough that
+# screenshots stop matching what a person sees.
+chroot "$ROOTFS" apt-get install -y -qq --no-install-recommends \
+    fontconfig-config \
+    fonts-dejavu-core \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    >/dev/null 2>&1
+
 echo "==> Removing unnecessary packages..."
 chroot "$ROOTFS" apt-get purge -y -qq \
     unattended-upgrades \
@@ -328,8 +342,8 @@ substituters = https://cache.nixos.org
 trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
 NIXCONF
 
-# Expose the kvarn-user nix profile to system login shells (su -l, sh -l,
-# podman exec ... sh -l) so dependency-installed binaries land on PATH.
+# Expose the kvarn-user nix profile to system login shells (su -l, sh -l) so
+# dependency-installed binaries land on PATH.
 ln -sf /home/kvarn/.nix-profile/etc/profile.d/nix.sh \
     "$ROOTFS/etc/profile.d/nix.sh"
 
