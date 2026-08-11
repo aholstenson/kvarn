@@ -96,14 +96,14 @@ func (c *Cmd) Run() error {
 	if err != nil {
 		return fmt.Errorf("create llms manager: %w", err)
 	}
-	models, err := coding.ResolveModels(ctx, mgr, modeltoml.OpenDefault(c.AgentsFile), c.Model)
-	if err != nil {
+	modelResolver := coding.NewResolver(mgr, modeltoml.OpenDefault(c.AgentsFile), c.Model)
+	if _, err := modelResolver.Resolve(ctx); err != nil {
 		return err
 	}
 
 	return c.runWith(ctx, runDeps{
 		Provider: local.NewProvider(),
-		Agent:    coding.NewCodingAgent(models),
+		Agent:    coding.NewCodingAgent(modelResolver),
 		Mode:     mode,
 		Stdout:   os.Stdout,
 	})

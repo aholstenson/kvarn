@@ -232,8 +232,13 @@ func (c *Cmd) Run() error {
 	forgeStore := forgetoml.New(forgesPath)
 
 	agentsStore := modeltoml.OpenDefault(c.AgentsFile)
-	models, err := coding.ResolveModels(ctx, mgr, agentsStore, c.Model)
-	if err != nil {
+	modelResolver := coding.NewResolver(mgr, agentsStore, c.Model)
+
+	// Resolve once here so a bad model alias or a missing credential is
+	// reported at startup, by one clear message, rather than by whichever job
+	// happens to run first. Jobs resolve again as they start, so an edit made
+	// afterwards still applies without a restart.
+	if _, err := modelResolver.Resolve(ctx); err != nil {
 		return err
 	}
 
@@ -449,7 +454,7 @@ func (c *Cmd) Run() error {
 			"git":    forgegit.New(),
 		},
 		SessionMgr:          sessionMgr,
-		Agent:               coding.NewCodingAgent(models),
+		Agent:               coding.NewCodingAgent(modelResolver),
 		Transferer:          &transfer.StreamingTransferer{},
 		DefaultsStore:       agentsStore,
 		PricingManager:      llms.NewPricingManager(logger),

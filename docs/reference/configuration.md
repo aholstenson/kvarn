@@ -31,6 +31,12 @@ Every file is optional. A missing file behaves the same as an empty one.
 effect immediately with no restart. `orchestrator.toml` and `--sessions-db` are
 read once at startup.
 
+A job reads what it needs when it starts and keeps that for its whole run, so an
+edit applies to the next job rather than to jobs already in flight. This matters
+most for `agents.toml`: the model, reasoning effort and step budget a job runs
+with are fixed at the moment it starts, and its step budget spans every
+validation retry, not each turn separately.
+
 Writes go through a temp file and a rename, and writers hold a lock on
 `<file>.lock` for the whole load → modify → save sequence, so a `kvarn key
 create` racing the orchestrator (or another CLI invocation) can neither be read

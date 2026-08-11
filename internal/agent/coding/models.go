@@ -2,6 +2,8 @@ package coding
 
 import (
 	"context"
+	"log/slog"
+	"sync"
 
 	llms "github.com/aholstenson/llms-go"
 
@@ -103,6 +105,58 @@ func ResolveModels(ctx context.Context, mgr *llms.Manager, store ModelStore, mai
 		Agents:       agents,
 		AgentConfigs: agentCfgs,
 	}, nil
+}
+
+// Resolver produces the model set for a single job, re-reading agents.toml
+// every time so that an edit to a [models.*] or [agents.*] block reaches the
+// next job without restarting the orchestrator. This matches how the rest of
+// the file already behaves — [defaults] is read per job — and how an operator
+// reasonably expects a hand-edited config file to work.
+//
+// Resolutions are serialized. Resolving registers each class alias on the
+// shared llms.Manager and then reads models back out through that registry, so
+// two jobs resolving concurrently must not interleave those two halves and see
+// each other's aliases.
+//
+// A resolution that fails falls back to the last one that succeeded. agents.toml
+// is hand-edited while the orchestrator is running, and a file caught
+// mid-save — or a typo — should cost the operator a warning rather than every
+// job that happens to start before they fix it.
+type Resolver struct {
+	mgr          *llms.Manager
+	store        ModelStore
+	mainOverride string
+
+	mu       sync.Mutex
+	last     Models
+	haveLast bool
+}
+
+// NewResolver creates a Resolver reading from store. mainOverride, when
+// non-empty, picks the model the balanced class resolves to, which is what
+// `--model` sets.
+func NewResolver(mgr *llms.Manager, store ModelStore, mainOverride string) *Resolver {
+	return &Resolver{mgr: mgr, store: store, mainOverride: mainOverride}
+}
+
+// Resolve returns the model set a job should run with. The first call has no
+// previous set to fall back on, so it reports configuration errors to the
+// caller; callers resolve once at startup for exactly that reason.
+func (r *Resolver) Resolve(ctx context.Context) (Models, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	models, err := ResolveModels(ctx, r.mgr, r.store, r.mainOverride)
+	if err != nil {
+		if !r.haveLast {
+			return Models{}, err
+		}
+		slog.Warn("failed to reload agent model config; running with the last configuration that loaded", "error", err)
+		return r.last, nil
+	}
+	r.last = models
+	r.haveLast = true
+	return models, nil
 }
 
 // DefaultAgentClasses maps each sub-agent to the class it runs on unless an

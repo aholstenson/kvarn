@@ -51,14 +51,14 @@ type SummarySection struct {
 
 // CodingAgent is an LLM-powered agent that can modify files in a VM.
 type CodingAgent struct {
-	models Models
+	resolver *Resolver
 }
 
-// NewCodingAgent creates a new coding agent from a resolved model set. Classes
-// must contain at least ModelMain, and Agents an entry for every sub-agent the
-// run can spawn — see ResolveModels, which produces both.
-func NewCodingAgent(models Models) *CodingAgent {
-	return &CodingAgent{models: models}
+// NewCodingAgent creates a new coding agent that draws its model set from
+// resolver. The set is resolved once per conversation rather than held for the
+// lifetime of the agent, so configuration edits apply to the next job.
+func NewCodingAgent(resolver *Resolver) *CodingAgent {
+	return &CodingAgent{resolver: resolver}
 }
 
 // Start opens a stateful llms.Session so the orchestrator can drive multiple
@@ -67,6 +67,15 @@ func NewCodingAgent(models Models) *CodingAgent {
 // validation-failure retries productive — the agent sees what it tried last
 // time.
 func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent.Conversation, error) {
+	// Resolved once here and then carried by the conversation: every turn of a
+	// job, including the closing summary call, runs on the configuration the
+	// job started with, so an edit landing mid-job cannot change the model or
+	// the step budget out from under a session already in progress.
+	models, err := a.resolver.Resolve(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve agent models: %w", err)
+	}
+
 	var skills []repocontext.Skill
 	if agentCtx.RepoContext != nil {
 		skills = agentCtx.RepoContext.Skills
@@ -86,15 +95,15 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 		WorkingDir:   agentCtx.WorkingDir,
 		SessionID:    agentCtx.SessionID,
 		Skills:       skills,
-		AgentModels:  a.models.Agents,
-		AgentConfigs: a.models.AgentConfigs,
+		AgentModels:  models.Agents,
+		AgentConfigs: models.AgentConfigs,
 		SubAgents:    subAgents,
 		RepoCtx:      agentCtx.RepoContext,
 		Tracker:      agentCtx.Cost,
 	})
 	systemPrompt := mode.SystemPrompt(agentCtx.ProjectName, agentCtx.RepoURL, agentCtx.Branch, agentCtx.RepoContext, subAgents, agentCtx.PullRequest)
 
-	mainCfg := a.models.ClassConfigs[ModelMain]
+	mainCfg := models.ClassConfigs[ModelMain]
 	maxOut := mainCfg.MaxOutputTokens
 	if maxOut == 0 {
 		maxOut = 16384
@@ -105,7 +114,7 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 	}
 
 	c := &codingConversation{
-		agent:    a,
+		models:   models,
 		agentCtx: agentCtx,
 		mode:     mode,
 		mainCfg:  mainCfg,
@@ -131,7 +140,7 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 		opts = append(opts, llms.WithStreamingFunc(c.handleStreamingEvent))
 	}
 
-	mainModel := a.models.Classes[ModelMain]
+	mainModel := models.Classes[ModelMain]
 	sessCtx := ctx
 	if agentCtx.Cost != nil {
 		sessCtx = llms.WithMetrics(sessCtx, agentCtx.Cost.Recorder())
@@ -149,7 +158,7 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 // turns. The streaming-event handler reuses the same per-agent text buffers
 // across calls so partial-message text never leaks between turns.
 type codingConversation struct {
-	agent    *CodingAgent
+	models   Models
 	agentCtx *agent.Context
 	mode     *Mode
 	mainCfg  modelcfg.Entry
@@ -304,7 +313,7 @@ func (c *codingConversation) requestSummary(
 		opts = append(opts, llms.WithReasoningEffort(c.mainCfg.ReasoningEffort))
 	}
 
-	mainModel := c.agent.models.Classes[ModelMain]
+	mainModel := c.models.Classes[ModelMain]
 	result, err := mainModel.GenerateContent(ctx, opts...)
 	if c.agentCtx.Cost != nil {
 		c.agentCtx.Cost.CheckBudget()

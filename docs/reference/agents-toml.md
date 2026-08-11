@@ -4,7 +4,16 @@ Model classes for the coding agent, the per-agent overrides layered on them,
 and the user-level defaults that projects inherit for cost and retry limits.
 
 Default location `~/.config/kvarn/agents.toml`, overridable with
-`--agents-file`. Re-read on every request.
+`--agents-file`. Re-read on every request: a job resolves its models as it
+starts, so an edit reaches the next job without restarting the orchestrator. A
+job already running keeps the settings it started with.
+
+The orchestrator also resolves this file once at startup and refuses to boot if
+it cannot — an unknown class name or a model whose provider has no credential is
+worth hearing about immediately rather than one failed job later. Once it is
+running the stance flips: a file that stops parsing, or that names something
+unresolvable, is logged and the last configuration that loaded stays in use, so
+a half-saved edit does not take the queue down with it.
 
 ## Model classes
 
