@@ -3,6 +3,7 @@ package coding_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -316,11 +317,10 @@ var _ = Describe("CodingToolkit", func() {
 	})
 
 	Describe("search_files", func() {
-		It("runs grep command via runner", func() {
+		It("runs ripgrep via the runner and returns the matches", func() {
 			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
-				Expect(req.Command).To(Equal("grep"))
-				Expect(req.Args).To(ContainElement("-rn"))
-				Expect(req.Args).To(ContainElement("TODO"))
+				Expect(req.Command).To(HavePrefix("rg "))
+				Expect(req.Command).To(ContainSubstring("-e 'TODO'"))
 				Expect(req.WorkingDir).To(Equal("/home/kvarn/workspace"))
 				return &v1.ExecResponse{ExitCode: 0, Stdout: "main.go:10:// TODO: fix this\n"}, nil
 			}
@@ -328,13 +328,26 @@ var _ = Describe("CodingToolkit", func() {
 			result, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{Pattern: "TODO"})
 			Expect(err).NotTo(HaveOccurred())
 			output := result.(*coding.SearchFilesOutput)
-			Expect(output.Output).To(ContainSubstring("TODO"))
+			Expect(output.Matches).To(Equal([]string{"main.go:10:// TODO: fix this"}))
+			Expect(output.Overflow).To(BeNil())
+			Expect(tools["search_files"].Render(result).Text).To(ContainSubstring("TODO"))
+		})
+
+		It("skips .git and searches other hidden files", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				Expect(req.Command).To(ContainSubstring("--hidden"))
+				Expect(req.Command).To(ContainSubstring("--glob='!.git/'"))
+				return &v1.ExecResponse{}, nil
+			}
+
+			_, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{Pattern: "x"})
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("includes glob filter when provided", func() {
 			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
-				Expect(req.Args).To(ContainElement("--include=*.go"))
-				return &v1.ExecResponse{ExitCode: 0, Stdout: ""}, nil
+				Expect(req.Command).To(ContainSubstring("--glob='*.go'"))
+				return &v1.ExecResponse{}, nil
 			}
 
 			_, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{
@@ -342,6 +355,154 @@ var _ = Describe("CodingToolkit", func() {
 				Glob:    "*.go",
 			})
 			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("passes a pattern and path that start with a dash as operands", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				Expect(req.Command).To(ContainSubstring("-e '--exclude' -- '-weird-dir'"))
+				return &v1.ExecResponse{}, nil
+			}
+
+			_, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{
+				Pattern: "--exclude",
+				Path:    "-weird-dir",
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("quotes a pattern containing shell metacharacters", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				Expect(req.Command).To(ContainSubstring(`-e 'rm -rf /; echo '\''pwned'\'''`))
+				return &v1.ExecResponse{}, nil
+			}
+
+			_, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{
+				Pattern: "rm -rf /; echo 'pwned'",
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("bounds the result count and asks for one extra line to detect overflow", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				Expect(req.Command).To(HaveSuffix("| head -n 101"))
+				return &v1.ExecResponse{}, nil
+			}
+
+			_, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{Pattern: "x"})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("caps max_results at the ceiling", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				Expect(req.Command).To(HaveSuffix("| head -n 1001"))
+				return &v1.ExecResponse{}, nil
+			}
+
+			_, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{
+				Pattern:    "x",
+				MaxResults: 100000,
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("describes the size and shape of an overflowing search", func() {
+			var counted bool
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				if strings.Contains(req.Command, "--count") {
+					counted = true
+					Expect(req.Command).NotTo(ContainSubstring("head -n"))
+					return &v1.ExecResponse{Stdout: "gen/api.pb.go:600\ninternal/a.go:40\ninternal/b.go:9\ncmd/c.go:1\n"}, nil
+				}
+				var sb strings.Builder
+				for i := range 101 {
+					fmt.Fprintf(&sb, "file%d.go:1:match\n", i)
+				}
+				return &v1.ExecResponse{Stdout: sb.String()}, nil
+			}
+
+			result, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{Pattern: "match"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(counted).To(BeTrue())
+
+			output := result.(*coding.SearchFilesOutput)
+			Expect(output.Matches).To(HaveLen(100))
+			Expect(output.Overflow.TotalMatches).To(Equal(650))
+			Expect(output.Overflow.TotalFiles).To(Equal(4))
+			Expect(output.Overflow.TopFiles).To(HaveLen(3))
+			Expect(output.Overflow.TopFiles[0].Path).To(Equal("gen/api.pb.go"))
+
+			text := tools["search_files"].Render(result).Text
+			Expect(text).To(ContainSubstring("showing 100 of 650 matches across 4 files"))
+			Expect(text).To(ContainSubstring("gen/api.pb.go (600)"))
+			Expect(text).To(ContainSubstring("files_only"))
+		})
+
+		It("reports overflow totals as a floor when the count pass is itself capped", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				if strings.Contains(req.Command, "--count") {
+					return &v1.ExecResponse{Stdout: "a.go:5\nb.go:5\n", StdoutTotalBytes: 999999}, nil
+				}
+				return &v1.ExecResponse{Stdout: strings.Repeat("f.go:1:m\n", 101)}, nil
+			}
+
+			result, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{Pattern: "m"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.(*coding.SearchFilesOutput).Overflow.Approximate).To(BeTrue())
+			Expect(tools["search_files"].Render(result).Text).To(ContainSubstring("at least"))
+		})
+
+		It("keeps the matches when the count pass fails", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				if strings.Contains(req.Command, "--count") {
+					return nil, errors.New("runner is gone")
+				}
+				return &v1.ExecResponse{Stdout: strings.Repeat("f.go:1:m\n", 101)}, nil
+			}
+
+			result, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{Pattern: "m"})
+			Expect(err).NotTo(HaveOccurred())
+			output := result.(*coding.SearchFilesOutput)
+			Expect(output.Matches).To(HaveLen(100))
+			Expect(output.Overflow).To(BeNil())
+		})
+
+		It("lists files when files_only is set", func() {
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				Expect(req.Command).To(ContainSubstring("--files-with-matches"))
+				Expect(req.Command).NotTo(ContainSubstring("--line-number"))
+				return &v1.ExecResponse{Stdout: "main.go\ninternal/a.go\n"}, nil
+			}
+
+			result, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{
+				Pattern:   "TODO",
+				FilesOnly: true,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.(*coding.SearchFilesOutput).Matches).To(HaveLen(2))
+			Expect(tools["search_files"].Render(result).Text).To(Equal("main.go\ninternal/a.go\n"))
+		})
+
+		It("reports no matches plainly", func() {
+			runner.execFunc = func(_ context.Context, _ *v1.ExecRequest) (*v1.ExecResponse, error) {
+				return &v1.ExecResponse{ExitCode: 1}, nil
+			}
+
+			result, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{Pattern: "nothing"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tools["search_files"].Render(result).Text).To(Equal("No matches."))
+		})
+
+		It("surfaces what the search complained about", func() {
+			runner.execFunc = func(_ context.Context, _ *v1.ExecRequest) (*v1.ExecResponse, error) {
+				return &v1.ExecResponse{Stderr: "rg: nope/: No such file or directory\n"}, nil
+			}
+
+			result, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{
+				Pattern: "x",
+				Path:    "nope/",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tools["search_files"].Render(result).Text).To(ContainSubstring("No such file or directory"))
 		})
 	})
 
@@ -369,17 +530,17 @@ var _ = Describe("CodingToolkit", func() {
 		It("clamps a result that arrives oversized anyway", func() {
 			// A runner that ignores the cap stands in for anything that could
 			// put more in front of the model than it asked for.
-			runner.execFunc = func(_ context.Context, _ *v1.ExecRequest) (*v1.ExecResponse, error) {
-				return &v1.ExecResponse{Stdout: strings.Repeat("match\n", 200000)}, nil
+			runner.sessionExecFunc = func(_ context.Context, _ *v1.SessionExecRequest) (*v1.SessionExecResponse, error) {
+				return &v1.SessionExecResponse{Stdout: strings.Repeat("chatty build line\n", 100000)}, nil
 			}
 
-			result, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{Pattern: "match"})
+			result, err := tools["exec_command"].Execute(ctx, &coding.ExecCommandInput{Command: "make"})
 			Expect(err).NotTo(HaveOccurred())
 
-			rendered := tools["search_files"].Render(result)
+			rendered := tools["exec_command"].Render(result)
 			Expect(len(rendered.Text)).To(BeNumerically("<", 40*1024))
 			Expect(rendered.Text).To(ContainSubstring("of this result omitted"))
-			Expect(rendered.Text).To(ContainSubstring("search a narrower path or glob"))
+			Expect(rendered.Text).To(ContainSubstring("re-run with the output narrowed"))
 		})
 
 		It("clamps read-only tools too", func() {

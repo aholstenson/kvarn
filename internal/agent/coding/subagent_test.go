@@ -3,6 +3,7 @@ package coding_test
 import (
 	"context"
 	"errors"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -317,5 +318,33 @@ var _ = Describe("SubAgent definitions", func() {
 		Expect(names).To(HaveKey("list_files"))
 		Expect(names).To(HaveKey("search_files"))
 		Expect(names).NotTo(HaveKey("write_file"))
+	})
+
+	It("bounds sub-agent tool results too", func() {
+		runner := &mockRunner{
+			execFunc: func(_ context.Context, _ *v1.ExecRequest) (*v1.ExecResponse, error) {
+				return &v1.ExecResponse{Stdout: strings.Repeat("./some/path.go\n", 100000)}, nil
+			},
+		}
+		deps := coding.SubAgentDeps{
+			Runner:     runner,
+			WorkingDir: "/home/kvarn/workspace",
+			SessionID:  "sub-sess",
+		}
+
+		var listFiles llms.ToolDef
+		for _, t := range coding.Explore.Tools(deps) {
+			if t.Name() == "list_files" {
+				listFiles = t
+			}
+		}
+		Expect(listFiles).NotTo(BeNil())
+
+		result, err := listFiles.Execute(context.Background(), &coding.ListFilesInput{})
+		Expect(err).NotTo(HaveOccurred())
+
+		rendered := listFiles.Render(result)
+		Expect(len(rendered.Text)).To(BeNumerically("<", 40*1024))
+		Expect(rendered.Text).To(ContainSubstring("of this result omitted"))
 	})
 })

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -623,14 +624,70 @@ func (t *listFilesTool) Render(o *ListFilesOutput) llms.ToolResult {
 
 // search_files
 
+// The search runs ripgrep, which the VM image installs. Beyond being fast it
+// is the tool whose defaults already match what a search of a working copy
+// should mean: binary files skipped, .gitignore honored, so a pattern that
+// happens to occur in a vendored bundle or a build artifact does not bury the
+// occurrences in the source.
+const (
+	// defaultSearchResults is how many matches come back when the caller does
+	// not ask for a number. Enough to see a pattern's shape, small enough that
+	// a broad search is a cheap mistake rather than an expensive one.
+	defaultSearchResults = 100
+	// maxSearchResults is the ceiling on max_results. Past this the answer to
+	// "there are too many matches" is a narrower search, not a longer list.
+	maxSearchResults = 1000
+	// searchLineColumns truncates long matching lines. A minified bundle or a
+	// generated table can carry a match on a line thousands of columns wide,
+	// and none of those columns are the reason the search was run.
+	searchLineColumns = 200
+	// searchTopFiles is how many of the heaviest files the overflow summary
+	// names — enough to point at where the matches live.
+	searchTopFiles = 3
+	// searchCountsBytes bounds the per-file count query behind the overflow
+	// summary. Its output is one short line per matching file, so this is
+	// reached only by a search matching tens of thousands of files, which the
+	// summary then reports as a floor rather than an exact total.
+	searchCountsBytes = 64 * 1024
+)
+
 type SearchFilesInput struct {
-	Pattern string `json:"pattern" jsonschema:"description=Regex pattern to search for"`
-	Path    string `json:"path,omitempty" jsonschema:"description=Directory path to search in relative to workspace root. Defaults to root if empty."`
-	Glob    string `json:"glob,omitempty" jsonschema:"description=File glob filter (e.g. *.go or *.py)"`
+	Pattern    string `json:"pattern" jsonschema:"description=Regex pattern to search for. Ripgrep syntax."`
+	Path       string `json:"path,omitempty" jsonschema:"description=Directory or file path to search in relative to workspace root. Defaults to the whole workspace."`
+	Glob       string `json:"glob,omitempty" jsonschema:"description=Glob filter (e.g. *.go or **/testdata/*). A glob without a slash matches by file name at any depth."`
+	MaxResults int    `json:"max_results,omitempty" jsonschema:"description=Maximum matches to return. Defaults to 100 and is capped at 1000."`
+	FilesOnly  bool   `json:"files_only,omitempty" jsonschema:"description=Return just the paths of files containing a match instead of the matching lines. Use this to find where something lives."`
+}
+
+// FileMatchCount is one file's share of the matches, used to point at where an
+// overflowing search's results are concentrated.
+type FileMatchCount struct {
+	Path    string
+	Matches int
+}
+
+// SearchOverflow describes the matches a search could not return. It is
+// gathered from a second, counting-only pass, so the model is told the size and
+// the shape of what it is missing rather than being handed a silent prefix.
+type SearchOverflow struct {
+	TotalMatches int
+	TotalFiles   int
+	TopFiles     []FileMatchCount
+	// Approximate is set when the counting pass hit its own output cap, making
+	// the totals a floor rather than an exact figure.
+	Approximate bool
 }
 
 type SearchFilesOutput struct {
-	Output string
+	// Matches is one result per entry: "path:line:text", or a bare path when
+	// FilesOnly.
+	Matches []string
+	// Overflow is set only when matches were left out.
+	Overflow *SearchOverflow
+	// Failure carries what the search itself complained about — an unreadable
+	// path, an invalid pattern.
+	Failure   string
+	FilesOnly bool
 }
 
 type searchFilesTool struct {
@@ -639,28 +696,28 @@ type searchFilesTool struct {
 
 func (t *searchFilesTool) Name() string { return "search_files" }
 func (t *searchFilesTool) Description() string {
-	return "Search for a regex pattern across files. Returns matching lines with file paths and line numbers. Supports optional file glob filter."
+	return `Search for a regex pattern across the workspace. Returns matching lines as "path:line:text", newest-first by directory walk order.
+
+Binary files are skipped and .gitignore is respected, so build output and vendored dependencies stay out of the results. Hidden files are searched; the .git directory is not.
+
+Results are capped (100 by default, max_results up to 1000). When there are more matches than fit, the response says how many there are in total and which files hold most of them — narrow the search with path or glob rather than asking for a longer list. Set files_only to get just the paths of matching files, which is usually the faster way to find where something lives.`
 }
 func (t *searchFilesTool) Schema() *SearchFilesInput { return &SearchFilesInput{} }
 
 func (t *searchFilesTool) Execute(ctx context.Context, input *SearchFilesInput) (*SearchFilesOutput, error) {
-	args := []string{"-rn"}
-
-	if input.Glob != "" {
-		args = append(args, "--include="+input.Glob)
+	limit := input.MaxResults
+	if limit <= 0 {
+		limit = defaultSearchResults
 	}
+	limit = min(limit, maxSearchResults)
 
-	args = append(args, input.Pattern)
+	out := &SearchFilesOutput{FilesOnly: input.FilesOnly}
 
-	dir := "."
-	if input.Path != "" {
-		dir = input.Path
-	}
-	args = append(args, dir)
-
+	// One line more than the limit is requested so overflow is known from the
+	// search itself: exactly limit matches is a complete answer, one more than
+	// that is a truncated one.
 	resp, err := t.toolkit.runner.Exec(ctx, &v1.ExecRequest{
-		Command:        "grep",
-		Args:           args,
+		Command:        t.searchCommand(input, limit+1),
 		WorkingDir:     t.toolkit.workingDir,
 		MaxOutputBytes: uint32(limitForTool(t.Name()).bytes),
 	})
@@ -668,15 +725,176 @@ func (t *searchFilesTool) Execute(ctx context.Context, input *SearchFilesInput) 
 		return nil, err
 	}
 
-	output := resp.Stdout
-	if resp.Stderr != "" {
-		output += "\n" + resp.Stderr
+	lines := splitNonEmptyLines(resp.Stdout)
+	if len(lines) == 0 && strings.TrimSpace(resp.Stderr) != "" {
+		out.Failure = strings.TrimSpace(resp.Stderr)
+		return out, nil
 	}
-	return &SearchFilesOutput{Output: output}, nil
+
+	if len(lines) > limit {
+		out.Matches = lines[:limit]
+		out.Overflow = t.countMatches(ctx, input)
+	} else {
+		out.Matches = lines
+	}
+	return out, nil
+}
+
+// searchCommand builds the ripgrep pipeline for one search.
+//
+// The line limit is applied by head rather than in Go so that it bounds the
+// work as well as the answer: ripgrep stops on the closed pipe instead of
+// walking the rest of a large repository to produce matches nobody will read.
+func (t *searchFilesTool) searchCommand(input *SearchFilesInput, lines int) string {
+	args := []string{"rg"}
+	args = append(args, t.filterArgs(input)...)
+	if input.FilesOnly {
+		args = append(args, "--files-with-matches")
+	} else {
+		args = append(args,
+			"--line-number",
+			"--no-heading",
+			"--max-columns="+strconv.Itoa(searchLineColumns),
+			"--max-columns-preview",
+		)
+	}
+	args = append(args, t.patternArgs(input)...)
+
+	return strings.Join(args, " ") + " | head -n " + strconv.Itoa(lines)
+}
+
+// filterArgs are the flags shared by the search and the counting pass, so the
+// summary describes the same set of files the search looked at.
+//
+// Hidden files are searched because a workspace keeps real content in dotted
+// directories — CI workflows, agent skills — but .git is excluded explicitly:
+// ripgrep only leaves it alone while hidden files are off.
+func (t *searchFilesTool) filterArgs(input *SearchFilesInput) []string {
+	args := []string{"--color=never", "--hidden", "--glob=" + shellQuote("!.git/")}
+	if input.Glob != "" {
+		args = append(args, "--glob="+shellQuote(input.Glob))
+	}
+	return args
+}
+
+// patternArgs terminate the command line: -e keeps a pattern that begins with a
+// dash from being read as a flag, and -- does the same for the path.
+func (t *searchFilesTool) patternArgs(input *SearchFilesInput) []string {
+	dir := "."
+	if input.Path != "" {
+		dir = input.Path
+	}
+	return []string{"-e", shellQuote(input.Pattern), "--", shellQuote(dir)}
+}
+
+// countMatches runs a second, counting-only pass to describe what the truncated
+// search left behind. Its output is one line per matching file, which is a
+// fraction of the size of the matches themselves.
+//
+// A failure here costs the summary, not the search: the matches already in hand
+// are still worth returning.
+func (t *searchFilesTool) countMatches(ctx context.Context, input *SearchFilesInput) *SearchOverflow {
+	args := append([]string{"rg", "--count"}, t.filterArgs(input)...)
+	args = append(args, t.patternArgs(input)...)
+
+	resp, err := t.toolkit.runner.Exec(ctx, &v1.ExecRequest{
+		Command:        strings.Join(args, " "),
+		WorkingDir:     t.toolkit.workingDir,
+		MaxOutputBytes: searchCountsBytes,
+	})
+	if err != nil {
+		return nil
+	}
+
+	overflow := &SearchOverflow{Approximate: resp.StdoutTotalBytes > 0}
+	for _, line := range splitNonEmptyLines(resp.Stdout) {
+		// "path:count". A line that does not parse is the cap's marker or a
+		// path containing a colon oddity; skipping it costs one file's share of
+		// a total that is already labeled approximate.
+		idx := strings.LastIndexByte(line, ':')
+		if idx < 0 {
+			continue
+		}
+		count, convErr := strconv.Atoi(line[idx+1:])
+		if convErr != nil {
+			continue
+		}
+		overflow.TotalFiles++
+		overflow.TotalMatches += count
+		overflow.TopFiles = append(overflow.TopFiles, FileMatchCount{Path: line[:idx], Matches: count})
+	}
+
+	if overflow.TotalFiles == 0 {
+		return nil
+	}
+
+	slices.SortFunc(overflow.TopFiles, func(a, b FileMatchCount) int {
+		if a.Matches != b.Matches {
+			return b.Matches - a.Matches
+		}
+		return strings.Compare(a.Path, b.Path)
+	})
+	overflow.TopFiles = overflow.TopFiles[:min(searchTopFiles, len(overflow.TopFiles))]
+	return overflow
 }
 
 func (t *searchFilesTool) Render(o *SearchFilesOutput) llms.ToolResult {
-	return llms.TextToolResult(o.Output)
+	if o.Failure != "" {
+		return llms.TextToolResult("search_files failed: " + o.Failure)
+	}
+	if len(o.Matches) == 0 {
+		return llms.TextToolResult("No matches.")
+	}
+
+	var sb strings.Builder
+	for _, m := range o.Matches {
+		sb.WriteString(m)
+		sb.WriteString("\n")
+	}
+
+	if o.Overflow == nil {
+		return llms.TextToolResult(sb.String())
+	}
+
+	about := ""
+	if o.Overflow.Approximate {
+		about = "at least "
+	}
+	if o.FilesOnly {
+		fmt.Fprintf(&sb, "\n[kvarn: showing %d of %s%d files, holding %s%d matches.",
+			len(o.Matches), about, o.Overflow.TotalFiles, about, o.Overflow.TotalMatches)
+	} else {
+		fmt.Fprintf(&sb, "\n[kvarn: showing %d of %s%d matches across %s%d files.",
+			len(o.Matches), about, o.Overflow.TotalMatches, about, o.Overflow.TotalFiles)
+	}
+	if len(o.Overflow.TopFiles) > 0 {
+		sb.WriteString(" Most matches:")
+		for i, f := range o.Overflow.TopFiles {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, " %s (%d)", f.Path, f.Matches)
+		}
+		sb.WriteString(".")
+	}
+	sb.WriteString(" Narrow the search with path or glob, or use a more specific pattern")
+	if !o.FilesOnly {
+		sb.WriteString("; files_only lists the matching files instead")
+	}
+	sb.WriteString(".]\n")
+
+	return llms.TextToolResult(sb.String())
+}
+
+// splitNonEmptyLines splits command output into lines, dropping blank ones.
+func splitNonEmptyLines(s string) []string {
+	var lines []string
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 // activate_skill

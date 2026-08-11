@@ -56,9 +56,11 @@ func readOnlyTools(deps SubAgentDeps) []llms.ToolDef {
 		skills:     deps.Skills,
 		tasks:      NewTaskList(),
 	}
-	return []llms.ToolDef{
+	// Guarded like the parent's toolkit: a sub-agent has its own conversation
+	// to fill up, and an unbounded result ends its run just as surely.
+	return tk.guard([]llms.ToolDef{
 		llms.NewToolDef(&readFileTool{toolkit: tk}),
 		llms.NewToolDef(&listFilesTool{toolkit: tk}),
 		llms.NewToolDef(&searchFilesTool{toolkit: tk}),
-	}
+	})
 }
