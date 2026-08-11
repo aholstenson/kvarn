@@ -320,7 +320,7 @@ func computeAugmentations(deps []project.ResolvedDep) augmentations {
 	})
 
 	for _, d := range sorted {
-		if !strings.HasPrefix(d.FlakeURI, "github:NixOS/nixpkgs/") {
+		if !strings.HasPrefix(d.FlakeURI, project.NixpkgsFlakePrefix) {
 			continue
 		}
 		name, entry, ok := lookupToolNamed(d.Attr)

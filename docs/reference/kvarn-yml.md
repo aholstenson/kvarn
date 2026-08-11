@@ -51,7 +51,7 @@ dependencies:
   nixpkgs:
     - go
     - nodejs
-  nixpkgs/nixos-24.11:
+  nixpkgs/nixos-25.11:
     - python312
   github:owner/repo:
     - some-attr
@@ -62,8 +62,8 @@ it. Accepted source forms:
 
 | Form | Notes |
 | --- | --- |
-| `nixpkgs` | Resolves to the built-in default channel (`nixos-25.11`). |
-| `nixpkgs/<channel>` | e.g. `nixpkgs/nixos-24.11`. |
+| `nixpkgs` | Resolves to the built-in default channel (`nixos-26.05`). |
+| `nixpkgs/<channel>` | Pins a different channel, e.g. `nixpkgs/nixos-25.11` or `nixpkgs/nixos-unstable`. |
 | `github:owner/repo` | |
 | `gitlab:owner/repo` | |
 | `git+https://…`, `git+ssh://…` | |

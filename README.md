@@ -282,7 +282,7 @@ Important constraints:
 
 - `vm.cpus` defaults to `2`, `vm.memory` to `4G`, and `vm.disk` to `16G`. Set them only when a job needs more (or less) than the defaults.
 - `image` and `dependencies` are mutually exclusive.
-- `dependencies` keys may be `nixpkgs`, `nixpkgs/<channel>` (e.g. `nixpkgs/nixos-24.11`), `github:owner/repo`, `gitlab:owner/repo`, `git+https://…`, `git+ssh://…`, `https://…`, or `tarball+https://…`.
+- `dependencies` keys may be `nixpkgs`, `nixpkgs/<channel>` (e.g. `nixpkgs/nixos-25.11`), `github:owner/repo`, `gitlab:owner/repo`, `git+https://…`, `git+ssh://…`, `https://…`, or `tarball+https://…`.
 - `network.allowed_hosts` entries are hostnames, IP addresses, or a `*.domain` wildcard; do not include a scheme, path, or port.
 - `cache.paths` entries may be absolute guest paths, `~`-relative paths, or paths relative to the workspace. The workspace root itself and anything under `/nix` are rejected. The same rule applies to `cache.entries[*].path`.
 - `environment` keys and `secrets` names must be valid POSIX environment variable names.

@@ -26,8 +26,6 @@ type ToolEntry struct {
 // when the attribute is not a registered tool.
 type LookupFunc func(attr string) (ToolEntry, bool)
 
-const nixpkgsPrefix = "github:NixOS/nixpkgs/"
-
 // skipGlobDirs are never descended into when globbing for lockfiles: they hold
 // vendored or build output whose nested lockfiles would pollute the input key.
 var skipGlobDirs = map[string]bool{
@@ -84,14 +82,14 @@ func DeriveLayers(
 	})
 
 	for _, d := range sorted {
-		if !strings.HasPrefix(d.FlakeURI, nixpkgsPrefix) {
+		if !strings.HasPrefix(d.FlakeURI, project.NixpkgsFlakePrefix) {
 			continue
 		}
 		entry, ok := lookup(d.Attr)
 		if !ok || len(entry.CachePaths) == 0 {
 			continue
 		}
-		channel := strings.TrimPrefix(d.FlakeURI, nixpkgsPrefix)
+		channel := strings.TrimPrefix(d.FlakeURI, project.NixpkgsFlakePrefix)
 		inputKey, err := deriveToolInputKey(sourceDir, entry.Bucket, entry.Lockfiles, channel)
 		if err != nil {
 			return nil, err
@@ -164,11 +162,11 @@ func deriveNixEvalInputKey(deps []project.ResolvedDep) (string, bool) {
 	var refs []string
 	channels := map[string]bool{}
 	for _, d := range deps {
-		if !strings.HasPrefix(d.FlakeURI, nixpkgsPrefix) {
+		if !strings.HasPrefix(d.FlakeURI, project.NixpkgsFlakePrefix) {
 			continue
 		}
 		refs = append(refs, d.FlakeURI+"#"+d.Attr)
-		channels[strings.TrimPrefix(d.FlakeURI, nixpkgsPrefix)] = true
+		channels[strings.TrimPrefix(d.FlakeURI, project.NixpkgsFlakePrefix)] = true
 	}
 	if len(refs) == 0 {
 		return "", false

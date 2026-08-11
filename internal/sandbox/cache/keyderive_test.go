@@ -13,10 +13,10 @@ import (
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
 )
 
-const testChannel = "nixos-25.11"
+const testChannel = project.DefaultNixpkgsChannel
 
 func goDeps() []project.ResolvedDep {
-	return []project.ResolvedDep{{FlakeURI: "github:NixOS/nixpkgs/" + testChannel, Attr: "go"}}
+	return []project.ResolvedDep{{FlakeURI: project.NixpkgsFlakePrefix + testChannel, Attr: "go"}}
 }
 
 func goLookup(attr string) (cache.ToolEntry, bool) {

@@ -30,7 +30,7 @@ var _ = Describe("InstallDependencies", func() {
 	It("issues a single nix profile install for one attribute", func() {
 		deps := []project.ResolvedDep{
 			{
-				FlakeURI: "github:NixOS/nixpkgs/nixos-25.11",
+				FlakeURI: project.DefaultNixpkgsFlake,
 				Attr:     "hello",
 				Host:     "github.com",
 			},
@@ -46,14 +46,14 @@ var _ = Describe("InstallDependencies", func() {
 		Expect(req.Args).To(HaveLen(7))
 		Expect(req.Args[:4]).To(Equal([]string{"-l", "-s", "/bin/sh", "-c"}))
 		Expect(req.Args[4]).To(ContainSubstring("nix profile add"))
-		Expect(req.Args[4]).To(ContainSubstring("github:NixOS/nixpkgs/nixos-25.11#hello"))
+		Expect(req.Args[4]).To(ContainSubstring(project.DefaultNixpkgsFlake + "#hello"))
 		Expect(req.Args[5:]).To(Equal([]string{"--", "kvarn"}))
 	})
 
 	It("merges multiple sources into one nix profile install", func() {
 		deps := []project.ResolvedDep{
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "nodejs", Host: "github.com"},
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "go", Host: "github.com"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "nodejs", Host: "github.com"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "go", Host: "github.com"},
 			{FlakeURI: "github:NixOS/nixpkgs/nixos-unstable", Attr: "bun", Host: "github.com"},
 		}
 		err := sandbox.InstallDependencies(ctx, proxy, deps, nil)
@@ -61,8 +61,8 @@ var _ = Describe("InstallDependencies", func() {
 		Expect(proxy.execCalls).To(HaveLen(1))
 
 		cmd := proxy.execCalls[0].Args[4]
-		Expect(cmd).To(ContainSubstring("github:NixOS/nixpkgs/nixos-25.11#nodejs"))
-		Expect(cmd).To(ContainSubstring("github:NixOS/nixpkgs/nixos-25.11#go"))
+		Expect(cmd).To(ContainSubstring(project.DefaultNixpkgsFlake + "#nodejs"))
+		Expect(cmd).To(ContainSubstring(project.DefaultNixpkgsFlake + "#go"))
 		Expect(cmd).To(ContainSubstring("github:NixOS/nixpkgs/nixos-unstable#bun"))
 	})
 
@@ -73,7 +73,7 @@ var _ = Describe("InstallDependencies", func() {
 			Stderr:   "warning: foo",
 		}, nil)
 		deps := []project.ResolvedDep{
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "hello", Host: "github.com"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "hello", Host: "github.com"},
 		}
 
 		var gotStdout, gotStderr string

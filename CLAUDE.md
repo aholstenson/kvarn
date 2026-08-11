@@ -27,7 +27,7 @@ task --list         # see all available tasks
 - `gen/` — Generated protobuf + ConnectRPC code (not checked in)
 - `internal/vm/` — VM provider interface + implementations (local, disk, transfer)
 - `internal/config/` — User-level config stores (credential, project, secret, forge, apikey); `atomicfile` for temp-file+rename writes. `credential` serves two blocks of one file: the named forge credentials and the `[llm]` provider API keys
-- `internal/project/` — Per-repo kvarn.yml parsing and step execution
+- `internal/project/` — Per-repo kvarn.yml parsing and step execution. `project.DefaultNixpkgsChannel` is the single source of truth for the nixpkgs release a bare `nixpkgs:` dependency resolves to: bumping that constant is the whole upgrade, and `nixpkgs_test.go` fails if `docs/reference/kvarn-yml.md` still names the old channel
 - `internal/orchestrator/` — Orchestrator service; `auth/` holds the identity plus both interceptors that produce one (API key, host-local socket); `repos.go` holds the mirror-backed clone path and the background mirror maintenance loop; `dispatcher.go` drains the durable backlog into the in-memory job pipeline; `drain.go` is the admission stance that stands that dispatcher down for a controlled shutdown
 - `internal/llmauth/` — Adapts the stored `[llm]` credentials to the `llms.CredentialSource` llms-go resolves model auth through, falling back to the provider env vars
 - `internal/localsock/` — The host-local control socket: where it lives, how it is created, and how a client dials it. Shared by both ends so the path cannot drift

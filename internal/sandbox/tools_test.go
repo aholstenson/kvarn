@@ -111,7 +111,7 @@ var _ = Describe("computeAugmentations", func() {
 
 	It("populates from a single nixpkgs dep", func() {
 		deps := []project.ResolvedDep{
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "go", Host: "github.com"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "go", Host: "github.com"},
 		}
 		aug := computeAugmentations(deps)
 		Expect(aug.Hosts).To(ContainElements("proxy.golang.org", "sum.golang.org"))
@@ -122,8 +122,8 @@ var _ = Describe("computeAugmentations", func() {
 	It("dedups overlapping hosts and PATH entries across deps", func() {
 		// `cargo` and `rustc` both contribute /home/kvarn/.cargo + crates.io.
 		deps := []project.ResolvedDep{
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "cargo", Host: "github.com"},
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "rustc", Host: "github.com"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "cargo", Host: "github.com"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "rustc", Host: "github.com"},
 		}
 		aug := computeAugmentations(deps)
 		// Hosts deduped.
@@ -139,8 +139,8 @@ var _ = Describe("computeAugmentations", func() {
 
 	It("merges env across deps", func() {
 		deps := []project.ResolvedDep{
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "go", Host: "github.com"},
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "cargo", Host: "github.com"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "go", Host: "github.com"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "cargo", Host: "github.com"},
 		}
 		aug := computeAugmentations(deps)
 		Expect(aug.Env).To(HaveKeyWithValue("GOPATH", "/home/kvarn/go"))
@@ -172,8 +172,8 @@ var _ = Describe("computeAugmentations", func() {
 		// the one that ends up first. A repository declaring both means its
 		// mise.toml pin to win over the Nix-provided toolchain.
 		deps := []project.ResolvedDep{
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "mise", Host: "github.com"},
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "go", Host: "github.com"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "mise", Host: "github.com"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "go", Host: "github.com"},
 		}
 		aug := computeAugmentations(deps)
 		Expect(aug.PathPrepend).To(Equal([]string{
@@ -184,14 +184,14 @@ var _ = Describe("computeAugmentations", func() {
 
 	It("orders PATH and env the same way regardless of dependency order", func() {
 		a := computeAugmentations([]project.ResolvedDep{
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "cargo"},
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "mise"},
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "go"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "cargo"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "mise"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "go"},
 		})
 		b := computeAugmentations([]project.ResolvedDep{
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "go"},
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "cargo"},
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "mise"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "go"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "cargo"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "mise"},
 		})
 		Expect(a.PathPrepend).To(Equal(b.PathPrepend))
 		Expect(a.Hosts).To(Equal(b.Hosts))
@@ -200,8 +200,8 @@ var _ = Describe("computeAugmentations", func() {
 
 	It("collects provisioning commands tagged with the tool that asked", func() {
 		deps := []project.ResolvedDep{
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "mise", Host: "github.com"},
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "go", Host: "github.com"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "mise", Host: "github.com"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "go", Host: "github.com"},
 		}
 		aug := computeAugmentations(deps)
 		Expect(aug.Provision).To(Equal([]provisionStep{
@@ -211,7 +211,7 @@ var _ = Describe("computeAugmentations", func() {
 
 	It("collects no provisioning commands for tools that need none", func() {
 		aug := computeAugmentations([]project.ResolvedDep{
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "go"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "go"},
 		})
 		Expect(aug.Provision).To(BeEmpty())
 	})
@@ -335,8 +335,8 @@ var _ = Describe("overlapping cache claims", func() {
 		// derived from the build files. Declaring both must resolve to the
 		// sharper key, not to whichever the dependency map yielded first.
 		deps := []project.ResolvedDep{
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "openjdk"},
-			{FlakeURI: "github:NixOS/nixpkgs/nixos-25.11", Attr: "gradle"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "openjdk"},
+			{FlakeURI: project.DefaultNixpkgsFlake, Attr: "gradle"},
 		}
 		layers, err := cache.DeriveLayers(GinkgoT().TempDir(), deps, cacheToolLookup,
 			project.Cache{}, "project-1", "")

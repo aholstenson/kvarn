@@ -41,9 +41,22 @@ const (
 	// MinMemory is the minimum allowed VM memory size (2 GiB).
 	MinMemory uint64 = 2 * 1024 * 1024 * 1024
 
+	// NixpkgsFlakePrefix is the flake URI prefix every `nixpkgs` source
+	// resolves under. Code that has to recognise a resolved dependency as
+	// coming from nixpkgs (tool curation, cache keying) matches on this
+	// instead of repeating the literal.
+	NixpkgsFlakePrefix = "github:NixOS/nixpkgs/"
+
 	// DefaultNixpkgsChannel is the nixpkgs channel resolved when the user
-	// writes `nixpkgs` (no channel suffix). Bumped via kvarn release.
-	DefaultNixpkgsChannel = "nixos-25.11"
+	// writes `nixpkgs` (no channel suffix). Bumping it to a newer stable
+	// release is the only edit a channel upgrade needs in code: everything
+	// else — resolution, tests, the reference docs check — derives from it.
+	// A test in this package fails if docs/reference/kvarn-yml.md still
+	// names the previous channel.
+	DefaultNixpkgsChannel = "nixos-26.05"
+
+	// DefaultNixpkgsFlake is the flake URI a bare `nixpkgs` source resolves to.
+	DefaultNixpkgsFlake = NixpkgsFlakePrefix + DefaultNixpkgsChannel
 )
 
 // Config represents a project-level configuration file (kvarn.yml).
@@ -230,7 +243,7 @@ func resolveFlakeRef(source string) (flakeURI, host string, err error) {
 
 	switch {
 	case s == "nixpkgs":
-		return "github:NixOS/nixpkgs/" + DefaultNixpkgsChannel, "github.com", nil
+		return DefaultNixpkgsFlake, "github.com", nil
 
 	case strings.HasPrefix(s, "nixpkgs/"):
 		channel := strings.TrimPrefix(s, "nixpkgs/")
@@ -241,7 +254,7 @@ func resolveFlakeRef(source string) (flakeURI, host string, err error) {
 			return "", "", fmt.Errorf("invalid nixpkgs channel %q: must match %s",
 				channel, nixpkgsChannelRe.String())
 		}
-		return "github:NixOS/nixpkgs/" + channel, "github.com", nil
+		return NixpkgsFlakePrefix + channel, "github.com", nil
 
 	case strings.HasPrefix(s, "github:"):
 		return s, "github.com", nil
