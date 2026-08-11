@@ -117,6 +117,42 @@ var _ = Describe("Shell Sessions", func() {
 			Expect(sub.Mode().Perm()).To(Equal(os.FileMode(0755)))
 		})
 
+		It("caps output at max_output_bytes and reports the true size", func() {
+			id := createSession()
+			resp, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+				SessionId:      id,
+				Command:        "printf 'HEAD'; head -c 200000 /dev/zero | tr '\\0' 'x'; printf 'TAIL'",
+				MaxOutputBytes: 1024,
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.Stdout).To(HavePrefix("HEAD"))
+			Expect(resp.Msg.Stdout).To(HaveSuffix("TAIL"))
+			Expect(resp.Msg.Stdout).To(ContainSubstring("of output omitted"))
+			Expect(len(resp.Msg.Stdout)).To(BeNumerically("<", 1200))
+			Expect(resp.Msg.StdoutTotalBytes).To(Equal(uint64(200008)))
+		})
+
+		It("leaves output uncapped by default", func() {
+			id := createSession()
+			resp := sessionExec(id, "head -c 100000 /dev/zero | tr '\\0' 'x'")
+			Expect(resp.Stdout).To(HaveLen(100000))
+			Expect(resp.StdoutTotalBytes).To(BeZero())
+		})
+
+		It("streams the full output even when the returned result is capped", func() {
+			id := createSession()
+			var streamed int
+			_, err := h.SessionExecWithOutput(ctx, &v1.SessionExecRequest{
+				SessionId:      id,
+				Command:        "head -c 100000 /dev/zero | tr '\\0' 'x'",
+				MaxOutputBytes: 1024,
+			}, func(stdout, stderr string) {
+				streamed += len(stdout) + len(stderr)
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(streamed).To(Equal(100000))
+		})
+
 		It("handles empty output", func() {
 			id := createSession()
 			resp := sessionExec(id, "true")

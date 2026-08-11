@@ -84,41 +84,47 @@ func NewCodingToolkitWithOpts(opts CodingToolkitOpts) *CodingToolkit {
 	}
 }
 
-// withBudgetWarning wraps each ToolDef so that, after the warn threshold is
-// crossed, the next tool result the model sees gains a wrap-up note from the
-// tracker. When no tracker is set, the input slice is returned unchanged.
-func (t *CodingToolkit) withBudgetWarning(tools []llms.ToolDef) []llms.ToolDef {
-	if t.tracker == nil {
-		return tools
-	}
+// guard wraps each ToolDef so that every result passes the same two checks on
+// its way to the model: it is cut down to the tool's ceiling, and — once the
+// tracker's warn threshold is crossed — it carries a one-shot budget note.
+//
+// Wrapping the whole set in one place is the point. A ceiling that each tool
+// had to remember to apply is a ceiling the next tool will be missing.
+func (t *CodingToolkit) guard(tools []llms.ToolDef) []llms.ToolDef {
 	wrapped := make([]llms.ToolDef, len(tools))
 	for i, td := range tools {
-		wrapped[i] = &budgetWrappedTool{inner: td, tracker: t.tracker}
+		wrapped[i] = &guardedTool{inner: td, limit: limitForTool(td.Name()), tracker: t.tracker}
 	}
 	return wrapped
 }
 
-// budgetWrappedTool decorates a ToolDef so that Render optionally appends a
-// one-shot budget warning. All other behavior is forwarded verbatim.
-type budgetWrappedTool struct {
+// guardedTool decorates a ToolDef so that Render clamps the result and
+// optionally appends a budget warning. All other behavior is forwarded verbatim.
+type guardedTool struct {
 	inner   llms.ToolDef
+	limit   resultLimit
 	tracker *cost.Tracker
 }
 
-func (w *budgetWrappedTool) Name() string        { return w.inner.Name() }
-func (w *budgetWrappedTool) Description() string { return w.inner.Description() }
-func (w *budgetWrappedTool) Schema() any         { return w.inner.Schema() }
-func (w *budgetWrappedTool) Execute(ctx context.Context, in any) (any, error) {
+func (w *guardedTool) Name() string        { return w.inner.Name() }
+func (w *guardedTool) Description() string { return w.inner.Description() }
+func (w *guardedTool) Schema() any         { return w.inner.Schema() }
+func (w *guardedTool) Execute(ctx context.Context, in any) (any, error) {
 	return w.inner.Execute(ctx, in)
 }
 
-func (w *budgetWrappedTool) Render(out any) llms.ToolResult {
+func (w *guardedTool) Render(out any) llms.ToolResult {
 	res := w.inner.Render(out)
-	if note, ok := w.tracker.ConsumeWarning(); ok {
-		if res.Text != "" {
-			res.Text += "\n\n"
+	res.Text = clampToolText(res.Text, w.limit.bytes, w.limit.hint)
+	// The budget note is appended after the clamp so it cannot be the thing
+	// that gets cut.
+	if w.tracker != nil {
+		if note, ok := w.tracker.ConsumeWarning(); ok {
+			if res.Text != "" {
+				res.Text += "\n\n"
+			}
+			res.Text += note
 		}
-		res.Text += note
 	}
 	return res
 }
@@ -141,7 +147,7 @@ func (t *CodingToolkit) Tools() []llms.ToolDef {
 	if len(t.agentModels) > 0 && len(t.subAgents) > 0 {
 		tools = append(tools, llms.NewToolDef(&spawnAgentTool{toolkit: t}))
 	}
-	return t.withBudgetWarning(tools)
+	return t.guard(tools)
 }
 
 // ReadOnlyTools returns the same toolkit minus edit_file and write_file. Used
@@ -163,7 +169,7 @@ func (t *CodingToolkit) ReadOnlyTools() []llms.ToolDef {
 	if len(t.agentModels) > 0 && len(t.subAgents) > 0 {
 		tools = append(tools, llms.NewToolDef(&spawnAgentTool{toolkit: t}))
 	}
-	return t.withBudgetWarning(tools)
+	return t.guard(tools)
 }
 
 // exec_command
@@ -200,9 +206,19 @@ func (t *execCommandTool) Execute(ctx context.Context, input *ExecCommandInput) 
 		cmd = strings.Join(parts, " ")
 	}
 
+	// The tool's own ceiling is passed down so the runner drops the excess at
+	// the source. Truncating only on render would still mean a multi-megabyte
+	// stream buffered in the guest and pushed across the bridge to be thrown
+	// away on arrival.
+	//
+	// The cap applies to stdout and stderr separately, so the full budget is
+	// available to whichever stream the command actually used. A command that
+	// floods both leaves the rendered pair over the ceiling and the clamp on
+	// the way to the model trims it the rest of the way.
 	resp, err := t.toolkit.runner.SessionExec(ctx, &v1.SessionExecRequest{
-		SessionId: t.toolkit.sessionID,
-		Command:   cmd,
+		SessionId:      t.toolkit.sessionID,
+		Command:        cmd,
+		MaxOutputBytes: uint32(limitForTool(t.Name()).bytes),
 	}, nil)
 	if err != nil {
 		return nil, err
@@ -585,9 +601,10 @@ func (t *listFilesTool) Execute(ctx context.Context, input *ListFilesInput) (*Li
 	}
 
 	resp, err := t.toolkit.runner.Exec(ctx, &v1.ExecRequest{
-		Command:    "find",
-		Args:       args,
-		WorkingDir: t.toolkit.workingDir,
+		Command:        "find",
+		Args:           args,
+		WorkingDir:     t.toolkit.workingDir,
+		MaxOutputBytes: uint32(limitForTool(t.Name()).bytes),
 	})
 	if err != nil {
 		return nil, err
@@ -642,9 +659,10 @@ func (t *searchFilesTool) Execute(ctx context.Context, input *SearchFilesInput) 
 	args = append(args, dir)
 
 	resp, err := t.toolkit.runner.Exec(ctx, &v1.ExecRequest{
-		Command:    "grep",
-		Args:       args,
-		WorkingDir: t.toolkit.workingDir,
+		Command:        "grep",
+		Args:           args,
+		WorkingDir:     t.toolkit.workingDir,
+		MaxOutputBytes: uint32(limitForTool(t.Name()).bytes),
 	})
 	if err != nil {
 		return nil, err

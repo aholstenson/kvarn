@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -122,7 +121,7 @@ func (h *Handler) SessionExecWithOutput(ctx context.Context, msg *v1.SessionExec
 
 	timeout := time.Duration(msg.TimeoutSeconds) * time.Second
 
-	result, err := sess.Execute(ctx, msg.Command, timeout, onOutput)
+	result, err := sess.Execute(ctx, msg.Command, timeout, int(msg.MaxOutputBytes), onOutput)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, connect.NewError(connect.CodeDeadlineExceeded, errors.New("command timed out"))
@@ -131,11 +130,13 @@ func (h *Handler) SessionExecWithOutput(ctx context.Context, msg *v1.SessionExec
 	}
 
 	return connect.NewResponse(&v1.SessionExecResponse{
-		ExitCode:   result.ExitCode,
-		Stdout:     result.Stdout,
-		Stderr:     result.Stderr,
-		WorkingDir: result.Cwd,
-		StateReset: result.StateReset,
+		ExitCode:         result.ExitCode,
+		Stdout:           result.Stdout,
+		Stderr:           result.Stderr,
+		WorkingDir:       result.Cwd,
+		StateReset:       result.StateReset,
+		StdoutTotalBytes: uint64(result.StdoutTotal),
+		StderrTotalBytes: uint64(result.StderrTotal),
 	}), nil
 }
 
@@ -205,9 +206,10 @@ func (h *Handler) Exec(ctx context.Context, req *connect.Request[v1.ExecRequest]
 		cmd.Dir = msg.WorkingDir
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := newCapBuffer(int(msg.MaxOutputBytes))
+	stderr := newCapBuffer(int(msg.MaxOutputBytes))
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	err := cmd.Run()
 
@@ -216,11 +218,18 @@ func (h *Handler) Exec(ctx context.Context, req *connect.Request[v1.ExecRequest]
 		return nil, err
 	}
 
-	return connect.NewResponse(&v1.ExecResponse{
+	resp := &v1.ExecResponse{
 		ExitCode: exitCode,
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),
-	}), nil
+	}
+	if stdout.Truncated() {
+		resp.StdoutTotalBytes = uint64(stdout.Total())
+	}
+	if stderr.Truncated() {
+		resp.StderrTotalBytes = uint64(stderr.Total())
+	}
+	return connect.NewResponse(resp), nil
 }
 
 // safePath resolves path within workingDir and ensures it doesn't escape.

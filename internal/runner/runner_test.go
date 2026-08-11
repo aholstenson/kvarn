@@ -50,6 +50,31 @@ var _ = Describe("Runner", func() {
 		Expect(resp.Msg.Stderr).To(BeEmpty())
 	})
 
+	It("caps output at max_output_bytes and reports the true size", func() {
+		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
+			Command:        "sh",
+			Args:           []string{"-c", "printf 'HEAD'; head -c 200000 /dev/zero | tr '\\0' 'x'; printf 'TAIL'"},
+			MaxOutputBytes: 1024,
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Msg.ExitCode).To(Equal(int32(0)))
+		Expect(resp.Msg.Stdout).To(HavePrefix("HEAD"))
+		Expect(resp.Msg.Stdout).To(HaveSuffix("TAIL"))
+		Expect(resp.Msg.Stdout).To(ContainSubstring("of output omitted"))
+		Expect(len(resp.Msg.Stdout)).To(BeNumerically("<", 1200))
+		Expect(resp.Msg.StdoutTotalBytes).To(Equal(uint64(200008)))
+	})
+
+	It("leaves output uncapped by default", func() {
+		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
+			Command: "sh",
+			Args:    []string{"-c", "head -c 100000 /dev/zero | tr '\\0' 'x'"},
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Msg.Stdout).To(HaveLen(100000))
+		Expect(resp.Msg.StdoutTotalBytes).To(BeZero())
+	})
+
 	It("captures stderr", func() {
 		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
 			Command: "sh",

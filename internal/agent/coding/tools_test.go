@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -341,6 +342,62 @@ var _ = Describe("CodingToolkit", func() {
 				Glob:    "*.go",
 			})
 			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	Describe("result limits", func() {
+		It("asks the runner to cap the output it collects", func() {
+			var execCap, sessionCap uint32
+			runner.execFunc = func(_ context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
+				execCap = req.MaxOutputBytes
+				return &v1.ExecResponse{}, nil
+			}
+			runner.sessionExecFunc = func(_ context.Context, req *v1.SessionExecRequest) (*v1.SessionExecResponse, error) {
+				sessionCap = req.MaxOutputBytes
+				return &v1.SessionExecResponse{}, nil
+			}
+
+			_, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{Pattern: "x"})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = tools["exec_command"].Execute(ctx, &coding.ExecCommandInput{Command: "true"})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(execCap).To(BeNumerically(">", 0))
+			Expect(sessionCap).To(BeNumerically(">", 0))
+		})
+
+		It("clamps a result that arrives oversized anyway", func() {
+			// A runner that ignores the cap stands in for anything that could
+			// put more in front of the model than it asked for.
+			runner.execFunc = func(_ context.Context, _ *v1.ExecRequest) (*v1.ExecResponse, error) {
+				return &v1.ExecResponse{Stdout: strings.Repeat("match\n", 200000)}, nil
+			}
+
+			result, err := tools["search_files"].Execute(ctx, &coding.SearchFilesInput{Pattern: "match"})
+			Expect(err).NotTo(HaveOccurred())
+
+			rendered := tools["search_files"].Render(result)
+			Expect(len(rendered.Text)).To(BeNumerically("<", 40*1024))
+			Expect(rendered.Text).To(ContainSubstring("of this result omitted"))
+			Expect(rendered.Text).To(ContainSubstring("search a narrower path or glob"))
+		})
+
+		It("clamps read-only tools too", func() {
+			runner.execFunc = func(_ context.Context, _ *v1.ExecRequest) (*v1.ExecResponse, error) {
+				return &v1.ExecResponse{Stdout: strings.Repeat("./file\n", 200000)}, nil
+			}
+
+			readOnly := make(map[string]llms.ToolDef)
+			for _, t := range toolkit.ReadOnlyTools() {
+				readOnly[t.Name()] = t
+			}
+
+			result, err := readOnly["list_files"].Execute(ctx, &coding.ListFilesInput{})
+			Expect(err).NotTo(HaveOccurred())
+
+			rendered := readOnly["list_files"].Render(result)
+			Expect(len(rendered.Text)).To(BeNumerically("<", 40*1024))
+			Expect(rendered.Text).To(ContainSubstring("of this result omitted"))
 		})
 	})
 

@@ -9,12 +9,21 @@ message ExecRequest {
   bool privileged = 4;
   // Optional timeout in seconds. If > 0, the command will be killed after this duration.
   uint32 timeout_seconds = 5;
+  // Optional cap on the bytes of stdout and of stderr returned, applied to
+  // each stream separately. The two ends of the stream are kept and the middle
+  // is dropped. 0 returns everything, which is what callers that parse the
+  // output must ask for.
+  uint32 max_output_bytes = 6;
 }
 
 message ExecResponse {
   int32 exit_code = 1;
   string stdout = 2;
   string stderr = 3;
+  // Bytes the command wrote to each stream, set only when max_output_bytes
+  // dropped part of it.
+  uint64 stdout_total_bytes = 4;
+  uint64 stderr_total_bytes = 5;
 }
 
 message FileContent {
@@ -143,6 +152,11 @@ message SessionExecRequest {
   string session_id = 1;
   string command = 2;
   uint32 timeout_seconds = 3;
+  // Optional cap on the bytes of stdout and of stderr returned, applied to
+  // each stream separately. The two ends of the stream are kept and the middle
+  // is dropped. 0 returns everything. Streaming output is unaffected: the
+  // incremental chunks are delivered in full regardless of this cap.
+  uint32 max_output_bytes = 4;
 }
 
 message SessionExecResponse {
@@ -153,6 +167,10 @@ message SessionExecResponse {
   // True if the shell died (e.g. `exit` was called) and was respawned.
   // All prior session state (env vars, cwd) has been lost.
   bool state_reset = 5;
+  // Bytes the command wrote to each stream, set only when max_output_bytes
+  // dropped part of it.
+  uint64 stdout_total_bytes = 6;
+  uint64 stderr_total_bytes = 7;
 }
 
 message CloseSessionRequest {

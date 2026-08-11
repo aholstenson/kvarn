@@ -168,10 +168,35 @@ type executeResult struct {
 	ExitCode   int32
 	Cwd        string
 	StateReset bool // true if the shell died and was respawned (state lost)
+	// Byte counts of what the command actually wrote, set only for a stream
+	// that maxOutputBytes cut down.
+	StdoutTotal int64
+	StderrTotal int64
+}
+
+// collectOutput fills in the result's stdout and stderr from the demarcation
+// files, keeping at most maxOutput bytes of each. Called on every exit path,
+// including the ones where the shell died mid-command: a command that drowns
+// the runner in output is exactly the kind that also kills its shell.
+func (s *shellSession) collectOutput(prefix string, maxOutput int, result *executeResult) {
+	var truncated bool
+	result.Stdout, result.StdoutTotal, truncated = readCappedFile(prefix+".stdout", maxOutput)
+	if !truncated {
+		result.StdoutTotal = 0
+	}
+	result.Stderr, result.StderrTotal, truncated = readCappedFile(prefix+".stderr", maxOutput)
+	if !truncated {
+		result.StderrTotal = 0
+	}
 }
 
 // Execute runs a command in the persistent shell and returns its output.
-func (s *shellSession) Execute(ctx context.Context, command string, timeout time.Duration, onOutput OutputCallback) (result executeResult, err error) {
+//
+// maxOutput caps the bytes of stdout and of stderr in the returned result; 0
+// returns everything. It does not affect onOutput, which still receives every
+// byte as it is produced — the cap exists to bound what is handed back in one
+// piece, not to hide output from a live view.
+func (s *shellSession) Execute(ctx context.Context, command string, timeout time.Duration, maxOutput int, onOutput OutputCallback) (result executeResult, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -252,11 +277,7 @@ func (s *shellSession) Execute(ctx context.Context, command string, timeout time
 			// Shell died (e.g., user command called `exit`).
 			s.deliverNewOutput(prefix, &stdoutOffset, &stderrOffset, onOutput)
 
-			// Read full output for the result.
-			stdoutBytes, _ := os.ReadFile(prefix + ".stdout")
-			stderrBytes, _ := os.ReadFile(prefix + ".stderr")
-			result.Stdout = string(stdoutBytes)
-			result.Stderr = string(stderrBytes)
+			s.collectOutput(prefix, maxOutput, &result)
 			s.cleanupFiles(prefix)
 
 			// Capture exit code from the dead process before respawning.
@@ -278,10 +299,7 @@ func (s *shellSession) Execute(ctx context.Context, command string, timeout time
 			// Timeout: deliver remaining output before cleanup.
 			s.deliverNewOutput(prefix, &stdoutOffset, &stderrOffset, onOutput)
 
-			stdoutBytes, _ := os.ReadFile(prefix + ".stdout")
-			stderrBytes, _ := os.ReadFile(prefix + ".stderr")
-			result.Stdout = string(stdoutBytes)
-			result.Stderr = string(stderrBytes)
+			s.collectOutput(prefix, maxOutput, &result)
 			s.cleanupFiles(prefix)
 
 			result.StateReset = true
@@ -299,13 +317,10 @@ func (s *shellSession) Execute(ctx context.Context, command string, timeout time
 	}
 
 	// Read results.
-	stdoutBytes, _ := os.ReadFile(prefix + ".stdout")
-	stderrBytes, _ := os.ReadFile(prefix + ".stderr")
+	s.collectOutput(prefix, maxOutput, &result)
 	statusBytes, _ := os.ReadFile(statusPath)
 	cwdBytes, _ := os.ReadFile(prefix + ".pwd")
 
-	result.Stdout = string(stdoutBytes)
-	result.Stderr = string(stderrBytes)
 	result.Cwd = strings.TrimSpace(string(cwdBytes))
 
 	code, _ := strconv.ParseInt(strings.TrimSpace(string(statusBytes)), 10, 32)
