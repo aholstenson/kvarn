@@ -14,9 +14,12 @@ tasks:
   build:
     desc: Build the kvarn binary with the embedded runner
     deps: [generate]
+    vars:
+      VERSION:
+        sh: git describe --tags --always --dirty 2>/dev/null || echo dev
     cmds:
       - task: build:runner
-      - go build -tags embedrunner ./cmd/kvarn
+      - go build -tags embedrunner -ldflags "-X github.com/aholstenson/kvarn/internal/buildinfo.Version={{.VERSION}}" ./cmd/kvarn
       - task: sign
         platforms: [darwin]
 

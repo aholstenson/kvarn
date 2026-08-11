@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/aholstenson/kvarn/internal/buildinfo"
 	cachecmd "github.com/aholstenson/kvarn/internal/cmd/cache"
 	imagecmd "github.com/aholstenson/kvarn/internal/cmd/image"
 	imagecachecmd "github.com/aholstenson/kvarn/internal/cmd/imagecache"
@@ -12,6 +13,7 @@ import (
 	runcmd "github.com/aholstenson/kvarn/internal/cmd/run"
 	"github.com/aholstenson/kvarn/internal/cmd/secrets"
 	testcmd "github.com/aholstenson/kvarn/internal/cmd/test"
+	versioncmd "github.com/aholstenson/kvarn/internal/cmd/version"
 	"github.com/aholstenson/kvarn/internal/logging"
 	"github.com/aholstenson/kvarn/internal/orchestrator"
 	"github.com/alecthomas/kong"
@@ -30,6 +32,11 @@ type CLI struct {
 	Cache        cachecmd.Cmd      `cmd:"" help:"Inspect and clear tool caches."`
 	ImageCache   imagecachecmd.Cmd `cmd:"" name:"image-cache" help:"Inspect and manage the pull-through OCI image cache."`
 	Repo         repocmd.Cmd       `cmd:"" help:"Inspect and manage the host-side repository mirrors."`
+	Version      versioncmd.Cmd    `cmd:"" help:"Print the kvarn version and build details."`
+
+	// The flag form is what `--version` habitually reaches for; it prints the
+	// bare version, while the subcommand prints the full build identity.
+	VersionFlag kong.VersionFlag `name:"version" short:"V" help:"Print the version and exit."`
 }
 
 func main() {
@@ -40,7 +47,7 @@ func main() {
 		Compact:             true,
 		Summary:             true,
 		NoExpandSubcommands: true,
-	}))
+	}), kong.Vars{"version": buildinfo.Version})
 	err := ctx.Run()
 	ctx.FatalIfErrorf(err)
 }

@@ -305,3 +305,20 @@ kvarn image pull                              # download the current version
 KVARN_IMAGE_VERSION=0.1.0 kvarn image pull    # a specific version
 kvarn image path --no-download                # print a local path, never download
 ```
+
+## `kvarn version`
+
+Prints the running build: its version, the git revision stamped into the binary
+(suffixed `-dirty` when it was built from a modified tree), the Go toolchain,
+the platform, and the range of VM image versions this build boots. Everything is
+compiled in, so it answers with no orchestrator running.
+
+| Flag | Purpose |
+| --- | --- |
+| `-s`/`--short` | Print the bare version string, for scripts. |
+| `--json` | Emit the same fields as a JSON object. |
+
+`kvarn --version` is shorthand for `kvarn version --short`.
+
+A build reporting version `dev` was built without a release stamp — the revision
+row identifies it.
