@@ -3,11 +3,32 @@ package transfer
 import (
 	"context"
 	"io"
+	"io/fs"
 	"path/filepath"
 	"strings"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 )
+
+// WorkspaceMode widens a local file's permissions to what the guest workspace
+// needs, mirroring the owner's read and execute bits into group and other.
+//
+// Modes cross the transport intact, and a checkout routinely carries files the
+// owner alone can read — a local .env at 0600 is ordinary. In the guest that
+// same file has to be readable by more than its owner: the workspace is
+// bind-mounted into whatever containers the project starts, and rootless Podman
+// maps their service users outside the job's user entirely, so the group and
+// other bits are all those services have to read through. The VM is
+// single-tenant and discarded with the job, so there is nothing there to widen
+// these files against.
+//
+// Write bits are never widened. Nothing in the guest needs them, and git records
+// only the executable bit, so the modes here never travel back to the host.
+func WorkspaceMode(m fs.FileMode) fs.FileMode {
+	perm := m.Perm()
+	ownerReadExec := perm & 0o500
+	return perm | ownerReadExec>>3 | ownerReadExec>>6
+}
 
 // FileUploader is the subset of RunnerProxy needed for batch file transfer.
 type FileUploader interface {

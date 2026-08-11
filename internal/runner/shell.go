@@ -97,7 +97,16 @@ func (s *shellSession) spawn() error {
 	}()
 
 	// Probe: verify the shell is alive by running a trivial command.
-	// Set umask to restrict temp file permissions to owner-only.
+	//
+	// The umask set here is the one every step and agent command inherits, so it
+	// decides what the rest of the job can read. It stays permissive because the
+	// workspace is shared: a project that starts containers bind-mounts this
+	// directory into them, and rootless Podman maps their service users outside
+	// the shell's user entirely, leaving them the group and other bits as their
+	// only way in. An owner-only file — or worse, an owner-only directory, which
+	// nothing below it can be reached through — reads to that service as a file
+	// that does not exist. The demarcation files need no protection from the
+	// umask: they live in a 0700 temp directory owned by this shell's user.
 	probeID := s.nextID.Add(1)
 
 	// If initialDir is set, cd to it so commands run in the expected directory.
@@ -107,7 +116,7 @@ func (s *shellSession) spawn() error {
 	}
 
 	probeScript := fmt.Sprintf(
-		"%sumask 0077; echo 0 >%s/%d.status\n",
+		"%sumask 0022; echo 0 >%s/%d.status\n",
 		cdPrefix, s.tempDir, probeID,
 	)
 	if _, err := io.WriteString(s.stdin, probeScript); err != nil {

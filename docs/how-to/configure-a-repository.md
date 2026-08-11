@@ -53,6 +53,36 @@ package mirror, say — and only applies to setup.
 reported but never fails a run. Every validation step runs even if an earlier
 one failed, so one bad step doesn't hide the rest.
 
+## Share the workspace with containers your steps start
+
+Some projects bring up their own containers — a `docker-compose.yml` started by
+a setup step, say — and bind-mount the workspace into them. Podman runs rootless
+in the VM, so the user your steps run as appears as `root` inside those
+containers, and every *other* user in them is mapped to an identity that owns
+nothing in the workspace. A service running as `www-data` or `node` therefore
+reaches your files through their group and other permission bits alone.
+
+Kvarn keeps those bits open for everything it puts in the workspace, both the
+files transferred from your checkout and the ones your steps create, so this is
+usually invisible. It stops being invisible when a step tightens a mode itself:
+
+```yaml
+setup:
+  steps:
+    - name: Provision
+      run: install -m 600 .env.example .env   # the container cannot read this
+```
+
+The same applies to directories, where the effect is easier to miss: a mode with
+no group or other execute bit cannot be descended into, so nothing underneath it
+is reachable either.
+
+Files written from *inside* a container have the mirror-image problem. They
+belong to that container's user, which the VM side cannot modify, so a later
+step — or the agent — cannot change a path the container already wrote. Point
+containers that generate their own state at a named volume rather than the
+workspace.
+
 ## Iterate with `kvarn test`
 
 ```sh

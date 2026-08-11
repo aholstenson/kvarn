@@ -32,6 +32,11 @@ const DefaultExecTimeout uint32 = 300
 // maxSessions is the maximum number of concurrent shell sessions per handler.
 const maxSessions = 16
 
+// kvarnHome is the home directory of the unprivileged user every job command
+// runs as. The workspace lives under it, and so does everything a job shares
+// with the containers it starts.
+const kvarnHome = "/home/kvarn"
+
 // Handler implements the runner service, handling both direct RPC calls and bridge commands.
 type Handler struct {
 	kvarnCred  *kvarnCredential // cached non-privileged user credentials (nil if lookup failed)
@@ -293,6 +298,38 @@ func withSeparator(dir string) string {
 	return dir + string(filepath.Separator)
 }
 
+// chownToKvarn hands path, and any directory above it up to the kvarn home
+// directory, to the kvarn user.
+//
+// Every write the runner performs on a job's behalf needs this, because the
+// runner is root while the job is not: a file left owned by root cannot be
+// rewritten by the steps that come after it, and rootless Podman maps the kvarn
+// user to container root while leaving root itself outside the container's user
+// namespace, so inside a container the same file surfaces as owned by nobody.
+//
+// createdDir is the deepest directory the caller may have created on the way to
+// path, and is walked up to the home directory. Callers that created nothing
+// pass an empty string rather than the file's parent: a directory that was
+// already there may deliberately belong to someone else, such as a container
+// user that wrote it through the bind mount.
+func (h *Handler) chownToKvarn(path string, createdDir string) {
+	if h.kvarnCred == nil || !isUnderKvarnHome(path) {
+		return
+	}
+	uid, gid := h.kvarnCred.chownIDs()
+	// Lchown so we don't follow symlinks.
+	os.Lchown(path, uid, gid)
+	for d := createdDir; isUnderKvarnHome(d); d = filepath.Dir(d) {
+		os.Chown(d, uid, gid)
+	}
+}
+
+// isUnderKvarnHome reports whether path is strictly inside the kvarn home
+// directory, so the home directory itself is never reowned.
+func isUnderKvarnHome(path string) bool {
+	return strings.HasPrefix(path, kvarnHome+string(filepath.Separator))
+}
+
 func (h *Handler) UploadFiles(ctx context.Context, req *connect.Request[v1.UploadFilesRequest]) (*connect.Response[v1.UploadFilesResponse], error) {
 	msg := req.Msg
 	if msg.WorkingDir == "" {
@@ -328,16 +365,7 @@ func (h *Handler) UploadFiles(ctx context.Context, req *connect.Request[v1.Uploa
 			}
 		}
 
-		// Chown workspace files to the kvarn user so non-privileged commands can access them.
-		if h.kvarnCred != nil && strings.HasPrefix(resolved, "/home/kvarn") {
-			uid, gid := h.kvarnCred.chownIDs()
-			// Lchown so we don't follow symlinks.
-			os.Lchown(resolved, uid, gid)
-			// Chown any directories created between the home directory and the file.
-			for d := dir; d != "/home/kvarn" && strings.HasPrefix(d, "/home/kvarn/"); d = filepath.Dir(d) {
-				os.Chown(d, uid, gid)
-			}
-		}
+		h.chownToKvarn(resolved, dir)
 
 		// The scripts kvarn writes into /etc/profile.d are sourced by the
 		// kvarn user's login shell. Owning them as root would leave the
@@ -640,6 +668,9 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 	if err := writeFileAtomic(resolved, updated, info.Mode()); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
+	// The atomic write replaces the file with one the runner created, so the
+	// edit would otherwise hand a workspace file to root.
+	h.chownToKvarn(resolved, "")
 
 	contextLines := int(msg.ContextLines)
 	if contextLines <= 0 {
@@ -772,6 +803,7 @@ func (h *Handler) WriteFile(ctx context.Context, req *connect.Request[v1.WriteFi
 	if err := writeFileAtomic(resolved, msg.Content, mode); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
+	h.chownToKvarn(resolved, dir)
 
 	return connect.NewResponse(&v1.WriteFileResponse{
 		Version:    hashFile(msg.Content),

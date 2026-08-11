@@ -175,7 +175,7 @@ func (t *StreamingTransferer) writeTarball(w io.Writer, localDir string, bytesSe
 			return tw.WriteHeader(&tar.Header{
 				Typeflag: tar.TypeDir,
 				Name:     relPath + "/",
-				Mode:     int64(info.Mode().Perm()),
+				Mode:     int64(WorkspaceMode(info.Mode())),
 			})
 		}
 
@@ -185,7 +185,7 @@ func (t *StreamingTransferer) writeTarball(w io.Writer, localDir string, bytesSe
 			Typeflag: tar.TypeReg,
 			Name:     relPath,
 			Size:     info.Size(),
-			Mode:     int64(info.Mode().Perm()),
+			Mode:     int64(WorkspaceMode(info.Mode())),
 		}); err != nil {
 			return fmt.Errorf("write header %s: %w", relPath, err)
 		}

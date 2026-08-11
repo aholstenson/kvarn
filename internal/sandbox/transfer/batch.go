@@ -120,7 +120,7 @@ func (t *BatchTransferer) Upload(ctx context.Context, uploader Uploader, localDi
 		batch = append(batch, &v1.FileContent{
 			Path:    relPath,
 			Content: content,
-			Mode:    uint32(info.Mode().Perm()),
+			Mode:    uint32(WorkspaceMode(info.Mode())),
 		})
 		batchSize += fileSize
 

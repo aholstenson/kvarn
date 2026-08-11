@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -215,6 +216,19 @@ var _ = Describe("BatchTransferer", func() {
 		Expect(files[0].Mode).To(Equal(uint32(0755)))
 	})
 
+	It("widens owner-only files so container users can read them", func() {
+		envPath := filepath.Join(tmpDir, ".env")
+		Expect(os.WriteFile(envPath, []byte("SECRET=1"), 0644)).To(Succeed())
+		Expect(os.Chmod(envPath, 0600)).To(Succeed())
+
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
+		Expect(err).NotTo(HaveOccurred())
+
+		files := mock.allFiles()
+		Expect(files).To(HaveLen(1))
+		Expect(files[0].Mode).To(Equal(uint32(0644)))
+	})
+
 	It("sets working dir on upload requests", func() {
 		Expect(os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("x"), 0644)).To(Succeed())
 
@@ -393,6 +407,22 @@ var _ = Describe("StreamingTransferer", func() {
 		Expect(entries["exec.sh"].header.Mode).To(Equal(int64(0755)))
 	})
 
+	It("widens owner-only files and directories so container users can reach them", func() {
+		subDir := filepath.Join(tmpDir, "storage")
+		Expect(os.MkdirAll(subDir, 0755)).To(Succeed())
+		envPath := filepath.Join(subDir, ".env")
+		Expect(os.WriteFile(envPath, []byte("SECRET=1"), 0644)).To(Succeed())
+		Expect(os.Chmod(envPath, 0600)).To(Succeed())
+		Expect(os.Chmod(subDir, 0700)).To(Succeed())
+
+		err := t.Upload(ctx, mock, tmpDir, "/home/kvarn/workspace", transfer.Options{})
+		Expect(err).NotTo(HaveOccurred())
+
+		entries := mock.extractTar()
+		Expect(entries["storage/"].header.Mode).To(Equal(int64(0755)))
+		Expect(entries["storage/.env"].header.Mode).To(Equal(int64(0644)))
+	})
+
 	It("transfers symlinks", func() {
 		Expect(os.WriteFile(filepath.Join(tmpDir, "real.txt"), []byte("content"), 0644)).To(Succeed())
 		Expect(os.Symlink("real.txt", filepath.Join(tmpDir, "link.txt"))).To(Succeed())
@@ -491,5 +521,25 @@ var _ = Describe("StreamingTransferer", func() {
 		mock.mu.Lock()
 		defer mock.mu.Unlock()
 		Expect(mock.execCalls).To(HaveLen(2))
+	})
+})
+
+var _ = Describe("WorkspaceMode", func() {
+	DescribeTable("mirrors the owner's read and execute bits outward",
+		func(in, want fs.FileMode) {
+			Expect(transfer.WorkspaceMode(in)).To(Equal(want))
+		},
+		Entry("owner-only file", fs.FileMode(0600), fs.FileMode(0644)),
+		Entry("owner-only executable", fs.FileMode(0700), fs.FileMode(0755)),
+		Entry("owner-only directory", fs.FileMode(0700|fs.ModeDir), fs.FileMode(0755)),
+		Entry("read-only file", fs.FileMode(0400), fs.FileMode(0444)),
+		Entry("already shared", fs.FileMode(0644), fs.FileMode(0644)),
+		Entry("already shared executable", fs.FileMode(0755), fs.FileMode(0755)),
+	)
+
+	It("never widens write bits", func() {
+		for _, in := range []fs.FileMode{0600, 0700, 0640, 0755, 0444} {
+			Expect(transfer.WorkspaceMode(in) & 0022).To(BeZero())
+		}
 	})
 })

@@ -2,6 +2,9 @@ package runner_test
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 
 	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
@@ -97,6 +100,21 @@ var _ = Describe("Shell Sessions", func() {
 			id := createSession()
 			resp := sessionExec(id, "echo hello | tr a-z A-Z")
 			Expect(resp.Stdout).To(Equal("HELLO\n"))
+		})
+
+		It("creates files and directories the workspace's other users can reach", func() {
+			dir := GinkgoT().TempDir()
+			id := createSession()
+			resp := sessionExec(id, fmt.Sprintf("cd %s && touch file && mkdir sub", dir))
+			Expect(resp.ExitCode).To(Equal(int32(0)))
+
+			file, err := os.Stat(filepath.Join(dir, "file"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(file.Mode().Perm()).To(Equal(os.FileMode(0644)))
+
+			sub, err := os.Stat(filepath.Join(dir, "sub"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sub.Mode().Perm()).To(Equal(os.FileMode(0755)))
 		})
 
 		It("handles empty output", func() {
