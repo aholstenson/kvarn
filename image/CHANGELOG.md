@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/aholstenson/kvarn/compare/image-v0.4.0...image-v0.5.0) (2026-08-11)
+
+
+### Features
+
+* **image:** Ship fonts in image for things like headless browsers ([97a34db](https://github.com/aholstenson/kvarn/commit/97a34db9a4ce2e446be7c482ca176417d66d5351))
+* Trust the egress proxy CA in the NSS store ([63ffa70](https://github.com/aholstenson/kvarn/commit/63ffa7084abbfa3ce74b391d1a27b09d22659b45))
+
 ## [0.4.0](https://github.com/aholstenson/kvarn/compare/image-v0.3.0...image-v0.4.0) (2026-08-10)
 
 
