@@ -214,6 +214,29 @@ func (g *GitHub) signJWT(appID string, key *rsa.PrivateKey, now time.Time) (stri
 	return signed, nil
 }
 
+// maxTitleLength is GitHub's hard limit on a pull request title, counted in
+// characters. A longer title is rejected with 422, which would throw away a
+// completed run at the last step — the branch is already pushed by then, but
+// nothing points at it.
+const maxTitleLength = 256
+
+// clampTitle cuts a title down to what the API will accept, marking the cut so
+// a reader can tell the title is not the whole sentence.
+//
+// This is a backstop for a title no earlier layer bounded, not the place style
+// is enforced: a repository's configured budget is a fraction of this, and a
+// title that overruns it is still sent as written.
+func clampTitle(title string) string {
+	runes := []rune(title)
+	if len(runes) <= maxTitleLength {
+		return title
+	}
+	slog.Warn("truncating pull request title to the GitHub limit",
+		"length", len(runes), "limit", maxTitleLength)
+	// One rune short of the limit leaves room for the ellipsis.
+	return strings.TrimRight(string(runes[:maxTitleLength-1]), " \t\n") + "…"
+}
+
 func (g *GitHub) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts) (*forge.PullRequest, error) {
 	owner, repo, err := ParseRepoURL(opts.RepoURL)
 	if err != nil {
@@ -228,7 +251,7 @@ func (g *GitHub) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts)
 
 	// Create pull request.
 	prBody := map[string]any{
-		"title": opts.Title,
+		"title": clampTitle(opts.Title),
 		"body":  opts.Body,
 		"head":  opts.HeadBranch,
 		"base":  opts.BaseBranch,

@@ -272,6 +272,63 @@ var _ = Describe("GitHub Forge", func() {
 			Expect(pr.Ref).To(Equal("42"))
 			Expect(pr.URL).To(Equal("https://github.com/owner/repo/pull/42"))
 		})
+
+		// sentTitle creates a PR against a stub server and returns the title
+		// that reached the API, which is what the length limit applies to.
+		sentTitle := func(title string) string {
+			var sent string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/repos/owner/repo/pulls" {
+					var body struct {
+						Title string `json:"title"`
+					}
+					Expect(json.NewDecoder(r.Body).Decode(&body)).To(Succeed())
+					sent = body.Title
+					w.WriteHeader(http.StatusCreated)
+					json.NewEncoder(w).Encode(map[string]any{
+						"number":   42,
+						"html_url": "https://github.com/owner/repo/pull/42",
+					})
+				}
+			}))
+			defer server.Close()
+
+			gh := forgegithub.New(
+				forgegithub.WithAPIBase(server.URL),
+				forgegithub.WithHTTPClient(server.Client()),
+			)
+			_, err := gh.CreatePullRequest(context.Background(), forge.CreatePROpts{
+				RepoURL:     "https://github.com/owner/repo.git",
+				BaseBranch:  "main",
+				HeadBranch:  "feature",
+				Title:       title,
+				Credentials: scm.StaticCredentials(&scm.Credentials{Token: "test-token"}),
+			})
+			Expect(err).NotTo(HaveOccurred())
+			return sent
+		}
+
+		It("truncates a title the API would reject", func() {
+			sent := sentTitle(strings.Repeat("a", 300))
+			Expect([]rune(sent)).To(HaveLen(256))
+			Expect(sent).To(HaveSuffix("…"), "the cut is marked")
+		})
+
+		It("counts characters rather than bytes", func() {
+			// 200 three-byte runes are 600 bytes but fit the limit.
+			title := strings.Repeat("ä", 200)
+			Expect(sentTitle(title)).To(Equal(title))
+		})
+
+		It("does not cut a title that fits", func() {
+			title := strings.Repeat("a", 256)
+			Expect(sentTitle(title)).To(Equal(title))
+		})
+
+		It("leaves an over-budget but acceptable title as written", func() {
+			title := "fix: " + strings.Repeat("word ", 20)
+			Expect(sentTitle(title)).To(Equal(title), "the style budget is not enforced here")
+		})
 	})
 
 	Describe("GetPullRequest", func() {
