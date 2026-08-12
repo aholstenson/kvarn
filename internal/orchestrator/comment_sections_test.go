@@ -29,10 +29,54 @@ var _ = Describe("comment sections", func() {
 				ReportWorklog: true,
 				ReportCost:    false,
 				QuoteTask:     forgeconfig.QuoteCollapsed,
-			})
+			}, forgeconfig.CommentNewPullRequest, prTemplateData{}, quietLogger())
 			Expect(out.worklog).To(BeTrue())
 			Expect(out.cost).To(BeFalse())
 			Expect(out.quote).To(Equal(forgeconfig.QuoteCollapsed))
+			Expect(out.header).To(BeEmpty())
+		})
+
+		It("expands the header against the run's metadata", func() {
+			out := sectionsFrom(
+				forgeconfig.Content{CommentHeaders: forgeconfig.CommentHeaders{
+					NewPullRequest: "**Issue:** {{ .Metadata.issue_id }} ({{ .Mode }})",
+				}},
+				forgeconfig.CommentNewPullRequest,
+				prTemplateData{Mode: "fix", Metadata: map[string]string{"issue_id": "ENG-42"}},
+				quietLogger())
+			Expect(out.header).To(Equal("**Issue:** ENG-42 (fix)"))
+		})
+
+		It("takes the header configured for the kind being built", func() {
+			content := forgeconfig.Content{CommentHeaders: forgeconfig.CommentHeaders{
+				NewPullRequest: "opened",
+				FollowUpCommit: "followed up",
+				PRComment:      "reviewed",
+			}}
+			header := func(kind forgeconfig.CommentKind) string {
+				return sectionsFrom(content, kind, prTemplateData{}, quietLogger()).header
+			}
+
+			Expect(header(forgeconfig.CommentNewPullRequest)).To(Equal("opened"))
+			Expect(header(forgeconfig.CommentFollowUpCommit)).To(Equal("followed up"))
+			Expect(header(forgeconfig.CommentPRComment)).To(Equal("reviewed"))
+		})
+
+		It("leaves the header empty for a kind that has none", func() {
+			out := sectionsFrom(
+				forgeconfig.Content{CommentHeaders: forgeconfig.CommentHeaders{NewPullRequest: "opened"}},
+				forgeconfig.CommentFollowUpCommit, prTemplateData{}, quietLogger())
+			Expect(out.header).To(BeEmpty(),
+				"the kinds are configured separately, so one must not stand in for another")
+		})
+
+		It("leaves the header empty when the submission carried no metadata", func() {
+			out := sectionsFrom(
+				forgeconfig.Content{CommentHeaders: forgeconfig.CommentHeaders{
+					NewPullRequest: "{{ with .Metadata.issue_id }}**Issue:** {{ . }}{{ end }}",
+				}},
+				forgeconfig.CommentNewPullRequest, prTemplateData{}, quietLogger())
+			Expect(out.header).To(BeEmpty())
 		})
 	})
 
@@ -100,6 +144,37 @@ var _ = Describe("comment sections", func() {
 			Expect(body).NotTo(ContainSubstring("## Cost"))
 			Expect(body).To(ContainSubstring("review this"))
 			Expect(body).To(ContainSubstring("looks good"))
+		})
+	})
+
+	Describe("the operator's header", func() {
+		withHeader := commentSections{
+			header: "**Issue:** ENG-42", worklog: true, cost: true, quote: forgeconfig.QuoteAuto,
+		}
+
+		It("leads every comment a delivery posts", func() {
+			Expect(formatWorklogComment("do the thing", entries, withHeader, report)).To(
+				HavePrefix("**Issue:** ENG-42\n\n"))
+			Expect(formatFollowupComment("fix the lint", "fixed it", entries, withHeader, report)).To(
+				HavePrefix("**Issue:** ENG-42\n\n## Changes"))
+			Expect(formatResultComment("review this", "looks good", nil, entries, withHeader, report)).To(
+				HavePrefix("**Issue:** ENG-42\n\n## Result"))
+		})
+
+		It("carries no heading of its own, so the operator's markdown stands as written", func() {
+			body := formatWorklogComment("do the thing", entries, withHeader, report)
+			Expect(body).NotTo(ContainSubstring("## **Issue:**"))
+		})
+
+		It("is reason enough to post when every other section is off", func() {
+			body := formatWorklogComment("do the thing", entries,
+				commentSections{header: "**Issue:** ENG-42", quote: forgeconfig.QuoteOff}, report)
+			Expect(body).To(Equal("**Issue:** ENG-42"))
+		})
+
+		It("still yields no comment when it is empty and every section is off", func() {
+			Expect(formatWorklogComment("do the thing", entries,
+				commentSections{quote: forgeconfig.QuoteOff}, report)).To(BeEmpty())
 		})
 	})
 

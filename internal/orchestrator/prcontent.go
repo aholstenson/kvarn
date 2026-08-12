@@ -83,32 +83,72 @@ func withLegacyReporting(
 }
 
 // sectionsFrom reads the comment-section choices out of resolved pull-request
-// content.
-func sectionsFrom(c forgeconfig.Content) commentSections {
-	return commentSections{worklog: c.ReportWorklog, cost: c.ReportCost, quote: c.QuoteTask}
+// content, expanding the header configured for this kind of comment. Each kind
+// carries its own header, so the caller has to say which one it is building.
+//
+// The header renders leniently: it is the one piece of comment config written
+// against keys only some submissions carry, so a template that guards a line it
+// cannot fill has to survive the guard.
+func sectionsFrom(
+	c forgeconfig.Content, kind forgeconfig.CommentKind, data prTemplateData, log *slog.Logger,
+) commentSections {
+	return commentSections{
+		header:  renderPRTemplate(c.CommentHeaders.For(kind), data, missingKeyZero, log),
+		worklog: c.ReportWorklog,
+		cost:    c.ReportCost,
+		quote:   c.QuoteTask,
+	}
 }
 
-// prTemplateData is what a body footer or commit trailer is rendered against.
-// The set is deliberately small: these strings identify a run, and widening
-// what they can reach turns operator config into a way to pull arbitrary run
-// content into a commit message.
+// prTemplateData is what a comment header, body footer or commit trailer is
+// rendered against. The fixed fields are deliberately few: they identify a run,
+// and widening what they can reach turns operator config into a way to pull
+// arbitrary run content into a commit message.
+//
+// Metadata is the exception, and a bounded one. It is the submission's own
+// annotations, capped at submission and already readable by anyone who can read
+// the session, so an operator naming a key here publishes an identifier their
+// own system chose to attach — which is the point: it is what connects a pull
+// request back to the ticket that asked for it.
 type prTemplateData struct {
 	Title       string
 	Description string
 	SessionID   string
 	Branch      string
 	Mode        string
+	Metadata    map[string]string
 }
 
-// renderPRTemplate expands one footer or trailer. A template that does not
-// parse or execute is dropped with a warning rather than published: a pull
+// Go templates only reach a map key through the `.Metadata.key` field syntax
+// when the key is a bare identifier, and metadata keys may also hold "-", "."
+// and "/". `index` is what covers the rest, so both spellings are documented.
+
+// missingKeyMode says what a template does when it reads a metadata key the
+// submission did not carry. It only ever affects map lookups: a misspelled
+// fixed field fails under either mode.
+type missingKeyMode string
+
+const (
+	// missingKeyZero renders an absent key as the empty string. Guarding a line
+	// with `{{ if .Metadata.issue_id }}` needs this: the guard has to evaluate
+	// the key before it can test it, so under the strict mode the very template
+	// written to tolerate a missing key is the one that fails on it.
+	missingKeyZero missingKeyMode = "missingkey=zero"
+	// missingKeyError drops the whole template when a key is absent. It is for
+	// text that lands somewhere unfixable, where "Issue-Id: " with nothing after
+	// it is worse than no line at all.
+	missingKeyError missingKeyMode = "missingkey=error"
+)
+
+// renderPRTemplate expands one header, footer or trailer. A template that does
+// not parse or execute is dropped with a warning rather than published: a pull
 // request carrying a literal "{{ .SessionID }}" reads as a kvarn bug, while a
 // missing footer reads as the configuration error it is.
-func renderPRTemplate(tmpl string, data prTemplateData, log *slog.Logger) string {
+func renderPRTemplate(tmpl string, data prTemplateData, missing missingKeyMode, log *slog.Logger) string {
 	if tmpl == "" {
 		return ""
 	}
-	t, err := template.New("pr").Option("missingkey=error").Parse(tmpl)
+	t, err := template.New("pr").Option(string(missing)).Parse(tmpl)
 	if err != nil {
 		log.Warn("pull request template does not parse; leaving it out", "template", tmpl, "error", err)
 		return ""
@@ -122,10 +162,10 @@ func renderPRTemplate(tmpl string, data prTemplateData, log *slog.Logger) string
 }
 
 // renderPRTemplates expands a list, dropping the entries that fail.
-func renderPRTemplates(tmpls []string, data prTemplateData, log *slog.Logger) []string {
+func renderPRTemplates(tmpls []string, data prTemplateData, missing missingKeyMode, log *slog.Logger) []string {
 	var out []string
 	for _, t := range tmpls {
-		if rendered := renderPRTemplate(t, data, log); rendered != "" {
+		if rendered := renderPRTemplate(t, data, missing, log); rendered != "" {
 			out = append(out, rendered)
 		}
 	}

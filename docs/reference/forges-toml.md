@@ -84,6 +84,10 @@ commit_trailers = ["Kvarn-Session: {{ .SessionID }}"]
 report_worklog_on_pr = true
 report_cost_on_pr = true
 quote_task = "auto"
+
+[defaults.pull_request.comment_headers]
+new_pull_request = "{{ with .Metadata.issue_id }}**Issue:** {{ . }}{{ end }}"
+pr_comment = "{{ with .Metadata.issue_id }}Automated review for **{{ . }}**{{ end }}"
 ```
 
 | Key | Type | Notes |
@@ -93,6 +97,7 @@ quote_task = "auto"
 | `body_instructions` | string | As above, for the shared commit/PR body. |
 | `comment_instructions` | string | How the written result should read when posted as a comment. |
 | `body_footer` | string | Appended to the pull request body only. |
+| `comment_headers` | table | Per-comment headers; see [Comment headers](#comment-headers). |
 | `commit_trailers` | list of strings | Appended to the commit message as a trailer block. |
 | `report_worklog_on_pr` | bool | Include the collapsible work log in the comment a delivery posts. |
 | `report_cost_on_pr` | bool | Include a cost section in that comment. |
@@ -104,10 +109,10 @@ repository in [`kvarn.yml`](kvarn-yml.md#pull_request), not here.
 ### Comment layout
 
 The comment a delivery posts is ordered outcome first, provenance last: the
-result, then how validation went, then the request the run was given, then the
-work log and the cost. The result is bounded; the request is arbitrary-length
-user text, and leading with it pushes the answer off the screen on exactly the
-runs where a reader most wants it.
+header, then the result, then how validation went, then the request the run was
+given, then the work log and the cost. The result is bounded; the request is
+arbitrary-length user text, and leading with it pushes the answer off the screen
+on exactly the runs where a reader most wants it.
 
 `quote_task` decides how the request itself is rendered:
 
@@ -123,18 +128,83 @@ not land as sections of the comment. An unrecognised value fails the config load
 rather than being ignored.
 
 Turning off every section of a comment leaves nothing to say, and kvarn then
-posts no comment at all rather than an empty one.
+posts no comment at all rather than an empty one. A header counts as something to
+say: set one and that comment is posted even with every section off.
+
+### Comment headers
+
+A delivery posts three different comments, in three different situations, so each
+one's header is configured on its own. There is no shared fallback — a key you
+leave unset means that comment has no header, not that it borrows another's.
+
+```toml
+[defaults.pull_request.comment_headers]
+new_pull_request = "{{ with .Metadata.issue_id }}**Issue:** {{ . }}{{ end }}"
+follow_up_commit = ""
+pr_comment = "{{ with .Metadata.issue_id }}Automated review for **{{ . }}**{{ end }}"
+```
+
+| Key | The comment it heads |
+| --- | --- |
+| `new_pull_request` | Posted alongside a pull request the run just opened, carrying the task and the work log. |
+| `follow_up_commit` | Posted after a feedback run pushes a follow-up commit onto an existing pull request. |
+| `pr_comment` | The whole output of a review-style mode, which commits nothing. |
+
+The keys are the delivery sinks a mode names under `deliver:` in
+[`kvarn.yml`](kvarn-yml.md#pull_request), so the header you are configuring is
+the comment that sink produces.
+
+Which of the three is worth a header depends on how the comment is read. The
+first comment on a new pull request introduces a change nobody has seen, and an
+identifier at the top is what ties it to the request that asked for it. A
+follow-up comment lands in a thread that already carries that context — unless
+the run started from an existing pull request somebody else opened, in which case
+it is the first thing kvarn has said there. A review comment is the run's entire
+output on someone else's work, so if it is going to be attributed at all, it has
+to be attributed there.
+
+A header is rendered verbatim, with no heading of its own, so the markdown you
+write is the markdown that appears.
 
 ### Templates
 
-`body_footer` and `commit_trailers` are Go templates. The available fields are
-`.Title`, `.Description`, `.SessionID`, `.Branch` and `.Mode`. A template that
-does not parse, or names a field that does not exist, is left out with a warning
-rather than published with the braces intact.
+`comment_headers`, `body_footer` and `commit_trailers` are Go templates. The
+available fields are `.Title`, `.Description`, `.SessionID`, `.Branch`, `.Mode`
+and `.Metadata`. A template that does not parse, or names a field that does not
+exist, is left out with a warning rather than published with the braces intact.
 
 The footer is pull-request only and the trailers are commit only. The body
 itself stays identical between the two, so a squash merge lands what the pull
 request showed.
+
+#### Submission metadata
+
+`.Metadata` is the `map<string, string>` the caller attached when it submitted
+the job — the `--meta key=value` flags on `kvarn jobs start`, or the `metadata`
+field on `StartJob`. It is how a header names the submitting system's own
+identifiers:
+
+```toml
+[defaults.pull_request.comment_headers]
+new_pull_request = "{{ with .Metadata.issue_id }}**Issue:** {{ . }}{{ end }}"
+```
+
+Two things about metadata keys are worth knowing:
+
+- **Not every key can be spelled `.Metadata.key`.** Keys may contain `-`, `.`
+  and `/`, none of which the field syntax accepts — `{{ .Metadata.issue-id }}`
+  is a parse error, not a missing value. Use `{{ index .Metadata "issue-id" }}`
+  for those, which works for every key shape.
+- **Absent keys behave differently per destination.** In a comment header or a
+  `body_footer` a key the submission did not carry renders as the empty string,
+  which is what makes `{{ with … }}` and `{{ if … }}` work as guards. In a
+  `commit_trailer` an absent key drops the whole trailer instead: the commit
+  message is not something anyone will rewrite, and `Issue-Id:` with nothing
+  after it is worse than no trailer at all.
+
+Metadata is not a place for secrets. It is already readable by anyone who can
+read the session, and a header publishes it to everyone who can read the pull
+request — which on a public repository is everyone.
 
 ## Resolution order
 

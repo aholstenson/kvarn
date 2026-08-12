@@ -352,6 +352,7 @@ func (s *Service) resolveSpec(ctx context.Context, sess *session.Session) (jobSp
 		modeName:     sess.Mode,
 		modeSpec:     modeSpec,
 		userPrompt:   sess.Prompt,
+		metadata:     sess.Metadata,
 		agentContext: coding.ContextInput{Task: sess.Prompt},
 		baseBranch:   sess.BaseBranch,
 	}

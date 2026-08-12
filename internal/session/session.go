@@ -197,9 +197,9 @@ type Session struct {
 	// Empty when the caller supplied no key.
 	IdempotencyKey string
 	// Metadata is the caller's own annotations on the submission — which ticket,
-	// which chat message, which upstream run asked for this. It is opaque here
-	// and everywhere below the request boundary: nothing reads a key to decide
-	// anything, and the only operation over it is exact-match filtering.
+	// which chat message, which upstream run asked for this. Nothing about how a
+	// run behaves depends on a key: it is filtered on by exact match, and read by
+	// name only where an operator's pull-request template asks for one.
 	//
 	// Written at creation and never updated, so it stays a record of what was
 	// asked for. Nil when the submission carried none.

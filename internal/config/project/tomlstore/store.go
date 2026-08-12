@@ -56,10 +56,43 @@ type prEntry struct {
 	BodyInstructions    string                `toml:"body_instructions,omitempty"`
 	BodyFooter          string                `toml:"body_footer,omitempty"`
 	CommentInstructions string                `toml:"comment_instructions,omitempty"`
+	CommentHeaders      *headerEntry          `toml:"comment_headers,omitempty"`
 	CommitTrailers      []string              `toml:"commit_trailers,omitempty"`
 	ReportWorklogOnPR   *bool                 `toml:"report_worklog_on_pr,omitempty"`
 	ReportCostOnPR      *bool                 `toml:"report_cost_on_pr,omitempty"`
 	QuoteTask           forgeconfig.QuoteMode `toml:"quote_task,omitempty"`
+}
+
+// headerEntry mirrors a `comment_headers` sub-table, one key per kind of
+// comment a delivery posts.
+type headerEntry struct {
+	NewPullRequest string `toml:"new_pull_request,omitempty"`
+	FollowUpCommit string `toml:"follow_up_commit,omitempty"`
+	PRComment      string `toml:"pr_comment,omitempty"`
+}
+
+func (e *headerEntry) toHeaders() forgeconfig.CommentHeaders {
+	if e == nil {
+		return forgeconfig.CommentHeaders{}
+	}
+	return forgeconfig.CommentHeaders{
+		NewPullRequest: e.NewPullRequest,
+		FollowUpCommit: e.FollowUpCommit,
+		PRComment:      e.PRComment,
+	}
+}
+
+// headerEntryFrom returns nil for headers that set nothing, so an untouched
+// config does not grow the sub-table.
+func headerEntryFrom(h forgeconfig.CommentHeaders) *headerEntry {
+	if h.Empty() {
+		return nil
+	}
+	return &headerEntry{
+		NewPullRequest: h.NewPullRequest,
+		FollowUpCommit: h.FollowUpCommit,
+		PRComment:      h.PRComment,
+	}
 }
 
 // toContent converts a parsed block to the domain type. A nil receiver is the
@@ -76,6 +109,7 @@ func (e *prEntry) toContent() forgeconfig.PRContent {
 		BodyInstructions:    e.BodyInstructions,
 		BodyFooter:          e.BodyFooter,
 		CommentInstructions: e.CommentInstructions,
+		CommentHeaders:      e.CommentHeaders.toHeaders(),
 		CommitTrailers:      trailers,
 		ReportWorklog:       e.ReportWorklogOnPR,
 		ReportCost:          e.ReportCostOnPR,
@@ -92,6 +126,7 @@ func prEntryFrom(c forgeconfig.PRContent) *prEntry {
 		BodyInstructions:    c.BodyInstructions,
 		BodyFooter:          c.BodyFooter,
 		CommentInstructions: c.CommentInstructions,
+		CommentHeaders:      headerEntryFrom(c.CommentHeaders),
 		ReportWorklogOnPR:   c.ReportWorklog,
 		ReportCostOnPR:      c.ReportCost,
 		QuoteTask:           c.QuoteTask,
@@ -114,6 +149,7 @@ func (e *prEntry) isZero() bool {
 		e.BodyInstructions == "" &&
 		e.BodyFooter == "" &&
 		e.CommentInstructions == "" &&
+		e.CommentHeaders == nil &&
 		len(e.CommitTrailers) == 0 &&
 		e.ReportWorklogOnPR == nil &&
 		e.ReportCostOnPR == nil &&

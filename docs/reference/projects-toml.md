@@ -95,11 +95,14 @@ commit_trailers = ["Kvarn-Session: {{ .SessionID }}"]
 report_worklog_on_pr = true
 report_cost_on_pr = false
 quote_task = "collapsed"
+
+[projects.my-project.pull_request.comment_headers]
+new_pull_request = "{{ with .Metadata.issue_id }}**Issue:** {{ . }}{{ end }}"
 ```
 
-The keys, the template fields available to `body_footer` and `commit_trailers`,
-and the rule that `*_instructions` concatenate across layers rather than
-overriding are documented once in
+The keys, the three [comment headers](forges-toml.md#comment-headers) and the
+template fields available to them, and the rule that `*_instructions`
+concatenate across layers rather than overriding are documented once in
 [`forges.toml`](forges-toml.md#pull-request-content).
 
 Section structure — the headings a body must carry — is declared by the

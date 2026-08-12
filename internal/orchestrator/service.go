@@ -129,9 +129,13 @@ func firstLine(s string) string {
 }
 
 // commentSections says what the optional parts of a delivery's PR comment
-// carry. All three are resolved per job from project and user config; they
+// carry. All of it is resolved per job from project and user config; the values
 // travel together because every comment formatter needs the same answers.
 type commentSections struct {
+	// header is the header configured for the kind of comment being built,
+	// already expanded against this run. Empty when no layer configured one for
+	// that kind, or when the template failed and was dropped.
+	header  string
 	worklog bool
 	cost    bool
 	quote   forgeconfig.QuoteMode
@@ -142,6 +146,13 @@ type commentSections struct {
 // request that started the run is arbitrary-length user text. Leading with the
 // request pushes the answer off the screen on exactly the runs — long briefs,
 // pasted specs — where the answer matters most.
+//
+// The operator's header sits above even the outcome. It is a line or two of
+// identifiers tying the run to whatever asked for it, and it is only worth
+// configuring if a reader meets it before anything else. Each comment below
+// takes its own header: they are read in different situations — a change nobody
+// has seen, a thread that already has the context, a verdict on someone else's
+// work — and one wording for all three fits none of them well.
 
 // formatWorklogComment renders the comment posted alongside a new pull request:
 // the task that was given, and the collapsible work log and cost sections. The
@@ -149,6 +160,7 @@ type commentSections struct {
 // repeated here.
 func formatWorklogComment(prompt string, entries []worklogEntry, sections commentSections, report cost.Report) string {
 	var sb strings.Builder
+	writeHeader(&sb, sections.header)
 	writeQuotedRequest(&sb, "Task", prompt, sections.quote)
 	writeWorklog(&sb, sections.worklog, entries)
 	writeCostSection(&sb, sections.cost, report)
@@ -160,6 +172,7 @@ func formatWorklogComment(prompt string, entries []worklogEntry, sections commen
 // the same work log / cost sections a fresh run posts.
 func formatFollowupComment(feedback, summary string, entries []worklogEntry, sections commentSections, report cost.Report) string {
 	var sb strings.Builder
+	writeHeader(&sb, sections.header)
 	writeSection(&sb, "Changes", summary)
 	writeQuotedRequest(&sb, "Feedback addressed", feedback, sections.quote)
 	writeWorklog(&sb, sections.worklog, entries)
@@ -172,6 +185,16 @@ func formatFollowupComment(feedback, summary string, entries []worklogEntry, sec
 // first one to trim rather than each section having to know it is first.
 func finishComment(sb *strings.Builder) string {
 	return strings.TrimSpace(sb.String())
+}
+
+// writeHeader appends the operator's header verbatim, with no heading of its
+// own: it is free-form markdown an operator wrote, and wrapping it in a "##" of
+// kvarn's choosing would fight whatever structure they gave it.
+func writeHeader(sb *strings.Builder, header string) {
+	if header = strings.TrimSpace(header); header == "" {
+		return
+	}
+	fmt.Fprintf(sb, "\n\n%s", header)
 }
 
 // writeSection appends a level-2 section, or nothing when there is no body to
@@ -993,6 +1016,10 @@ type jobSpec struct {
 	// userPrompt is what the requester actually asked for, used for the PR
 	// comment and as the last section of the agent's task message.
 	userPrompt string
+	// metadata is the submission's annotations, carried this far only so an
+	// operator's comment header and body footer can name them. The agent never
+	// sees it and nothing about the run depends on it.
+	metadata map[string]string
 	// agentContext holds the pieces a context pack can be built from. Which of
 	// them the agent actually sees is the mode's `context` axis, applied inside
 	// the run.
@@ -1665,6 +1692,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		creds:       creds,
 		pr:          spec.pr,
 		userPrompt:  userPrompt,
+		metadata:    spec.metadata,
 		worklog:     worklog.snapshot(),
 
 		valResult:        valResult,
@@ -1774,6 +1802,7 @@ func (s *Service) submitChanges(
 	cloneDir string,
 	creds scm.CredentialSource,
 	prompt string,
+	metadata map[string]string,
 	worklog []worklogEntry,
 	costReport cost.Report,
 	log *slog.Logger,
@@ -1833,11 +1862,15 @@ func (s *Service) submitChanges(
 		SessionID:   sessionID,
 		Branch:      prBranch,
 		Mode:        modeName,
+		Metadata:    metadata,
 	}
+	// Trailers render strictly because they land in the commit message, where a
+	// key the submission did not carry would leave a trailer with nothing after
+	// the colon in history nobody will rewrite.
 	commitMsg = coding.ApplyTrailers(commitMsg,
-		renderPRTemplates(behavior.PullRequest.CommitTrailers, tmplData, log))
+		renderPRTemplates(behavior.PullRequest.CommitTrailers, tmplData, missingKeyError, log))
 	prBody := coding.ApplyFooter(body,
-		renderPRTemplate(behavior.PullRequest.BodyFooter, tmplData, log))
+		renderPRTemplate(behavior.PullRequest.BodyFooter, tmplData, missingKeyZero, log))
 
 	if err := forgeImpl.SCM().CommitAndPush(ctx, scm.CommitAndPushOpts{
 		RepoDir:     cloneDir,
@@ -1877,7 +1910,8 @@ func (s *Service) submitChanges(
 	// Post task + work log as a PR comment so it stays out of any
 	// squash-merge commit message. Configuration that turns off every section
 	// leaves nothing to say, and an empty comment is worse than none.
-	commentBody := formatWorklogComment(prompt, worklog, sectionsFrom(behavior.PullRequest), costReport)
+	commentBody := formatWorklogComment(prompt, worklog,
+		sectionsFrom(behavior.PullRequest, forgeconfig.CommentNewPullRequest, tmplData, log), costReport)
 	if commentBody == "" {
 		log.Info("skipping task/work-log comment: every section is turned off")
 		return nil
@@ -1912,6 +1946,7 @@ func (s *Service) submitFollowup(
 	cloneDir string,
 	creds scm.CredentialSource,
 	feedback string,
+	metadata map[string]string,
 	worklog []worklogEntry,
 	costReport cost.Report,
 	log *slog.Logger,
@@ -1956,15 +1991,16 @@ func (s *Service) submitFollowup(
 	if agentResult.Description != "" {
 		commitMsg = title + "\n\n" + agentResult.Description
 	}
-	commitMsg = coding.ApplyTrailers(commitMsg, renderPRTemplates(
-		behavior.PullRequest.CommitTrailers,
-		prTemplateData{
-			Title:       title,
-			Description: agentResult.Description,
-			SessionID:   sessionID,
-			Branch:      pr.headBranch,
-			Mode:        modeName,
-		}, log))
+	tmplData := prTemplateData{
+		Title:       title,
+		Description: agentResult.Description,
+		SessionID:   sessionID,
+		Branch:      pr.headBranch,
+		Mode:        modeName,
+		Metadata:    metadata,
+	}
+	commitMsg = coding.ApplyTrailers(commitMsg,
+		renderPRTemplates(behavior.PullRequest.CommitTrailers, tmplData, missingKeyError, log))
 
 	// Pushing the PR's own branch name is a fast-forward of one new commit.
 	if err := forgeImpl.SCM().CommitAndPush(ctx, scm.CommitAndPushOpts{
@@ -1983,7 +2019,7 @@ func (s *Service) submitFollowup(
 	log.Info("follow-up commit pushed", "branch", pr.headBranch, "url", pr.url)
 
 	commentBody := formatFollowupComment(feedback, agentResult.Description, worklog,
-		sectionsFrom(behavior.PullRequest), costReport)
+		sectionsFrom(behavior.PullRequest, forgeconfig.CommentFollowUpCommit, tmplData, log), costReport)
 	if commentBody == "" {
 		log.Info("skipping follow-up comment: every section is turned off")
 		return nil

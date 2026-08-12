@@ -67,6 +67,57 @@ func (m *QuoteMode) UnmarshalText(text []byte) error {
 	return fmt.Errorf("unknown quote mode %q (want one of: %s)", s, strings.Join(names, ", "))
 }
 
+// CommentKind names one of the comments a delivery posts. The values match the
+// delivery sinks a mode declares under `deliver:`, because that is the choice
+// that decides which comment a run produces — an operator reading a header back
+// should not have to learn a second vocabulary for the same three things.
+type CommentKind string
+
+const (
+	// CommentNewPullRequest is the comment posted alongside a pull request the
+	// run just opened.
+	CommentNewPullRequest CommentKind = "new-pull-request"
+	// CommentFollowUpCommit is the comment posted after a follow-up commit
+	// lands on an existing pull request.
+	CommentFollowUpCommit CommentKind = "follow-up-commit"
+	// CommentPRComment is the comment a review-style mode posts as its whole
+	// output, having committed nothing.
+	CommentPRComment CommentKind = "pr-comment"
+)
+
+// CommentHeaders is the header template each kind of comment carries.
+//
+// The three are configured separately, with no shared fallback, because they
+// are read in different situations and rarely want the same words: the first
+// comment on a new pull request introduces a change nobody has seen, a
+// follow-up comment lands in a thread that already has that context, and a
+// review comment is the run's entire output on someone else's work.
+type CommentHeaders struct {
+	NewPullRequest string
+	FollowUpCommit string
+	PRComment      string
+}
+
+// For returns the header template for one kind of comment, or "" for a kind
+// that has none.
+func (h CommentHeaders) For(kind CommentKind) string {
+	switch kind {
+	case CommentNewPullRequest:
+		return h.NewPullRequest
+	case CommentFollowUpCommit:
+		return h.FollowUpCommit
+	case CommentPRComment:
+		return h.PRComment
+	default:
+		return ""
+	}
+}
+
+// Empty reports whether no kind has a header.
+func (h CommentHeaders) Empty() bool {
+	return h.NewPullRequest == "" && h.FollowUpCommit == "" && h.PRComment == ""
+}
+
 // Section is one heading a generated pull-request body or comment carries. The
 // agent is asked to fill it in, and the delivery renders the sections in the
 // order they are declared regardless of the order they come back in.
@@ -95,7 +146,10 @@ type PRContent struct {
 	BodyInstructions    string
 	BodyFooter          string
 	CommentInstructions string
-	CommitTrailers      []string
+	// CommentHeaders are the templates rendered at the top of the comments a
+	// delivery posts.
+	CommentHeaders CommentHeaders
+	CommitTrailers []string
 	// ReportWorklog and ReportCost gate the optional sections of the comment a
 	// delivery posts. Nil inherits the next layer down.
 	ReportWorklog *bool
@@ -108,11 +162,11 @@ type PRContent struct {
 // RepoContent is the pull-request content a repository contributes from the
 // `pull_request:` block in its kvarn.yml.
 //
-// It carries wording and structure only. Footers, commit trailers, the report
-// toggles and the quote mode have no repository layer on purpose: they carry
-// run identity and operator noise control, and kvarn.yml is read from the
-// branch under test, so a run could otherwise rewrite its own attribution — or
-// suppress the record of what it was asked to do.
+// It carries wording and structure only. Footers, comment headers, commit
+// trailers, the report toggles and the quote mode have no repository layer on
+// purpose: they carry run identity and operator noise control, and kvarn.yml is
+// read from the branch under test, so a run could otherwise rewrite its own
+// attribution — or suppress the record of what it was asked to do.
 type RepoContent struct {
 	TitleInstructions   string
 	TitleMaxLength      *int
@@ -146,6 +200,7 @@ type Content struct {
 	BodyFooter          string
 	CommentInstructions Instructions
 	CommentSections     []Section
+	CommentHeaders      CommentHeaders
 	CommitTrailers      []string
 	ReportWorklog       bool
 	ReportCost          bool
@@ -180,6 +235,18 @@ func resolveContent(layers []PRContent, repo RepoContent) Content {
 		}
 		if l.BodyFooter != "" {
 			c.BodyFooter = l.BodyFooter
+		}
+		// Each kind's header resolves on its own, the way the scalars around it
+		// do. They share a table for the operator's convenience, not because
+		// setting one says anything about the other two.
+		if l.CommentHeaders.NewPullRequest != "" {
+			c.CommentHeaders.NewPullRequest = l.CommentHeaders.NewPullRequest
+		}
+		if l.CommentHeaders.FollowUpCommit != "" {
+			c.CommentHeaders.FollowUpCommit = l.CommentHeaders.FollowUpCommit
+		}
+		if l.CommentHeaders.PRComment != "" {
+			c.CommentHeaders.PRComment = l.CommentHeaders.PRComment
 		}
 		if len(l.CommitTrailers) > 0 {
 			c.CommitTrailers = slicesClone(l.CommitTrailers)

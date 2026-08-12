@@ -200,6 +200,9 @@ report_cost_on_pr = false
 				PullRequest: forgeconfig.PRContent{
 					TitleInstructions: "Conventional Commits.",
 					TitleMaxLength:    intPtr(60),
+					CommentHeaders: forgeconfig.CommentHeaders{
+						NewPullRequest: "**Issue:** {{ .Metadata.issue_id }}",
+					},
 				},
 			})).To(Succeed())
 
@@ -207,6 +210,22 @@ report_cost_on_pr = false
 			Expect(err).NotTo(HaveOccurred())
 			Expect(proj.PullRequest.TitleInstructions).To(Equal("Conventional Commits."))
 			Expect(*proj.PullRequest.TitleMaxLength).To(Equal(60))
+			Expect(proj.PullRequest.CommentHeaders.NewPullRequest).To(Equal("**Issue:** {{ .Metadata.issue_id }}"))
+		})
+
+		It("keeps a project that only sets a comment header", func() {
+			path := filepath.Join(tmpDir, "projects.toml")
+			Expect(store.Put(ctx, &project.Project{
+				Name: "app", RepoURL: "org/app",
+				PullRequest: forgeconfig.PRContent{CommentHeaders: forgeconfig.CommentHeaders{
+					PRComment: "**Issue:** {{ .Metadata.issue_id }}",
+				}},
+			})).To(Succeed())
+
+			raw, err := os.ReadFile(path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(raw)).To(ContainSubstring("pr_comment"),
+				"a header is the only thing this block sets, so isZero must not discard it")
 		})
 
 		It("does not add an empty table for a project that sets nothing", func() {

@@ -54,8 +54,10 @@ message StartJobRequest {
   // what was asked for stops being one as soon as two systems can edit it.
   //
   // Not a place for secrets: the pairs are readable by anyone who can read the
-  // session and appear in job listings and orchestrator logs. Keys beginning
-  // "kvarn." are reserved.
+  // session and appear in job listings and orchestrator logs. An operator may
+  // also name a key in a comment header or body footer template, which puts
+  // that value on the pull request — everyone, on a public repository.
+  // Keys beginning "kvarn." are reserved.
   map<string, string> metadata = 8;
 }
 

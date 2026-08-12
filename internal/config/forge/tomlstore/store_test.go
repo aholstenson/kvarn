@@ -186,6 +186,10 @@ body_footer = "kvarn · {{ .SessionID }}"
 commit_trailers = ["Kvarn-Session: {{ .SessionID }}"]
 report_worklog_on_pr = false
 
+[defaults.pull_request.comment_headers]
+new_pull_request = "**Issue:** {{ .Metadata.issue_id }}"
+pr_comment = "Review for {{ .Metadata.issue_id }}"
+
 [forges.github-myorg]
 type = "github"
 
@@ -200,6 +204,10 @@ report_cost_on_pr = true
 			Expect(d.PullRequest.TitleInstructions).To(Equal("Use Conventional Commits."))
 			Expect(*d.PullRequest.TitleMaxLength).To(Equal(60))
 			Expect(d.PullRequest.BodyFooter).To(Equal("kvarn · {{ .SessionID }}"))
+			Expect(d.PullRequest.CommentHeaders.NewPullRequest).To(Equal("**Issue:** {{ .Metadata.issue_id }}"))
+			Expect(d.PullRequest.CommentHeaders.PRComment).To(Equal("Review for {{ .Metadata.issue_id }}"))
+			Expect(d.PullRequest.CommentHeaders.FollowUpCommit).To(BeEmpty(),
+				"a kind the block did not set must stay unset so it can inherit")
 			Expect(d.PullRequest.CommitTrailers).To(Equal([]string{"Kvarn-Session: {{ .SessionID }}"}))
 			Expect(*d.PullRequest.ReportWorklog).To(BeFalse())
 			Expect(d.PullRequest.ReportCost).To(BeNil(), "an unset toggle must stay unset so it can inherit")
@@ -215,7 +223,11 @@ report_cost_on_pr = true
 				Name: "gh", Type: "github",
 				PullRequest: forgeconfig.PRContent{
 					BodyInstructions: "Be specific.",
-					CommitTrailers:   []string{"Kvarn-Mode: {{ .Mode }}"},
+					CommentHeaders: forgeconfig.CommentHeaders{
+						NewPullRequest: `{{ with index .Metadata "issue-id" }}**Issue:** {{ . }}{{ end }}`,
+						FollowUpCommit: "Follow-up",
+					},
+					CommitTrailers: []string{"Kvarn-Mode: {{ .Mode }}"},
 					ReportCost:       boolPtr(false),
 				},
 			})).To(Succeed())
@@ -223,6 +235,10 @@ report_cost_on_pr = true
 			fc, err := store.Get(ctx, "gh")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(fc.PullRequest.BodyInstructions).To(Equal("Be specific."))
+			Expect(fc.PullRequest.CommentHeaders.NewPullRequest).To(
+				Equal(`{{ with index .Metadata "issue-id" }}**Issue:** {{ . }}{{ end }}`))
+			Expect(fc.PullRequest.CommentHeaders.FollowUpCommit).To(Equal("Follow-up"))
+			Expect(fc.PullRequest.CommentHeaders.PRComment).To(BeEmpty())
 			Expect(fc.PullRequest.CommitTrailers).To(Equal([]string{"Kvarn-Mode: {{ .Mode }}"}))
 			Expect(*fc.PullRequest.ReportCost).To(BeFalse())
 		})

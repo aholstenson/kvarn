@@ -76,6 +76,52 @@ var _ = Describe("ResolveBehavior pull-request content", func() {
 			Expect(c.TitleMaxLength).To(Equal(60))
 		})
 
+		It("resolves each comment header on its own rather than as one table", func() {
+			c := (&forgeconfig.ForgeConfig{
+				PullRequest: forgeconfig.PRContent{CommentHeaders: forgeconfig.CommentHeaders{
+					NewPullRequest: "forge opened",
+				}},
+			}).ResolveBehavior(
+				forgeconfig.Defaults{PullRequest: forgeconfig.PRContent{CommentHeaders: forgeconfig.CommentHeaders{
+					NewPullRequest: "default opened",
+					FollowUpCommit: "default followed up",
+				}}},
+				forgeconfig.Overrides{},
+				forgeconfig.RepoContent{},
+			).PullRequest
+
+			Expect(c.CommentHeaders.NewPullRequest).To(Equal("forge opened"))
+			Expect(c.CommentHeaders.FollowUpCommit).To(Equal("default followed up"),
+				"setting one kind must not clear the kinds a lower layer set")
+			Expect(c.CommentHeaders.PRComment).To(BeEmpty())
+		})
+
+		It("gives the repository no way to set a comment header", func() {
+			c := (&forgeconfig.ForgeConfig{}).ResolveBehavior(
+				forgeconfig.Defaults{PullRequest: forgeconfig.PRContent{CommentHeaders: forgeconfig.CommentHeaders{
+					PRComment: "default reviewed",
+				}}},
+				forgeconfig.Overrides{},
+				forgeconfig.RepoContent{},
+			).PullRequest
+
+			Expect(c.CommentHeaders.PRComment).To(Equal("default reviewed"),
+				"kvarn.yml is read from the branch under test, so a run must not rewrite its own attribution")
+		})
+
+		It("maps each kind to its own header", func() {
+			h := forgeconfig.CommentHeaders{
+				NewPullRequest: "opened", FollowUpCommit: "followed up", PRComment: "reviewed",
+			}
+
+			Expect(h.For(forgeconfig.CommentNewPullRequest)).To(Equal("opened"))
+			Expect(h.For(forgeconfig.CommentFollowUpCommit)).To(Equal("followed up"))
+			Expect(h.For(forgeconfig.CommentPRComment)).To(Equal("reviewed"))
+			Expect(h.For(forgeconfig.CommentKind("nonesuch"))).To(BeEmpty())
+			Expect(h.Empty()).To(BeFalse())
+			Expect(forgeconfig.CommentHeaders{}.Empty()).To(BeTrue())
+		})
+
 		It("lets the repository set the title budget above every operator layer", func() {
 			c := (&forgeconfig.ForgeConfig{}).ResolveBehavior(
 				forgeconfig.Defaults{PullRequest: forgeconfig.PRContent{TitleMaxLength: ptrInt(50)}},

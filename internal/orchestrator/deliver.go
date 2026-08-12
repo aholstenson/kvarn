@@ -36,7 +36,10 @@ type deliveryRequest struct {
 	// userPrompt is what the requester asked for, quoted back in the comment a
 	// delivery posts.
 	userPrompt string
-	worklog    []worklogEntry
+	// metadata is the submission's annotations, available here so an operator's
+	// comment header can name them.
+	metadata map[string]string
+	worklog  []worklogEntry
 	// valResult is the last validation pass, reported alongside the result so a
 	// comment says which steps ran and how they went. Nil when the mode skips
 	// validation or the project declares no steps.
@@ -130,7 +133,7 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 		case coding.SinkNewPullRequest:
 			if err := s.submitChanges(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
 				req.proj, req.behavior, req.mode.Name, req.baseBranch, req.cloneURL, req.cloneDir, req.creds,
-				req.userPrompt, req.worklog, req.cost, req.log); err != nil {
+				req.userPrompt, req.metadata, req.worklog, req.cost, req.log); err != nil {
 				return err
 			}
 			commented = true
@@ -141,7 +144,7 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 			}
 			if err := s.submitFollowup(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
 				req.proj, req.behavior, req.mode.Name, req.pr, req.cloneURL, req.cloneDir, req.creds,
-				req.userPrompt, req.worklog, req.cost, req.log); err != nil {
+				req.userPrompt, req.metadata, req.worklog, req.cost, req.log); err != nil {
 				return err
 			}
 			commented = true
@@ -180,11 +183,27 @@ func (s *Service) postResultComment(ctx context.Context, req deliveryRequest) er
 	s.sessionMgr.UpdateState(ctx, req.sessionID, session.StateSubmitting, "Posting result comment")
 
 	result := ""
+	title := ""
 	if req.agentResult != nil {
 		result = req.agentResult.Description
+		title = req.agentResult.Title
 	}
+	// This sink commits nothing, so the branch a header can name is the one the
+	// run read: the pull request's head, or the base it started from.
+	branch := req.baseBranch
+	if req.pr != nil {
+		branch = req.pr.headBranch
+	}
+	sections := sectionsFrom(req.behavior.PullRequest, forgeconfig.CommentPRComment, prTemplateData{
+		Title:       title,
+		Description: result,
+		SessionID:   req.sessionID,
+		Branch:      branch,
+		Mode:        req.mode.Name,
+		Metadata:    req.metadata,
+	}, req.log)
 	body := formatResultComment(req.userPrompt, result, req.valResult,
-		req.worklog, sectionsFrom(req.behavior.PullRequest), req.cost)
+		req.worklog, sections, req.cost)
 	if body == "" {
 		// The comment is this mode's entire output, so there is nothing left to
 		// deliver — but an empty comment says even less than none.
@@ -219,6 +238,7 @@ func formatResultComment(prompt, result string, val *sandbox.ValidationResult,
 	entries []worklogEntry, sections commentSections, report cost.Report,
 ) string {
 	var sb strings.Builder
+	writeHeader(&sb, sections.header)
 	writeSection(&sb, "Result", result)
 	writeValidation(&sb, val)
 	writeQuotedRequest(&sb, "Task", prompt, sections.quote)

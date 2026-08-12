@@ -436,9 +436,9 @@ position, and a name the mode introduces is appended.
 
 ### What this block cannot set
 
-Body footers, commit trailers, whether a comment carries the work log or the
-cost, and how much of the request that started the run it quotes back
-(`quote_task`) are configured by the operator in
+Body footers, the comment headers, commit trailers, whether a comment carries the
+work log or the cost, and how much of the request that started the run it quotes
+back (`quote_task`) are configured by the operator in
 [`forges.toml`](forges-toml.md) and [`projects.toml`](projects-toml.md). This
 file is read from the branch a job runs on, the same trust boundary `modes` and
 `setup.steps` sit on, so a run that could set them would be able to rewrite its
