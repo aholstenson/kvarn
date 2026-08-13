@@ -21,6 +21,54 @@ type Config struct {
 	ImageCache ImageCache `toml:"image-cache"`
 	Sessions   Sessions   `toml:"sessions"`
 	Repos      Repos      `toml:"repos"`
+	Preview    Preview    `toml:"preview"`
+}
+
+// Preview mirrors the [preview] table: the operator half of preview
+// environments. It is the layer that owns the domain and the resource envelope;
+// a repository's kvarn.yml owns only the shape of the preview inside it.
+//
+// An absent section disables previews entirely, which is why Domain has no
+// default: there is no domain kvarn could pick that the operator actually
+// controls, and serving previews on a name nobody owns is worse than serving
+// none.
+type Preview struct {
+	// Domain is the base domain preview hostnames are formed under, e.g.
+	// "preview.example.com". Empty disables previews.
+	Domain string `toml:"domain,omitempty"`
+	// Listen is the address the plain-HTTP ingress listener binds, e.g.
+	// "100.64.0.1:8080". TLS terminates outside kvarn — Caddy, Tailscale, a
+	// load balancer — so this should be an address only that fronting layer can
+	// reach. Empty disables the listener.
+	Listen string `toml:"listen,omitempty"`
+	// IdleTimeout stops a preview that has served no request for this long
+	// (e.g. "30m"). The next request boots it again. "0" never reaps on idle;
+	// empty takes the built-in default.
+	IdleTimeout string `toml:"idle_timeout,omitempty"`
+	// MaxLifetime stops a preview this long after it booted regardless of
+	// traffic (e.g. "8h"), so a preview somebody keeps poking at is still
+	// rebuilt from the ref eventually. "0" disables the cap; empty takes the
+	// built-in default.
+	MaxLifetime string `toml:"max_lifetime,omitempty"`
+	// MaxConcurrent bounds how many previews may be running at once. Reaching
+	// it evicts the least-recently-requested idle preview to make room, and
+	// answers with a holding page only when there is nothing idle to evict. 0
+	// is unbounded; empty takes the built-in default.
+	MaxConcurrent *int `toml:"max_concurrent,omitempty"`
+	// MaxMemory and MaxDisk cap what any one preview VM may request,
+	// independently of what its kvarn.yml asks for (e.g. "8G"). A preview is
+	// long-lived, so the ceiling that makes sense for a job that finishes in
+	// minutes is not the one that makes sense here. Empty means the project's
+	// own request stands.
+	MaxMemory string `toml:"max_memory,omitempty"`
+	MaxDisk   string `toml:"max_disk,omitempty"`
+}
+
+// Enabled reports whether the operator has configured previews at all. Both a
+// domain and a listen address are needed: a preview with no name is
+// unaddressable, and one with no listener is unreachable.
+func (p Preview) Enabled() bool {
+	return p.Domain != "" && p.Listen != ""
 }
 
 // Repos mirrors the [repos] table: the host-side bare mirror kept per project

@@ -33,6 +33,24 @@ type RunnerProxy interface {
 	StreamFromGuest(ctx context.Context, srcPath string, dest io.Writer) error
 }
 
+// ProcessExitCallback is invoked when a long-lived process started through
+// StartProcess ends, whether it was stopped or died on its own.
+type ProcessExitCallback func(exitCode int32, err error)
+
+// ProcessRunner manages processes in the guest that outlive the call starting
+// them — the servers a preview environment runs. It is separate from
+// RunnerProxy because only the bridge-backed proxy can support it: the
+// callbacks are fed by the runner's unsolicited reports, which have nowhere to
+// arrive on a proxy that is not attached to a live bridge.
+type ProcessRunner interface {
+	// StartProcess spawns the process and returns once it is running. Output
+	// arrives on onOutput until it ends; onExit fires exactly once when it
+	// does. The caller supplies req.ProcessId.
+	StartProcess(ctx context.Context, req *v1.StartProcessRequest, onOutput OutputCallback, onExit ProcessExitCallback) (*v1.StartProcessResponse, error)
+	StopProcess(ctx context.Context, req *v1.StopProcessRequest) (*v1.StopProcessResponse, error)
+	ListProcesses(ctx context.Context, req *v1.ListProcessesRequest) (*v1.ListProcessesResponse, error)
+}
+
 // commandWaiter is registered per in-flight command so the dispatcher can
 // route results and output chunks to the correct caller.
 type commandWaiter struct {
@@ -49,6 +67,17 @@ type BridgeProxy struct {
 
 	mu      sync.Mutex
 	waiters map[string]*commandWaiter
+	// procs holds the callbacks for long-lived processes, keyed on process ID.
+	// Output for one arrives on the same channel as command output but is not
+	// tied to any in-flight command, so it is routed from here instead.
+	procs map[string]*processSub
+}
+
+// processSub is the caller's interest in one long-lived process.
+type processSub struct {
+	onOutput OutputCallback
+	onExit   ProcessExitCallback
+	exitOnce sync.Once
 }
 
 // NewBridgeProxy creates a RunnerProxy backed by the given command/result/output channels.
@@ -58,9 +87,13 @@ func NewBridgeProxy(commandCh chan<- *v1.RunnerCommand, resultCh <-chan *v1.Comm
 		commandCh: commandCh,
 		runner:    runner,
 		waiters:   make(map[string]*commandWaiter),
+		procs:     make(map[string]*processSub),
 	}
 	go p.dispatchResults(resultCh)
 	go p.dispatchOutput(outputCh)
+	if runner != nil {
+		go p.dispatchProcessEvents(runner.ProcessEventCh)
+	}
 	return p
 }
 
@@ -88,7 +121,19 @@ func (p *BridgeProxy) dispatchOutput(outputCh <-chan *v1.OutputChunk) {
 	for chunk := range outputCh {
 		p.mu.Lock()
 		w, ok := p.waiters[chunk.CommandId]
+		sub := p.procs[chunk.CommandId]
 		p.mu.Unlock()
+
+		// A long-lived process keys its output on its process ID, which is not
+		// a command anyone is waiting on. Its callback runs here rather than
+		// through a channel because there is no command loop to drain one;
+		// callbacks must therefore not block.
+		if sub != nil {
+			if sub.onOutput != nil {
+				sub.onOutput(chunk.Stdout, chunk.Stderr)
+			}
+			continue
+		}
 
 		if !ok || w.outputCh == nil {
 			continue
@@ -101,6 +146,126 @@ func (p *BridgeProxy) dispatchOutput(outputCh <-chan *v1.OutputChunk) {
 				"command_id", chunk.CommandId)
 		}
 	}
+}
+
+// dispatchProcessEvents routes unsolicited process notifications to the
+// subscriber that started the process.
+func (p *BridgeProxy) dispatchProcessEvents(eventCh <-chan *v1.ProcessEvent) {
+	for event := range eventCh {
+		if event.Kind != v1.ProcessEventKind_PROCESS_EVENT_KIND_EXITED {
+			continue
+		}
+
+		p.mu.Lock()
+		sub := p.procs[event.ProcessId]
+		delete(p.procs, event.ProcessId)
+		p.mu.Unlock()
+
+		if sub == nil {
+			slog.Debug("process exit for unknown process, discarding", "process_id", event.ProcessId)
+			continue
+		}
+		p.notifyExit(sub, event.ExitCode, event.Error)
+	}
+}
+
+// notifyExit delivers the exit callback at most once, so a process that both
+// reports an exit and is later stopped does not fire it twice.
+func (p *BridgeProxy) notifyExit(sub *processSub, exitCode int32, errMsg string) {
+	sub.exitOnce.Do(func() {
+		if sub.onExit == nil {
+			return
+		}
+		var err error
+		if errMsg != "" {
+			err = errors.New(errMsg)
+		}
+		sub.onExit(exitCode, err)
+	})
+}
+
+// StartProcess launches a process in the guest that outlives this call.
+func (p *BridgeProxy) StartProcess(ctx context.Context, req *v1.StartProcessRequest, onOutput OutputCallback, onExit ProcessExitCallback) (*v1.StartProcessResponse, error) {
+	if req.ProcessId == "" {
+		return nil, errors.New("process ID is required")
+	}
+
+	// Subscribe before sending: the guest can produce output the moment the
+	// process is spawned, which is before the start command's own result gets
+	// back here.
+	sub := &processSub{onOutput: onOutput, onExit: onExit}
+	p.mu.Lock()
+	if _, exists := p.procs[req.ProcessId]; exists {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("process %q is already running", req.ProcessId)
+	}
+	p.procs[req.ProcessId] = sub
+	p.mu.Unlock()
+
+	result, err := p.sendAndWait(ctx, &v1.RunnerCommand{
+		CommandId: p.nextCommandID(),
+		Command:   &v1.RunnerCommand_StartProcess{StartProcess: req},
+	})
+	if err != nil {
+		p.mu.Lock()
+		delete(p.procs, req.ProcessId)
+		p.mu.Unlock()
+		return nil, err
+	}
+	resp := result.GetStartProcess()
+	if resp == nil {
+		p.mu.Lock()
+		delete(p.procs, req.ProcessId)
+		p.mu.Unlock()
+		return nil, errors.New("unexpected result type")
+	}
+	return resp, nil
+}
+
+// StopProcess terminates a process in the guest and drops its subscription.
+func (p *BridgeProxy) StopProcess(ctx context.Context, req *v1.StopProcessRequest) (*v1.StopProcessResponse, error) {
+	result, err := p.sendAndWait(ctx, &v1.RunnerCommand{
+		CommandId: p.nextCommandID(),
+		Command:   &v1.RunnerCommand_StopProcess{StopProcess: req},
+	})
+
+	// Drop the subscription either way. A stop that failed because the runner
+	// no longer knows the process still means nothing more will arrive for it.
+	p.mu.Lock()
+	sub := p.procs[req.ProcessId]
+	delete(p.procs, req.ProcessId)
+	p.mu.Unlock()
+
+	if err != nil {
+		return nil, err
+	}
+	resp := result.GetStopProcess()
+	if resp == nil {
+		return nil, errors.New("unexpected result type")
+	}
+	// The runner reaps the process as part of stopping it, so the exit event
+	// may never make it across; deliver it from here so the caller always
+	// learns the process is gone exactly once.
+	if sub != nil {
+		p.notifyExit(sub, resp.ExitCode, "")
+	}
+	return resp, nil
+}
+
+// ListProcesses reports the processes the guest's runner is supervising.
+func (p *BridgeProxy) ListProcesses(ctx context.Context, req *v1.ListProcessesRequest) (*v1.ListProcessesResponse, error) {
+	result, err := p.sendAndWait(ctx, &v1.RunnerCommand{
+		CommandId: p.nextCommandID(),
+		Command:   &v1.RunnerCommand_ListProcesses{ListProcesses: req},
+	})
+	if err != nil {
+		return nil, err
+	}
+	resp := result.GetListProcesses()
+	if resp == nil {
+		return nil, errors.New("unexpected result type")
+	}
+	return resp, nil
 }
 
 // registerWaiter creates a per-command waiter and stores it in the map.

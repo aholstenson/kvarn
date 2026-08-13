@@ -31,6 +31,9 @@ message RunnerCommand {
     DownloadFileCommand download_file = 10;
     UploadFileCommand upload_file = 11;
     WriteFileRequest write_file = 12;
+    StartProcessRequest start_process = 13;
+    StopProcessRequest stop_process = 14;
+    ListProcessesRequest list_processes = 15;
   }
   reserved 6;
 }
@@ -59,6 +62,9 @@ message CommandResult {
     FileStreamResult download_file_result = 12;
     FileStreamResult upload_file_result = 13;
     WriteFileResponse write_file = 14;
+    StartProcessResponse start_process = 15;
+    StopProcessResponse stop_process = 16;
+    ListProcessesResponse list_processes = 17;
   }
   reserved 8;
   string error = 7;
@@ -99,10 +105,32 @@ message DownloadFileRequest {
   string token = 2;
 }
 
+// ProcessEvent reports something that happened to a long-lived process without
+// the orchestrator having asked. An exit cannot ride on CommandResult: that is
+// keyed to a command which completed the moment the process started, so by the
+// time the process ends there is nothing left to answer.
+message ProcessEvent {
+  string token = 1;
+  string process_id = 2;
+  ProcessEventKind kind = 3;
+  // ExitCode is set when kind is EXITED.
+  int32 exit_code = 4;
+  // Error describes a failure to spawn or supervise the process.
+  string error = 5;
+}
+
+enum ProcessEventKind {
+  PROCESS_EVENT_KIND_UNSPECIFIED = 0;
+  PROCESS_EVENT_KIND_EXITED = 1;
+}
+
+message ReportProcessEventResponse {}
+
 service BridgeService {
   rpc Register(RegisterRequest) returns (stream RunnerCommand);
   rpc ReportResult(CommandResult) returns (ReportResultResponse);
   rpc ReportOutput(OutputChunk) returns (ReportOutputResponse);
+  rpc ReportProcessEvent(ProcessEvent) returns (ReportProcessEventResponse);
   rpc DownloadFile(DownloadFileRequest) returns (stream FileStreamChunk);
   rpc UploadFile(stream FileStreamChunk) returns (FileStreamResult);
 }

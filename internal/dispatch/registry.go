@@ -24,9 +24,14 @@ type PendingRunner struct {
 	CommandCh chan *v1.RunnerCommand
 	ResultCh  chan *v1.CommandResult
 	OutputCh  chan *v1.OutputChunk
-	DoneCh    chan struct{}
-	doneOnce  sync.Once
-	VmInfo    *v1.VmInfo
+	// ProcessEventCh carries unsolicited notifications about long-lived
+	// processes. They arrive on their own channel rather than on ResultCh
+	// because no command is waiting for them: the command that started the
+	// process was answered the moment it was running.
+	ProcessEventCh chan *v1.ProcessEvent
+	DoneCh         chan struct{}
+	doneOnce       sync.Once
+	VmInfo         *v1.VmInfo
 
 	// RegisteredOnce gates the long-lived Register stream so that exactly one
 	// caller can own it at a time. It is cleared when the stream returns so a
@@ -101,10 +106,11 @@ func (r *Registry) Register(token string) (*PendingRunner, error) {
 	}
 
 	pr := &PendingRunner{
-		CommandCh: make(chan *v1.RunnerCommand, 1),
-		ResultCh:  make(chan *v1.CommandResult, 1),
-		OutputCh:  make(chan *v1.OutputChunk, 64),
-		DoneCh:    make(chan struct{}),
+		CommandCh:      make(chan *v1.RunnerCommand, 1),
+		ResultCh:       make(chan *v1.CommandResult, 1),
+		OutputCh:       make(chan *v1.OutputChunk, 64),
+		ProcessEventCh: make(chan *v1.ProcessEvent, 16),
+		DoneCh:         make(chan struct{}),
 	}
 	r.pending[token] = pr
 	return pr, nil

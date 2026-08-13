@@ -34,9 +34,10 @@ task --list         # see all available tasks
 - `internal/scm/git/` — `scm.SCM` on the git command line. `run.go` runs one command and owns the option/operand boundary, `auth.go` builds per-invocation credentials, `hostkey.go` + `hostkeys.txt` pin forge SSH host keys
 - `internal/scm/mirror/` — Host-side bare mirror per project, so N concurrent jobs on one repository share a single fetch
 - `internal/session/` — Orchestrator-owned session store. `Store` (sessions + per-session monotonic event log) has two impls: `memstore` (tests) and `sqlite/` (production, pure-Go `modernc.org/sqlite`). `Manager` owns the in-memory pub/sub hub and layers replay + reconnect-from-cursor on top; `codec.go` encodes the durable event kinds (256 KiB payload cap) and the session↔row mapping
+- `internal/preview/` — Preview environments: the durable record and its `Store` (`memstore` for tests, `sqlite/` in production), plus `boot.go`, which starts the declared serve processes and waits on the ready checks. Both the orchestrator's hosted previews and `kvarn local preview` go through `boot.go`, so the two cannot drift on what bringing a preview up means
 - `internal/runner/` — Runner service (ConnectRPC handler)
 - `internal/runnerbin/` — Embeds the linux runner binary into the CLI (build with `-tags embedrunner`; the artifact is gitignored and produced by `task build:runner`)
-- `internal/cmd/` — CLI command handlers (jobs, queue, feedback, secrets, key, client, repo)
+- `internal/cmd/` — CLI command handlers (jobs, queue, preview, secrets, key, client, repo). `local/` is the group that boots a VM on this machine against the working directory — `local test`, `local job`, `local preview` — with `local/bootui/` holding the sandbox-boot rendering all three share
 
 ## Test
 

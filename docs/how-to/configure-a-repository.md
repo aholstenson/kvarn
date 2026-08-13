@@ -77,15 +77,15 @@ step — or the agent — cannot change a path the container already wrote. Poin
 containers that generate their own state at a named volume rather than the
 workspace.
 
-## Iterate with `kvarn test`
+## Iterate with `kvarn local test`
 
 ```sh
-kvarn test          # boot a VM, install deps, run setup + validation
-kvarn test -v       # include output from passing steps
-kvarn test --logs   # add VM and orchestration logs
+kvarn local test          # boot a VM, install deps, run setup + validation
+kvarn local test -v       # include output from passing steps
+kvarn local test --logs   # add VM and orchestration logs
 ```
 
-`kvarn test` never invokes the agent, so it is the fast loop for getting a
+`kvarn local test` never invokes the agent, so it is the fast loop for getting a
 `kvarn.yml` right. It works against your current working tree with no
 orchestrator, project entry or forge configured.
 
@@ -149,21 +149,21 @@ Declaring the name here is only half of it; the value is set on the host with
 `kvarn secrets set`. See [Manage secrets](manage-secrets.md), which also covers
 `managed` secrets — credentials the VM never actually receives.
 
-To test a project that uses secrets locally, pass `--project` so `kvarn test`
-and `kvarn run` know whose secrets to look up:
+To test a project that uses secrets locally, pass `--project` so the `kvarn
+local` commands know whose secrets to look up:
 
 ```sh
-kvarn test --project my-project
+kvarn local test --project my-project
 ```
 
 ## Try the agent against it
 
-Once `kvarn test` is green, exercise the agent locally before involving the
-orchestrator:
+Once `kvarn local test` is green, exercise the agent locally before involving
+the orchestrator:
 
 ```sh
-kvarn run --diff "Add a test for the retry path"    # print a diff, change nothing
-kvarn run --apply "Fix the failing tests"           # copy changes back
+kvarn local job --diff "Add a test for the retry path"    # print a diff, change nothing
+kvarn local job --apply "Fix the failing tests"           # copy changes back
 ```
 
 Read-only modes (`--mode review`, `--mode research`) ignore both flags and write

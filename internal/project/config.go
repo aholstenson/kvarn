@@ -71,6 +71,7 @@ type Config struct {
 	Validation   Validation        `yaml:"validation"`
 	Modes        Modes             `yaml:"modes,omitempty"`
 	PullRequest  PullRequest       `yaml:"pull_request,omitempty"`
+	Preview      Preview           `yaml:"preview,omitempty"`
 }
 
 // Modes are the agent modes this repository defines, keyed by the name a job
@@ -920,6 +921,10 @@ func (c *Config) validate() error {
 
 	if err := c.PullRequest.validate(); err != nil {
 		return fmt.Errorf("pull_request: %w", err)
+	}
+
+	if err := c.Preview.validate(); err != nil {
+		return fmt.Errorf("preview: %w", err)
 	}
 
 	allSteps := make([]Step, 0)

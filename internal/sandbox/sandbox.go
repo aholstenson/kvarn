@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -188,6 +189,12 @@ type Session struct {
 	// the workspace is not a git repository or has no commits.
 	BaseCommit string
 
+	// dialGuest is the provider's ingress path into the VM, carried here
+	// because callers that want to reach a server inside the guest hold a
+	// Session rather than the *vm.VM it was booted from. Nil when the provider
+	// has no ingress path.
+	dialGuest func(ctx context.Context, port uint16) (net.Conn, error)
+
 	// bareProxy is the underlying BridgeProxy (not wrapped by container).
 	// Needed for operations like git diff that must run on the host VM.
 	bareProxy *BridgeProxy
@@ -264,6 +271,26 @@ func (s *Session) BareProxy() *BridgeProxy {
 func (s *Session) ExtractChanges(ctx context.Context, destDir string) error {
 	return ExtractChanges(ctx, s.bareProxy, s.WorkingDir, destDir, s.BaseCommit)
 }
+
+// DialGuest opens a TCP connection to a port inside the sandbox's VM. It
+// returns errors.ErrUnsupported when the provider that booted this session has
+// no ingress path, matching the convention the non-darwin provider stubs use.
+func (s *Session) DialGuest(ctx context.Context, port uint16) (net.Conn, error) {
+	if s.dialGuest == nil {
+		return nil, fmt.Errorf("dial guest port %d: %w", port, errors.ErrUnsupported)
+	}
+	return s.dialGuest(ctx, port)
+}
+
+// CanDialGuest reports whether this session's provider supports ingress, so a
+// caller can refuse work up front rather than discovering it on the first
+// request.
+func (s *Session) CanDialGuest() bool { return s.dialGuest != nil }
+
+// Processes returns the session's manager for long-lived guest processes. It
+// is the bare proxy deliberately: a server has to run on the VM itself, not
+// inside whatever container a step wrapped itself in.
+func (s *Session) Processes() ProcessRunner { return s.bareProxy }
 
 // GetRunner returns the session's RunnerProxy.
 func (s *Session) GetRunner() RunnerProxy { return s.Runner }
@@ -462,6 +489,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("create VM: %w", err)
 	}
+	sess.dialGuest = instance.DialGuest
 	sess.addCloser(func() {
 		slog.Info("destroying VM", "vm_id", instance.ID)
 		destroyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

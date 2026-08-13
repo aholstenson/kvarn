@@ -543,6 +543,106 @@ message ListQueueResponse {
   int32 backlog = 2;
 }
 
+// A preview environment is a long-lived VM pinned to a git ref, reachable over
+// HTTP at a stable hostname, booted on demand and stopped when it goes idle.
+// Unlike a job it has no end state: stopping one leaves the record and its
+// hostnames in place so the next request boots it again.
+message Preview {
+  // Id is the stable identity, derived from the project and ref.
+  string id = 1;
+  string project = 2;
+  string ref = 3;
+  // State is one of stopped, booting, running, failed.
+  string state = 4;
+  repeated PreviewApp apps = 5;
+  // SessionId is the session the current or most recent boot narrates itself
+  // through, for following a boot's progress with WatchSession.
+  string session_id = 6;
+  // Error is why the last boot failed, when state is failed.
+  string error = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+  // StartedAt is when the current VM booted; unset when nothing is running.
+  google.protobuf.Timestamp started_at = 10;
+  // LastRequestAt is what idle reaping measures.
+  google.protobuf.Timestamp last_request_at = 11;
+  // ExpiresAt is the hard deadline the current VM is stopped at regardless of
+  // traffic; unset when no cap applies.
+  google.protobuf.Timestamp expires_at = 12;
+  // Url is the address to hand a person who asked for "the" preview.
+  string url = 13;
+}
+
+message PreviewApp {
+  string name = 1;
+  string host = 2;
+  uint32 port = 3;
+  string url = 4;
+}
+
+// StartPreviewRequest registers a preview of a ref and boots it. Asking for a
+// ref that already has a preview returns that one rather than a second.
+message StartPreviewRequest {
+  string project = 1;
+  // Ref is the branch to preview.
+  string ref = 2;
+  // Wait holds the response until the preview is serving or the boot fails.
+  // Without it the call returns as soon as the boot has started, which is what
+  // a caller that intends to watch the session wants.
+  bool wait = 3;
+}
+
+message StartPreviewResponse {
+  Preview preview = 1;
+}
+
+message StopPreviewRequest {
+  string project = 1;
+  string ref = 2;
+  // Remove deletes the record and releases its hostnames, rather than leaving
+  // a stopped preview the next request would boot again.
+  bool remove = 3;
+}
+
+message StopPreviewResponse {
+  Preview preview = 1;
+}
+
+message ListPreviewsRequest {
+  // Filter to a single project; empty means any project the caller may access.
+  string project = 1;
+}
+
+message ListPreviewsResponse {
+  repeated Preview previews = 1;
+}
+
+message GetPreviewRequest {
+  string project = 1;
+  string ref = 2;
+}
+
+message GetPreviewResponse {
+  Preview preview = 1;
+  // Logs is the retained tail of the preview's process output. A preview runs
+  // for hours, so only the last of it is kept and none of it is persisted.
+  string logs = 2;
+}
+
+// WatchPreviewRequest streams a preview's state as it changes, so a client can
+// follow a boot without polling.
+message WatchPreviewRequest {
+  string project = 1;
+  string ref = 2;
+}
+
+message PreviewUpdate {
+  Preview preview = 1;
+  // Phase is the boot's current step in words, taken from the session the boot
+  // reports through — "Cloning repository", "Installing dependencies".
+  string phase = 2;
+}
+
 service OrchestratorService {
   rpc StartJob(StartJobRequest) returns (StartJobResponse);
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
@@ -557,4 +657,9 @@ service OrchestratorService {
   rpc GetQueueStats(GetQueueStatsRequest) returns (GetQueueStatsResponse);
   rpc ListQueue(ListQueueRequest) returns (ListQueueResponse);
   rpc SetDrain(SetDrainRequest) returns (SetDrainResponse);
+  rpc StartPreview(StartPreviewRequest) returns (StartPreviewResponse);
+  rpc StopPreview(StopPreviewRequest) returns (StopPreviewResponse);
+  rpc ListPreviews(ListPreviewsRequest) returns (ListPreviewsResponse);
+  rpc GetPreview(GetPreviewRequest) returns (GetPreviewResponse);
+  rpc WatchPreview(WatchPreviewRequest) returns (stream PreviewUpdate);
 }

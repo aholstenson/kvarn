@@ -149,3 +149,36 @@ its project's cap waits without blocking other projects.
 effective priority the longer it waits, so a high-priority project cannot starve
 a low-priority one. Override it per mode with
 `[projects.<name>.jobs.<mode>].priority`.
+
+## `[projects.<name>.preview]`
+
+Whether this project may have [preview
+environments](../how-to/preview-environments.md), and under which domain. It is
+the middle of three layers: the operator's [`[preview]`
+section](orchestrator-toml.md#preview) decides whether the feature exists at
+all, this decides whether the project may use it, and the repository's
+`kvarn.yml` decides what a preview looks like.
+
+```toml
+[projects.my-project.preview]
+enabled = true
+domain = "preview.my-project.example.com"
+allow_forks = false
+```
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | inherit | `false` refuses previews for this project even on a host that has them. Unset means previews are available whenever the host has them configured. |
+| `domain` | hostname | inherit | Base domain for this project's preview hostnames, instead of the operator's. Useful for giving one repository its own zone. |
+| `allow_forks` | bool | `false` | Permit previews of refs that came from a fork. Reserved; see below. |
+
+`allow_forks` is read but nothing acts on it yet: a preview is started
+explicitly for a ref in the project's own repository, so there is no fork ref
+for it to govern. It becomes meaningful when previews can be created from a pull
+request's head.
+
+It defaults to off because a preview runs the branch's own code with the
+project's resolved secrets behind its egress proxy, and a fork's branch is
+written by somebody without push access to this repository. Turning it on will
+be reasonable only where the network already restricts who can reach a preview
+at all.

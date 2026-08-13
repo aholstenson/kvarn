@@ -72,12 +72,13 @@ unless a dependency source already allowlisted them.
 
 ## Test locally
 
-`kvarn run` and `kvarn test` resolve secrets from the same store. They infer the
+The `kvarn local` commands resolve secrets from the same store. They infer the
 project from the git remote, or take it explicitly:
 
 ```sh
-kvarn test --project my-project
-kvarn run --project my-project --secrets-file ./secrets.toml --diff "…"
+kvarn local test --project my-project
+kvarn local job --project my-project --secrets-file ./secrets.toml --diff "…"
+kvarn local preview --project my-project
 ```
 
 ## Forge credentials are separate

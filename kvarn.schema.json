@@ -168,9 +168,86 @@
       "type": "object",
       "propertyNames": { "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64 },
       "additionalProperties": { "$ref": "#/$defs/mode" }
+    },
+    "preview": {
+      "description": "Preview environments for this repository: a long-lived VM pinned to a ref, reachable over HTTP at a stable hostname, booted on the first request and stopped when it goes idle. The operator's [preview] section supplies the domain; this block supplies the shape.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "apps": {
+          "description": "Addressable servers this preview exposes, keyed by the name the serve steps refer to.",
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+          "additionalProperties": { "$ref": "#/$defs/previewApp" }
+        },
+        "serve": {
+          "description": "Long-lived commands that start the apps. Every declared app must be served by exactly one.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/previewProcess" }
+        },
+        "ready": {
+          "description": "Checks that decide when the preview may take traffic. Run in order and retried until they pass or the boot gives up.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" }
+        }
+      }
     }
   },
   "$defs": {
+    "previewApp": {
+      "description": "One addressable server inside the preview.",
+      "type": "object",
+      "required": ["port"],
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "description": "Guest port the server listens on.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "host": {
+          "description": "Hostname pattern this app answers on. `{ref}` expands to the slugged git ref (always exactly one DNS label) and `{domain}` to the project's configured preview domain. The pattern must end in `{domain}` or `.{domain}`, so a repository cannot claim a name outside the operator's zone. Defaults to \"{ref}.{domain}\".",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "previewProcess": {
+      "description": "A long-lived command that serves one app. It is started after setup completes and stopped when the preview is reaped.",
+      "type": "object",
+      "required": ["name", "run", "app"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Step identifier.",
+          "type": "string",
+          "minLength": 1
+        },
+        "run": {
+          "description": "Shell command to execute (via sh -c). It should stay in the foreground; kvarn supervises it.",
+          "type": "string",
+          "minLength": 1
+        },
+        "app": {
+          "description": "Name of the app in `apps` this command serves.",
+          "type": "string",
+          "minLength": 1
+        },
+        "working_dir": {
+          "description": "Relative path where the command executes, resolved from the workspace root.",
+          "type": "string"
+        },
+        "env": {
+          "description": "Additional environment variable names to forward from the preview environment into this process.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
+        }
+      }
+    },
     "step": {
       "description": "A command step to execute.",
       "type": "object",

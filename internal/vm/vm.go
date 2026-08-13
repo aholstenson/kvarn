@@ -20,6 +20,15 @@ type VM struct {
 	// TLS. Empty when the provider relies on platform-native egress
 	// controls instead, in which case the guest needs no extra anchor.
 	ProxyCAPEM []byte
+
+	// DialGuest opens a TCP connection to a port inside the guest. The guest's
+	// network is a userspace stack the provider owns, so this is the only way
+	// in from the host side: nothing outside the provider's process can reach
+	// a server the VM is running.
+	//
+	// Nil when the provider cannot do ingress, which callers surface as
+	// errors.ErrUnsupported.
+	DialGuest func(ctx context.Context, port uint16) (net.Conn, error)
 }
 
 type RunnerConn struct {

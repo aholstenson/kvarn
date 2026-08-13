@@ -50,6 +50,9 @@ type Project struct {
 	Labels            []string
 	CommitAuthorName  string
 	CommitAuthorEmail string
+	// Preview is the `[projects.<name>.preview]` block: whether this project may
+	// have preview environments, and under which domain.
+	Preview Preview
 	// PullRequest is the `[projects.<name>.pull_request]` block: what the pull
 	// requests and comments this project's jobs produce should say. It is the
 	// most specific operator layer, above the forge and the global defaults.
@@ -80,6 +83,28 @@ type Project struct {
 	// high-priority project cannot starve a low-priority one. Per-job-mode
 	// overrides live in Jobs.
 	Priority *int
+}
+
+// Preview is the per-project preview policy. It sits between the operator's
+// [preview] section and the repository's kvarn.yml: the operator decides
+// whether the feature exists at all, this decides whether this project may use
+// it, and the repository decides what it looks like.
+type Preview struct {
+	// Enabled turns previews on for this project. Nil inherits the operator's
+	// stance, which is on whenever the [preview] section is configured.
+	Enabled *bool
+	// Domain overrides the operator's base domain for this project, for giving
+	// one repository its own zone. Empty inherits.
+	Domain string
+	// AllowForks permits previews for refs that came from a fork. It is off by
+	// default: a preview runs the branch's own code with the project's
+	// resolved secrets, and a fork's branch is written by someone who does not
+	// have push access to this repository.
+	//
+	// Nothing reaches it yet. A preview is started explicitly for a ref in the
+	// project's own repository, so there is no fork ref for it to govern; it
+	// becomes live when previews can be created from a pull request's head.
+	AllowForks *bool
 }
 
 // Store provides CRUD operations for projects. Get and Delete return

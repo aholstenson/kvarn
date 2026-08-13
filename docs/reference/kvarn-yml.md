@@ -26,6 +26,7 @@ The home directory is `/home/kvarn`.
 | `validation` | object | Steps run after the agent. |
 | `modes` | map | Agent modes this repository defines, beside the built-in ones. |
 | `pull_request` | object | What the pull requests, commits and comments a run produces should say. |
+| `preview` | object | Preview environments: which ports serve which hostnames, and what to run to bring them up. |
 
 All keys are optional; a repository with no `kvarn.yml` gets a bare VM with no
 setup and no validation.
@@ -447,10 +448,107 @@ own attribution — or suppress the record of what it was asked to do.
 Operator instructions are not replaced by anything here. Both sets reach the
 summary, labelled by origin, and the repository's read last.
 
+## `preview`
+
+Declares a [preview environment](../how-to/preview-environments.md): a
+long-lived VM pinned to a branch, reachable over HTTP at a stable hostname,
+booted on demand and stopped when it goes idle.
+
+The operator owns the domain and the repository owns the shape. This block says
+which ports serve which hostnames and what to run; the base domain comes from
+the orchestrator's [`[preview]` section](orchestrator-toml.md#preview) or the
+project's override.
+
+```yaml
+preview:
+  apps:
+    web:    { port: 3000, host: "{ref}.{domain}" }
+    assets: { port: 8080, host: "assets-{ref}.{domain}" }
+  serve:
+    - { name: Web, run: npm start, app: web }
+    - { name: Assets, run: npm run assets, app: assets }
+  ready:
+    - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
+```
+
+`host` defaults to `{ref}.{domain}`, so the single-app case is just:
+
+```yaml
+preview:
+  apps:
+    web: { port: 3000 }
+  serve:
+    - { name: Web, run: npm start, app: web }
+  ready:
+    - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
+```
+
+### `preview.apps`
+
+A map of app name to the server it names. App names are lowercase
+alphanumerics separated by single hyphens.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `port` | int | Required. The guest port the server listens on. Ports must be unique across apps. |
+| `host` | string | Hostname pattern. Defaults to `{ref}.{domain}`. |
+
+Two placeholders are available:
+
+- `{ref}` — the branch, reduced to exactly one DNS label: lowercased, with
+  anything that is not a letter or digit collapsed to a hyphen. When that is not
+  a faithful rendering of the branch — `feat/login` and `feat-login` would
+  otherwise collide, and a long branch has to be shortened — a short digest of
+  the original is appended, so the label stays deterministic, stays under 63
+  bytes and never names two branches the same thing.
+- `{domain}` — the base domain configured for the project.
+
+**A pattern must end in `{domain}` or `.{domain}`.** Anything else is rejected
+when the file is read. Without that rule a `kvarn.yml` on any branch could write
+`host: "admin.example.com"` and have the orchestrator serve a name in the
+operator's zone, which is not the repository's to claim.
+
+### `preview.serve`
+
+The long-lived commands that start the apps. Each is spawned in its own process
+group under the same unprivileged user every step runs as, and supervised for
+the preview's whole life; stopping the preview signals the group.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `name` | string | Required. Identifies the process in logs and events. |
+| `run` | string | Required. Executed via `sh -c`. Should stay in the foreground. |
+| `app` | string | Required. The app in `apps` this command serves. |
+| `working_dir` | string | Relative to the workspace root. |
+| `env` | list | Additional environment variable names to forward into the process. |
+
+Every declared app must be served by exactly one entry, and every entry must
+name an app that exists: an app nothing starts is a hostname that will never
+answer, and a command for an app that does not exist is a server nothing can
+reach. Both are rejected when the file is read.
+
+Before the serve commands run, each app's resolved URL is exported as
+`KVARN_PREVIEW_URL_<APP>` — `KVARN_PREVIEW_URL_WEB`,
+`KVARN_PREVIEW_URL_ADMIN_UI` — with the app name uppercased and hyphens turned
+into underscores. Read them for anything that has to be an absolute URL: asset
+prefixes, OAuth redirect URIs, CORS origins. An app that hardcodes
+`http://localhost:3000` instead is the most common way a preview ends up
+half-broken.
+
+### `preview.ready`
+
+Ordinary [steps](#step-fields) that decide when the preview may take traffic.
+They run in order after the serve commands start, and each is retried for about
+two minutes — a server takes a moment to bind its port, and failing on the first
+attempt would fail a preview that is merely still starting.
+
+Requests arriving before the checks pass get a holding page rather than a
+connection error.
+
 ## Step fields
 
-Used by `setup.steps`, `setup.health_checks`, `validation.required` and
-`validation.advisory`.
+Used by `setup.steps`, `setup.health_checks`, `validation.required`,
+`validation.advisory` and `preview.ready`.
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -463,7 +561,7 @@ Used by `setup.steps`, `setup.health_checks`, `validation.required` and
 
 ## Checking a file
 
-`kvarn test` boots a VM against the current working tree and runs dependencies,
-setup, health checks and validation without invoking the agent. That is the
-fastest way to confirm a `kvarn.yml` is correct; see
+`kvarn local test` boots a VM against the current working tree and runs
+dependencies, setup, health checks and validation without invoking the agent.
+That is the fastest way to confirm a `kvarn.yml` is correct; see
 [Configure a repository](../how-to/configure-a-repository.md).

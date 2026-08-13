@@ -82,7 +82,7 @@ validation:
 Check it works before wiring anything else up — from a clone of that repository:
 
 ```sh
-kvarn test
+kvarn local test
 ```
 
 This boots a VM, installs dependencies and runs setup, health checks and

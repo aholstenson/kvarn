@@ -138,6 +138,31 @@ func (h *Handler) ReportOutput(ctx context.Context, req *connect.Request[v1.Outp
 	return connect.NewResponse(&v1.ReportOutputResponse{}), nil
 }
 
+// ReportProcessEvent implements BridgeServiceHandler. The runner calls this
+// when a long-lived process exits.
+//
+// Unlike an output chunk, an exit cannot be dropped under load: it is the only
+// notice the orchestrator gets that a service is gone, and a preview whose
+// server died silently would keep answering requests with connection refused.
+// The channel is buffered and a blocked send is bounded by the request context.
+func (h *Handler) ReportProcessEvent(ctx context.Context, req *connect.Request[v1.ProcessEvent]) (*connect.Response[v1.ReportProcessEventResponse], error) {
+	pr, ok := h.registry.Lookup(req.Msg.Token)
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+	}
+	if err := checkPeerBinding(ctx, pr); err != nil {
+		return nil, err
+	}
+
+	select {
+	case pr.ProcessEventCh <- req.Msg:
+	case <-ctx.Done():
+		return nil, connect.NewError(connect.CodeDeadlineExceeded, ctx.Err())
+	}
+
+	return connect.NewResponse(&v1.ReportProcessEventResponse{}), nil
+}
+
 // DownloadFile implements BridgeServiceHandler. The runner calls this to
 // download a file from the orchestrator as a server-streamed sequence of chunks.
 func (h *Handler) DownloadFile(ctx context.Context, req *connect.Request[v1.DownloadFileRequest], stream *connect.ServerStream[v1.FileStreamChunk]) error {

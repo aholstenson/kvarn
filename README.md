@@ -12,7 +12,8 @@ Kvarn is a server that runs coding-agent jobs in isolated VMs. You host the orch
 - **Locked-down networking.** Outbound traffic is blocked unless you allowlist the host, enforced by a host egress proxy the VM can't bypass.
 - **Secrets the agent never sees.** Managed secrets stay on the host and are applied to outbound requests by the proxy (per scheme: bearer header, HTTP Basic auth, or OAuth request body); inside the VM the agent only ever holds an unguessable placeholder.
 - **Cost guardrails.** Live per-model token and USD tracking, a soft warning threshold, and a hard budget cap that stops the run before it overspends.
-- **From prompt to pull request.** Send the orchestrator a project name and a prompt; it clones the repository, runs the agent, validates the result, pushes a branch, and opens a PR on GitHub. (For local development, `kvarn run --diff` / `--apply` does the same against your working tree.)
+- **From prompt to pull request.** Send the orchestrator a project name and a prompt; it clones the repository, runs the agent, validates the result, pushes a branch, and opens a PR on GitHub. (For local development, `kvarn local job --diff` / `--apply` does the same against your working tree.)
+- **Preview environments.** Point a branch at a stable hostname and look at what it actually does: `kvarn preview up` boots a VM from the same `kvarn.yml`, runs the servers the repository declares, and stops it once it goes idle. See [Preview environments](docs/how-to/preview-environments.md).
 
 ## Documentation
 
@@ -43,7 +44,7 @@ tar xzf kvarn_v0.1.0_linux_amd64.tar.gz
 sudo mv kvarn /usr/local/bin/
 ```
 
-The VM disk image is **downloaded automatically** the first time a VM-backed command (`run`, `test`, `orchestrator`) needs it. See [The VM disk image](#the-vm-disk-image).
+The VM disk image is **downloaded automatically** the first time a VM-backed command (`local`, `orchestrator`) needs it. See [The VM disk image](#the-vm-disk-image).
 
 ### macOS
 
@@ -156,19 +157,19 @@ kvarn queue list      # the backlog in the order it will be dispatched
 
 ### Local development
 
-`run` and `test` work against your current working tree without the orchestrator, projects, or a forge — useful while iterating on a project's `kvarn.yml` or trying the agent before wiring everything up.
+`kvarn local` works against your current working tree without the orchestrator, projects, or a forge — useful while iterating on a project's `kvarn.yml` or trying the agent before wiring everything up.
 
 Validate the config in a VM. This boots the sandbox, installs dependencies, and runs setup, health checks, and validation — without invoking the agent:
 
 ```sh
-kvarn test
+kvarn local test
 ```
 
 Run the coding agent against the current working tree:
 
 ```sh
-kvarn run --diff "Fix the failing tests"           # print a unified diff
-kvarn run --apply "Implement the requested change" # copy changed files back
+kvarn local job --diff "Fix the failing tests"           # print a unified diff
+kvarn local job --apply "Implement the requested change" # copy changed files back
 ```
 
 Write-capable modes require one of `--diff` or `--apply`. Useful options include:
@@ -179,6 +180,12 @@ Write-capable modes require one of `--diff` or `--apply`. Useful options include
 - `--logs` and `-v` to show more VM and step output.
 - `--no-cache` to disable cache persistence for a run.
 - `--project` and `--secrets-file` when the project declares secrets in `kvarn.yml`.
+
+Run the repository's preview environment from the working tree. Setup runs, the servers the `preview:` block declares start, the ready checks have to pass, and then each app is forwarded to a `localhost` port until you stop it:
+
+```sh
+kvarn local preview
+```
 
 ## Agent modes
 
@@ -507,7 +514,7 @@ class = "coding-agent"
 max_steps = 80
 ```
 
-`--model` on `kvarn run` and `kvarn orchestrator` overrides the model behind the `coding-agent` class for that invocation. See [`agents.toml`](docs/reference/agents-toml.md) for the full reference.
+`--model` on `kvarn local job` and `kvarn orchestrator` overrides the model behind the `coding-agent` class for that invocation. See [`agents.toml`](docs/reference/agents-toml.md) for the full reference.
 
 ## The VM disk image
 

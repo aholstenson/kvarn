@@ -196,6 +196,34 @@ func (n *Network) ListenAny(port uint16) (net.Listener, error) {
 	return ln, nil
 }
 
+// DialGuest opens a TCP connection to the VM at the given port. It is the
+// only way in from the host side: the guest's network exists solely inside
+// this netstack, so a caller that wants to reach a server running in the VM —
+// preview ingress, for one — has to come through here rather than through a
+// host socket.
+//
+// The connection originates from the gateway address, which is what the guest
+// already sees as the other end of every conversation it has.
+func (n *Network) DialGuest(ctx context.Context, port uint16) (net.Conn, error) {
+	n.mu.Lock()
+	closed := n.closed
+	n.mu.Unlock()
+	if closed {
+		return nil, errors.New("network closed")
+	}
+
+	addr := tcpip.FullAddress{
+		NIC:  n.nic,
+		Addr: tcpip.AddrFromSlice(net.ParseIP(VMIP).To4()),
+		Port: port,
+	}
+	conn, err := gonet.DialContextTCP(ctx, n.stk, addr, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, fmt.Errorf("dial guest %s:%d: %w", VMIP, port, err)
+	}
+	return conn, nil
+}
+
 // Close tears down listeners and the stack. Idempotent.
 func (n *Network) Close() error {
 	n.mu.Lock()

@@ -122,6 +122,52 @@ func connectToOrchestrator(ctx context.Context, httpClient *http.Client, addr st
 			} else {
 				result.Result = &v1.CommandResult_SessionExec{SessionExec: resp.Msg}
 			}
+		case *v1.RunnerCommand_StartProcess:
+			// Output and exit are keyed on the process ID, not the command ID:
+			// the command that started the process completes immediately, and
+			// everything the process goes on to do arrives long after.
+			onOutput := func(processID, stdout, stderr string) {
+				client.ReportOutput(ctx, connect.NewRequest(&v1.OutputChunk{
+					CommandId: processID,
+					Token:     token,
+					Stdout:    stdout,
+					Stderr:    stderr,
+				}))
+			}
+			onExit := func(processID string, exitCode int32, exitErr error) {
+				event := &v1.ProcessEvent{
+					Token:     token,
+					ProcessId: processID,
+					Kind:      v1.ProcessEventKind_PROCESS_EVENT_KIND_EXITED,
+					ExitCode:  exitCode,
+				}
+				if exitErr != nil {
+					event.Error = exitErr.Error()
+				}
+				if _, err := client.ReportProcessEvent(ctx, connect.NewRequest(event)); err != nil {
+					slog.Warn("failed to report process exit", "process_id", processID, "error", err)
+				}
+			}
+			resp, execErr := h.StartProcessWithCallbacks(ctx, c.StartProcess, onOutput, onExit)
+			if execErr != nil {
+				result.Error = execErr.Error()
+			} else {
+				result.Result = &v1.CommandResult_StartProcess{StartProcess: resp.Msg}
+			}
+		case *v1.RunnerCommand_StopProcess:
+			resp, execErr := h.StopProcess(ctx, connect.NewRequest(c.StopProcess))
+			if execErr != nil {
+				result.Error = execErr.Error()
+			} else {
+				result.Result = &v1.CommandResult_StopProcess{StopProcess: resp.Msg}
+			}
+		case *v1.RunnerCommand_ListProcesses:
+			resp, execErr := h.ListProcesses(ctx, connect.NewRequest(c.ListProcesses))
+			if execErr != nil {
+				result.Error = execErr.Error()
+			} else {
+				result.Result = &v1.CommandResult_ListProcesses{ListProcesses: resp.Msg}
+			}
 		case *v1.RunnerCommand_CloseSession:
 			resp, execErr := h.CloseSession(ctx, connect.NewRequest(c.CloseSession))
 			if execErr != nil {

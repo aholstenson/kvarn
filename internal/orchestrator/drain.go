@@ -101,6 +101,13 @@ func (s *Service) SetDrain(ctx context.Context, req *connect.Request[v1.SetDrain
 	previous := s.setDrain(req.Msg.Draining, req.Msg.Reason)
 	log := reqid.LoggerFrom(ctx)
 
+	// A preview cannot be requeued the way a job can: it is a VM in this
+	// process, reachable only from inside it, with no backlog row to fall back
+	// to. Draining therefore stops previews outright and refuses new boots —
+	// the record survives, so the next request on whichever host is serving
+	// boots it there.
+	s.previews.SetDraining(ctx, req.Msg.Draining)
+
 	var requeued []string
 	if req.Msg.Draining {
 		requeued = s.requeueUnstarted(ctx, req.Msg.Reason)

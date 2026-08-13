@@ -79,7 +79,7 @@ max_validation_retries = 0
 
 `0` disables retries. The built-in default is `3`.
 
-For local runs, `kvarn run --max-validation-retries N` does the same; it
+For local jobs, `kvarn local job --max-validation-retries N` does the same; it
 defaults to `0` there, since you are watching.
 
 ## Choose what the pull-request comment carries
