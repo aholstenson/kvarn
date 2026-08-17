@@ -89,7 +89,33 @@ var _ = Describe("AgentSummary", func() {
 		Expect(title).To(Equal(last),
 			"constrained generation fills schema properties in declaration order and cannot revise them")
 	})
+
+	It("marks every field required so OpenAI strict mode accepts the schema", func() {
+		forEachSummaryField(func(owner string, f reflect.StructField) {
+			Expect(f.Tag.Get("json")).ToNot(ContainSubstring("omitempty"),
+				"%s.%s: strict structured output rejects a schema whose required list "+
+					"omits a property, and omitempty is what drops it", owner, f.Name)
+		})
+	})
+
+	It("keeps schema descriptions comma-free so none is truncated", func() {
+		forEachSummaryField(func(owner string, f reflect.StructField) {
+			Expect(f.Tag.Get("jsonschema")).ToNot(ContainSubstring(","),
+				"%s.%s: the jsonschema tag is a comma-separated option list, so a comma "+
+					"cuts the description short and the rest never reaches the model", owner, f.Name)
+		})
+	})
 })
+
+// forEachSummaryField calls fn for every field of the structured-output types,
+// naming the owning type so a failure points at the field to fix.
+func forEachSummaryField(fn func(owner string, f reflect.StructField)) {
+	for _, t := range []reflect.Type{reflect.TypeOf(AgentSummary{}), reflect.TypeOf(SummarySection{})} {
+		for i := range t.NumField() {
+			fn(t.Name(), t.Field(i))
+		}
+	}
+}
 
 var _ = Describe("summaryProblems", func() {
 	content := forgeconfig.Content{

@@ -37,10 +37,19 @@ const summaryMaxOutputTokens = 16384
 // is not known until its kvarn.yml is read. The request names the sections and
 // renderBody puts them back in declared order, so the ordering the model
 // happens to return them in does not matter.
+//
+// No field carries `omitempty`: OpenAI's strict structured output rejects a
+// schema whose `required` does not list every property, and the reflector
+// derives `required` from exactly those fields that lack the option. A request
+// naming no sections gets an empty array rather than an absent key.
+//
+// Descriptions must not contain a comma. The `jsonschema` tag is a
+// comma-separated option list, so a comma silently truncates the description at
+// that point and the rest never reaches the model.
 type AgentSummary struct {
-	Description string           `json:"description"        jsonschema:"description=Commit body: a few short paragraphs in past tense describing what changed and why. Wrap lines at ~72 chars. No bullet-list of files. No trailing footer."`
-	Sections    []SummarySection `json:"sections,omitempty" jsonschema:"description=One entry per section named in the request. Empty when the request names none."`
-	Title       string           `json:"title"              jsonschema:"description=Imperative-mood summary of the change just described, within the character budget stated in the request"`
+	Description string           `json:"description" jsonschema:"description=Commit body: a few short paragraphs in past tense describing what changed and why. Wrap lines at ~72 chars. No bullet-list of files. No trailing footer."`
+	Sections    []SummarySection `json:"sections"    jsonschema:"description=One entry per section named in the request. Empty when the request names none."`
+	Title       string           `json:"title"       jsonschema:"description=Imperative-mood summary of the change just described. Stay within the character budget stated in the request."`
 }
 
 // SummarySection is one filled-in section of the body.
