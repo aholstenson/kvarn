@@ -132,9 +132,15 @@ var _ = Describe("comment sections", func() {
 	Describe("formatResultComment", func() {
 		It("leads with the result and trails the task", func() {
 			body := formatResultComment("review this", "looks good", nil, entries, both, report)
-			Expect(body).To(HavePrefix("## Result\n\nlooks good"))
+			Expect(body).To(HavePrefix("looks good"))
 			Expect(strings.Index(body, "## Task")).To(BeNumerically(">",
-				strings.Index(body, "## Result")))
+				strings.Index(body, "looks good")))
+		})
+
+		It("puts no heading of its own above the result", func() {
+			body := formatResultComment("review this", "## Verdict\n\nlooks good", nil, entries, both, report)
+			Expect(body).To(HavePrefix("## Verdict\n\nlooks good"))
+			Expect(body).NotTo(ContainSubstring("## Result"))
 		})
 
 		It("drops the work log while keeping the verdict", func() {
@@ -158,7 +164,7 @@ var _ = Describe("comment sections", func() {
 			Expect(formatFollowupComment("fix the lint", "fixed it", entries, withHeader, report)).To(
 				HavePrefix("**Issue:** ENG-42\n\n## Changes"))
 			Expect(formatResultComment("review this", "looks good", nil, entries, withHeader, report)).To(
-				HavePrefix("**Issue:** ENG-42\n\n## Result"))
+				HavePrefix("**Issue:** ENG-42\n\nlooks good"))
 		})
 
 		It("carries no heading of its own, so the operator's markdown stands as written", func() {

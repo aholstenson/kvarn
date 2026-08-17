@@ -191,10 +191,16 @@ func finishComment(sb *strings.Builder) string {
 // own: it is free-form markdown an operator wrote, and wrapping it in a "##" of
 // kvarn's choosing would fight whatever structure they gave it.
 func writeHeader(sb *strings.Builder, header string) {
-	if header = strings.TrimSpace(header); header == "" {
+	writeVerbatim(sb, header)
+}
+
+// writeVerbatim appends markdown that already carries whatever structure it
+// wants, under no heading of kvarn's, or nothing when there is nothing to say.
+func writeVerbatim(sb *strings.Builder, body string) {
+	if body = strings.TrimSpace(body); body == "" {
 		return
 	}
-	fmt.Fprintf(sb, "\n\n%s", header)
+	fmt.Fprintf(sb, "\n\n%s", body)
 }
 
 // writeSection appends a level-2 section, or nothing when there is no body to

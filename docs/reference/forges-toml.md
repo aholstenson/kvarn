@@ -114,6 +114,11 @@ given, then the work log and the cost. The result is bounded; the request is
 arbitrary-length user text, and leading with it pushes the answer off the screen
 on exactly the runs where a reader most wants it.
 
+The result is written verbatim, under no heading of kvarn's own, so the headings
+a repository asks for under `comment.sections` in
+[`kvarn.yml`](kvarn-yml.md#pull_request) are the top-level structure a reader
+meets.
+
 `quote_task` decides how the request itself is rendered:
 
 | Value | Behaviour |

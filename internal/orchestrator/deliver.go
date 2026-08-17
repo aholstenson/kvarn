@@ -234,12 +234,17 @@ const truncationNote = "\n\n_(truncated: the full result is available with `kvar
 // the agent's written result, how the project's validation steps went, the task
 // it was given, and the same collapsible work log and cost sections every other
 // comment carries.
+//
+// The result is written with no heading above it. It is the whole point of this
+// comment, and the headings a repository asks for under `comment.sections` are
+// the structure a reader should meet first — a wrapper heading of kvarn's own
+// would only push them a level down.
 func formatResultComment(prompt, result string, val *sandbox.ValidationResult,
 	entries []worklogEntry, sections commentSections, report cost.Report,
 ) string {
 	var sb strings.Builder
 	writeHeader(&sb, sections.header)
-	writeSection(&sb, "Result", result)
+	writeVerbatim(&sb, result)
 	writeValidation(&sb, val)
 	writeQuotedRequest(&sb, "Task", prompt, sections.quote)
 	writeWorklog(&sb, sections.worklog, entries)
