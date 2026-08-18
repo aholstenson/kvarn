@@ -47,7 +47,7 @@ type ServeOpts struct {
 	// needs all of their names to tell its virtual hosts apart.
 	URLs map[string]string
 	// IDPrefix namespaces the guest process IDs, so two previews sharing a
-	// runner cannot collide on the port alone.
+	// runner cannot collide on the step's position alone.
 	IDPrefix string
 
 	// OnStarting is called with a serve step's name just before it is started.
@@ -72,7 +72,7 @@ func StartServices(ctx context.Context, procs sandbox.ProcessRunner, cfg *projec
 		env[project.EnvVarName(name)] = url
 	}
 
-	for _, proc := range cfg.Preview.Serve {
+	for i, proc := range cfg.Preview.Serve {
 		workingDir := opts.WorkspaceDir
 		if proc.WorkingDir != "" {
 			workingDir = workingDir + "/" + proc.WorkingDir
@@ -85,7 +85,7 @@ func StartServices(ctx context.Context, procs sandbox.ProcessRunner, cfg *projec
 
 		startCtx, cancel := context.WithTimeout(ctx, GuestCallTimeout)
 		_, err := procs.StartProcess(startCtx, &v1.StartProcessRequest{
-			ProcessId:  fmt.Sprintf("%s/port-%d", opts.IDPrefix, proc.Port),
+			ProcessId:  fmt.Sprintf("%s/serve-%d", opts.IDPrefix, i),
 			Name:       name,
 			Command:    proc.Run,
 			WorkingDir: workingDir,

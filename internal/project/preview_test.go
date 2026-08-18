@@ -156,7 +156,7 @@ preview:
   sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
+    - { name: Web, run: npm start }
   ready:
     - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
 `)
@@ -175,8 +175,8 @@ preview:
     web:    { port: 3000, host: "{ref}.{domain}" }
     assets: { port: 8080, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
-    - { name: Assets, run: npm run assets, port: 8080 }
+    - { name: Web, run: npm start }
+    - { name: Assets, run: npm run assets }
 `)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg.Preview.Sites).To(HaveLen(2))
@@ -189,7 +189,7 @@ preview:
     web:    { port: 80 }
     assets: { port: 80, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, port: 80 }
+    - { name: Web, run: npm start }
 `)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg.Preview.Sites).To(HaveLen(2))
@@ -213,7 +213,7 @@ preview:
   sites:
     web: { port: 3000, host: "admin.example.com" }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
+    - { name: Web, run: npm start }
 `, "must end in {domain}"),
 			Entry("a host pattern with a scheme",
 				`
@@ -221,7 +221,7 @@ preview:
   sites:
     web: { port: 3000, host: "https://{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
+    - { name: Web, run: npm start }
 `, "must not contain a scheme"),
 			Entry("a host pattern with a path",
 				`
@@ -229,7 +229,7 @@ preview:
   sites:
     web: { port: 3000, host: "{ref}.{domain}/app" }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
+    - { name: Web, run: npm start }
 `, "must not contain a path"),
 			Entry("an unknown placeholder",
 				`
@@ -237,7 +237,7 @@ preview:
   sites:
     web: { port: 3000, host: "{branch}.{domain}" }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
+    - { name: Web, run: npm start }
 `, "unknown placeholder"),
 			Entry("a site with no port",
 				`
@@ -245,7 +245,7 @@ preview:
   sites:
     web: {}
   serve:
-    - { name: Web, run: npm start, port: 3000 }
+    - { name: Web, run: npm start }
 `, "has no port"),
 			Entry("two sites answering on the same host",
 				`
@@ -254,52 +254,31 @@ preview:
     web:    { port: 3000 }
     assets: { port: 8080, host: "{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
-    - { name: Assets, run: npm run assets, port: 8080 }
+    - { name: Web, run: npm start }
+    - { name: Assets, run: npm run assets }
 `, `both answer on host "{ref}.{domain}"`),
-			Entry("two serve steps binding one shared port",
-				`
-preview:
-  sites:
-    web:    { port: 80 }
-    assets: { port: 80, host: "assets-{ref}.{domain}" }
-  serve:
-    - { name: Web, run: npm start, port: 80 }
-    - { name: Assets, run: npm run assets, port: 80 }
-`, "is served by both"),
-			Entry("a serve step on a port no site names",
-				`
-preview:
-  sites:
-    web: { port: 3000 }
-  serve:
-    - { name: Web, run: npm start, port: 3000 }
-    - { name: Other, run: npm run other, port: 9999 }
-`, "which no site listens on"),
-			Entry("a site nothing serves",
-				`
-preview:
-  sites:
-    web:    { port: 3000 }
-    assets: { port: 8080, host: "assets-{ref}.{domain}" }
-  serve:
-    - { name: Web, run: npm start, port: 3000 }
-`, "has no serve step for port 8080"),
-			Entry("a serve step with no port",
+			Entry("two serve steps with the same name",
 				`
 preview:
   sites:
     web: { port: 3000 }
   serve:
     - { name: Web, run: npm start }
-`, "does not name a port"),
+    - { name: Web, run: npm run assets }
+`, "is declared twice"),
+			Entry("sites with nothing to bring them up",
+				`
+preview:
+  sites:
+    web: { port: 3000 }
+`, "declares sites but no serve steps"),
 			Entry("a serve step with no run command",
 				`
 preview:
   sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, port: 3000 }
+    - { name: Web }
 `, "has empty run command"),
 			Entry("a serve step with an absolute working_dir",
 				`
@@ -307,7 +286,7 @@ preview:
   sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, port: 3000, working_dir: /srv/web }
+    - { name: Web, run: npm start, working_dir: /srv/web }
 `, "absolute working_dir"),
 			Entry("a site name that is not env-var safe",
 				`
@@ -315,13 +294,13 @@ preview:
   sites:
     Web_Site: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
+    - { name: Web, run: npm start }
 `, "must be lowercase alphanumerics"),
 			Entry("serve steps without sites",
 				`
 preview:
   serve:
-    - { name: Web, run: npm start, port: 3000 }
+    - { name: Web, run: npm start }
 `, "declares serve or ready steps but no sites"),
 			Entry("a ready check with no run command",
 				`
@@ -329,7 +308,7 @@ preview:
   sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
+    - { name: Web, run: npm start }
   ready:
     - { name: Web up }
 `, "has empty run command"),

@@ -174,14 +174,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "apps": {
-          "description": "Addressable servers this preview exposes, keyed by the name the serve steps refer to.",
+        "sites": {
+          "description": "Addresses this preview answers on, keyed by site name: one hostname and the guest port behind it.",
           "type": "object",
           "propertyNames": { "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
-          "additionalProperties": { "$ref": "#/$defs/previewApp" }
+          "additionalProperties": { "$ref": "#/$defs/previewSite" }
         },
         "serve": {
-          "description": "Long-lived commands that start the apps. Every declared app must be served by exactly one.",
+          "description": "Long-lived commands that bring the preview up. At least one is required when sites are declared; they are started in order and supervised for the preview's whole life.",
           "type": "array",
           "items": { "$ref": "#/$defs/previewProcess" }
         },
@@ -194,8 +194,8 @@
     }
   },
   "$defs": {
-    "previewApp": {
-      "description": "One addressable server inside the preview.",
+    "previewSite": {
+      "description": "One hostname the preview answers on, and the guest port behind it.",
       "type": "object",
       "required": ["port"],
       "additionalProperties": false,
@@ -207,30 +207,25 @@
           "maximum": 65535
         },
         "host": {
-          "description": "Hostname pattern this app answers on. `{ref}` expands to the slugged git ref (always exactly one DNS label) and `{domain}` to the project's configured preview domain. The pattern must end in `{domain}` or `.{domain}`, so a repository cannot claim a name outside the operator's zone. Defaults to \"{ref}.{domain}\".",
+          "description": "Hostname pattern this site answers on. `{ref}` expands to the slugged git ref (always exactly one DNS label) and `{domain}` to the project's configured preview domain. The pattern must end in `{domain}` or `.{domain}`, so a repository cannot claim a name outside the operator's zone. Defaults to \"{ref}.{domain}\".",
           "type": "string",
           "minLength": 1
         }
       }
     },
     "previewProcess": {
-      "description": "A long-lived command that serves one app. It is started after setup completes and stopped when the preview is reaped.",
+      "description": "A long-lived command that brings part of the preview up. It is started after setup completes and stopped when the preview is reaped.",
       "type": "object",
-      "required": ["name", "run", "app"],
+      "required": ["name", "run"],
       "additionalProperties": false,
       "properties": {
         "name": {
-          "description": "Step identifier.",
+          "description": "Step identifier, unique across the serve steps.",
           "type": "string",
           "minLength": 1
         },
         "run": {
           "description": "Shell command to execute (via sh -c). It should stay in the foreground; kvarn supervises it.",
-          "type": "string",
-          "minLength": 1
-        },
-        "app": {
-          "description": "Name of the app in `apps` this command serves.",
           "type": "string",
           "minLength": 1
         },

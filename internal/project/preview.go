@@ -14,8 +14,8 @@ import (
 
 // Preview is the `preview:` block of a kvarn.yml. It describes the shape of a
 // preview environment for this repository: which hostnames are served from
-// which ports, what to run to bring those ports up, and how to tell when they
-// are ready.
+// which ports, what to run to bring the preview up, and how to tell when it is
+// ready.
 //
 // The operator owns the domain and the repository owns the shape. A host
 // pattern here can only ever land inside the domain configured for the project,
@@ -26,9 +26,10 @@ type Preview struct {
 	// A site is one hostname and the port behind it; several sites may name one
 	// port when a single server answers under several names.
 	Sites map[string]PreviewSite `yaml:"sites,omitempty"`
-	// Serve are the long-lived commands that bring the ports up. Each names the
-	// port it binds, and every port the sites name must be served by exactly
-	// one — only one process can bind a port.
+	// Serve are the long-lived commands that bring the preview up. They are
+	// started in order and supervised for the preview's whole life; which one
+	// binds which port is the repository's business, and the ready checks are
+	// what decide whether it worked.
 	Serve []PreviewProcess `yaml:"serve,omitempty"`
 	// Ready are the checks that decide when the preview may take traffic. They
 	// are ordinary steps, run in order, and retried until they pass or the boot
@@ -49,12 +50,12 @@ type PreviewSite struct {
 	Host string `yaml:"host,omitempty"`
 }
 
-// PreviewProcess is one long-lived command that binds a port.
+// PreviewProcess is one long-lived command run to bring the preview up. Names
+// are unique, since they are what identify the process in logs and events.
 type PreviewProcess struct {
 	Name       string   `yaml:"name"`
 	Run        string   `yaml:"run"`
 	WorkingDir string   `yaml:"working_dir,omitempty"`
-	Port       uint16   `yaml:"port"`
 	Env        []string `yaml:"env,omitempty"`
 }
 
@@ -231,7 +232,7 @@ func EnvVarName(site string) string {
 }
 
 // validate checks the preview block on its own terms: names, ports, the shape
-// of each host pattern, and that the serve steps and the sites agree on ports.
+// of each host pattern, and that something is declared to bring the preview up.
 //
 // The patterns are checked without a domain, since kvarn.yml is read long
 // before the orchestrator's configured domain is in hand. What can be checked
@@ -256,7 +257,6 @@ func (p Preview) validate() error {
 	// be: two sites on one port are two names on one virtual-hosting server,
 	// and ingress hands it the hostname the browser asked for.
 	usedHosts := make(map[string]string, len(p.Sites))
-	sitePorts := make(map[uint16]string, len(p.Sites))
 	for _, name := range names {
 		site := p.Sites[name]
 		if !previewSiteNameRe.MatchString(name) {
@@ -265,7 +265,6 @@ func (p Preview) validate() error {
 		if site.Port == 0 {
 			return fmt.Errorf("site %q has no port", name)
 		}
-		sitePorts[site.Port] = name
 
 		pattern := site.Host
 		if pattern == "" {
@@ -282,11 +281,15 @@ func (p Preview) validate() error {
 		}
 	}
 
-	// Every port the sites name is bound by exactly one serve step, and every
-	// serve step binds a port some site names: a port nothing starts is a
-	// hostname that will never answer, a port no site names is a server nothing
-	// can reach, and two steps on one port cannot both bind it.
-	servedBy := make(map[uint16]string, len(p.Serve))
+	// Sites are addresses, serve steps are what makes something answer on them.
+	// A preview that declares the first without the second has no way to ever
+	// come up, which is worth saying when the file is read rather than when the
+	// ready checks time out.
+	if len(p.Serve) == 0 {
+		return errors.New("declares sites but no serve steps, so nothing would ever answer on their hostnames")
+	}
+
+	serveNames := make(map[string]struct{}, len(p.Serve))
 	for _, proc := range p.Serve {
 		if strings.TrimSpace(proc.Name) == "" {
 			return errors.New("serve step has empty name")
@@ -297,27 +300,16 @@ func (p Preview) validate() error {
 		if filepath.IsAbs(proc.WorkingDir) {
 			return fmt.Errorf("serve step %q has absolute working_dir %q (must be relative)", proc.Name, proc.WorkingDir)
 		}
-		if proc.Port == 0 {
-			return fmt.Errorf("serve step %q does not name a port", proc.Name)
+		// Names identify a process in logs and events, so two steps sharing one
+		// would make its output impossible to attribute.
+		if _, dup := serveNames[proc.Name]; dup {
+			return fmt.Errorf("serve step %q is declared twice", proc.Name)
 		}
-		if _, ok := sitePorts[proc.Port]; !ok {
-			return fmt.Errorf("serve step %q serves port %d, which no site listens on", proc.Name, proc.Port)
-		}
-		if other, dup := servedBy[proc.Port]; dup {
-			return fmt.Errorf("port %d is served by both %q and %q, but only one process can bind it",
-				proc.Port, other, proc.Name)
-		}
-		servedBy[proc.Port] = proc.Name
+		serveNames[proc.Name] = struct{}{}
 		for _, name := range proc.Env {
 			if !envNameRe.MatchString(name) {
 				return fmt.Errorf("serve step %q env entry %q is not a valid POSIX env-var name", proc.Name, name)
 			}
-		}
-	}
-	for _, name := range names {
-		if _, ok := servedBy[p.Sites[name].Port]; !ok {
-			return fmt.Errorf("site %q has no serve step for port %d, so nothing would ever answer on its hostname",
-				name, p.Sites[name].Port)
 		}
 	}
 

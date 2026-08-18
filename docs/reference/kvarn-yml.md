@@ -465,8 +465,8 @@ preview:
     web:    { port: 3000, host: "{ref}.{domain}" }
     assets: { port: 8080, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
-    - { name: Assets, run: npm run assets, port: 8080 }
+    - { name: Web, run: npm start }
+    - { name: Assets, run: npm run assets }
   ready:
     - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
 ```
@@ -478,7 +478,7 @@ preview:
   sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
+    - { name: Web, run: npm start }
   ready:
     - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
 ```
@@ -515,25 +515,25 @@ operator's zone, which is not the repository's to claim.
 
 ### `preview.serve`
 
-The long-lived commands that bring the ports up. Each is spawned in its own
-process group under the same unprivileged user every step runs as, and
-supervised for the preview's whole life; stopping the preview signals the group.
+The commands that bring the preview up. They are started in order after setup
+completes, each in its own process group under the same unprivileged user every
+step runs as, and supervised for the preview's whole life; stopping the preview
+signals the group.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `name` | string | Required. Identifies the process in logs and events. |
+| `name` | string | Required. Identifies the process in logs and events. Unique across the serve steps. |
 | `run` | string | Required. Executed via `sh -c`. Should stay in the foreground. |
-| `port` | int | Required. The guest port this command binds. Some site must name it. |
 | `working_dir` | string | Relative to the workspace root. |
 | `env` | list | Additional environment variable names to forward into the process. |
 
-Every port the sites name must be bound by exactly one entry, and every entry
-must bind a port some site names: a port nothing starts is a hostname that will
-never answer, a port no site names is a server nothing can reach, and two
-entries on one port cannot both bind it. All three are rejected when the file is
-read.
+Which command binds which port is the repository's business — kvarn does not
+ask, and a step is free to start something that binds nothing at all. What the
+sites declare is where traffic is sent; `ready` is what decides whether anything
+is listening there. A preview that declares sites but no serve steps is rejected
+when the file is read, since nothing would ever bring it up.
 
-Sites sharing a port therefore share the one entry that binds it:
+One command may therefore serve every site, whether they share a port or not:
 
 ```yaml
 preview:
@@ -541,7 +541,7 @@ preview:
     web:    { port: 80 }
     assets: { port: 80, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, port: 80 }
+    - { name: Web, run: npm start }
 ```
 
 Before the serve commands run, each site's resolved URL is exported as

@@ -117,8 +117,8 @@ var _ = Describe("StartServices", func() {
 				"api": {Port: 8080},
 			},
 			Serve: []project.PreviewProcess{
-				{Name: "web server", Run: "npm start", Port: 3000},
-				{Name: "api server", Run: "go run ./cmd/api", Port: 8080, WorkingDir: "backend"},
+				{Name: "web server", Run: "npm start"},
+				{Name: "api server", Run: "go run ./cmd/api", WorkingDir: "backend"},
 			},
 		}}
 	})
@@ -135,11 +135,11 @@ var _ = Describe("StartServices", func() {
 
 		web := procs.started[0]
 		Expect(web.Name).To(Equal("web server"))
-		Expect(web.ProcessId).To(Equal("local/port-3000"))
+		Expect(web.ProcessId).To(Equal("local/serve-0"))
 		Expect(web.WorkingDir).To(Equal("/home/kvarn/workspace"))
-		// Every process sees every site's URL, not just the ones on its own
-		// port: sites in one preview have to be able to link to each other, and
-		// a server hosting several needs all of their names.
+		// Every process sees every site's URL: sites in one preview have to be
+		// able to link to each other, and a server hosting several needs all of
+		// their names.
 		Expect(web.Env).To(HaveKeyWithValue("KVARN_PREVIEW_URL_WEB", "http://localhost:3000"))
 		Expect(web.Env).To(HaveKeyWithValue("KVARN_PREVIEW_URL_API", "http://localhost:8080"))
 

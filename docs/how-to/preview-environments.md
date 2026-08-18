@@ -79,7 +79,7 @@ preview:
   sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
+    - { name: Web, run: npm start }
   ready:
     - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
 ```
@@ -97,8 +97,8 @@ preview:
     web:    { port: 3000, host: "{ref}.{domain}" }
     assets: { port: 8080, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
-    - { name: Assets, run: npm run assets, port: 8080 }
+    - { name: Web, run: npm start }
+    - { name: Assets, run: npm run assets }
 ```
 
 A pattern has to end in `{domain}`, so a branch cannot claim a name outside the
@@ -106,8 +106,7 @@ domain the operator configured. `{ref}` always expands to exactly one DNS label,
 whatever the branch is called.
 
 Several sites may name the same port when one virtual-hosting server answers
-under several names. Only the hostnames have to be unique, and only one serve
-step is needed, because only one process binds the port:
+under several names. Only the hostnames have to be unique:
 
 ```yaml
 preview:
@@ -115,7 +114,7 @@ preview:
     web:    { port: 80 }
     assets: { port: 80, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, port: 80 }
+    - { name: Web, run: npm start }
 ```
 
 Kvarn passes the server the hostname the browser asked for, so its own
@@ -138,7 +137,6 @@ preview:
   serve:
     - name: Web
       run: npm start
-      port: 3000
 ```
 
 ```js
@@ -300,7 +298,7 @@ preview:
   sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, port: 3000 }
+    - { name: Web, run: npm start }
   ready:
     - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
 ```
