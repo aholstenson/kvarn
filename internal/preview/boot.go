@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,8 +13,9 @@ import (
 	"github.com/aholstenson/kvarn/internal/sandbox"
 )
 
-// Bringing a preview up is the same two steps wherever it happens: start the
-// declared servers as long-lived guest processes, then hold until the ready
+// Bringing a preview up is the same sequence wherever it happens: publish the
+// site URLs into the boot's shell, run the one-shot preview setup steps, start
+// the declared servers as long-lived guest processes, then hold until the ready
 // checks pass. The orchestrator wraps that in cloning, hostnames and durable
 // state; `kvarn local preview` wraps it in the working tree and a port forward.
 // Both call the functions here, so a preview that works on a developer's
@@ -59,10 +61,120 @@ type ServeOpts struct {
 	OnExit func(name string, exitCode int32, err error)
 }
 
+// ExportURLs makes the preview's site URLs visible to everything that runs in
+// the boot's shell session — the preview setup steps and the ready checks. The
+// serve steps get them through their own environment instead, since they are
+// spawned as processes rather than run in that shell.
+func ExportURLs(ctx context.Context, runner sandbox.RunnerProxy, shellSessionID string, urls map[string]string) error {
+	if len(urls) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(urls))
+	for name := range urls {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	exports := make([]string, 0, len(names))
+	for _, name := range names {
+		exports = append(exports, fmt.Sprintf("export %s=%s", project.EnvVarName(name), ShellQuote(urls[name])))
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, GuestCallTimeout)
+	defer cancel()
+	resp, err := runner.SessionExec(execCtx, &v1.SessionExecRequest{
+		SessionId: shellSessionID,
+		Command:   strings.Join(exports, "\n"),
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("export preview URLs: %w", err)
+	}
+	if resp.ExitCode != 0 {
+		return fmt.Errorf("export preview URLs: exit code %s: %s",
+			FormatExitCode(resp.ExitCode), strings.TrimSpace(resp.Stderr))
+	}
+	return nil
+}
+
+// RunSetup runs the preview's one-shot setup steps in order, each to
+// completion. They run in the same shell session the ready checks use, so the
+// site URLs ExportURLs published are in their environment. The first step that
+// fails, after its retries, fails the boot: a preview whose domains were never
+// configured is not one worth serving.
+func RunSetup(
+	ctx context.Context,
+	runner sandbox.RunnerProxy,
+	shellSessionID string,
+	steps []project.Step,
+	onStarting func(name string),
+	onOutput func(name, stdout, stderr string),
+	onDone func(name string),
+) error {
+	for _, step := range steps {
+		if onStarting != nil {
+			onStarting(step.Name)
+		}
+
+		command := step.Run
+		if step.WorkingDir != "" {
+			command = fmt.Sprintf("cd %s && %s", ShellQuote(step.WorkingDir), step.Run)
+		}
+
+		var lastErr error
+		for attempt := range int(step.Retry) + 1 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if attempt > 0 {
+				lastErr = fmt.Errorf("%w (attempt %d)", lastErr, attempt)
+			}
+
+			execCtx, cancel := context.WithTimeout(ctx, GuestCallTimeout)
+			resp, err := runner.SessionExec(execCtx, &v1.SessionExecRequest{
+				SessionId:      shellSessionID,
+				Command:        command,
+				TimeoutSeconds: step.Timeout.Seconds(),
+			}, func(stdout, stderr string) {
+				if onOutput != nil {
+					onOutput(step.Name, stdout, stderr)
+				}
+			})
+			cancel()
+
+			switch {
+			case err != nil:
+				lastErr = err
+			case resp.ExitCode != 0:
+				lastErr = fmt.Errorf("exit code %s: %s",
+					FormatExitCode(resp.ExitCode), strings.TrimSpace(resp.Stderr))
+			default:
+				lastErr = nil
+			}
+			if lastErr == nil {
+				break
+			}
+		}
+		if lastErr != nil {
+			return fmt.Errorf("preview setup step %q failed: %w", step.Name, lastErr)
+		}
+		if onDone != nil {
+			onDone(step.Name)
+		}
+	}
+	return nil
+}
+
 // StartServices starts every serve step the repository declares as a long-lived
 // process in the guest. It returns once they are all running; whether they stay
 // up is what the ready checks decide.
 func StartServices(ctx context.Context, procs sandbox.ProcessRunner, cfg *project.Config, opts ServeOpts) error {
+	// A repository whose servers are already running by the end of setup — a
+	// container stack, say — declares none, and then it does not matter whether
+	// this sandbox could supervise one.
+	if len(cfg.Preview.Serve) == 0 {
+		return nil
+	}
 	if procs == nil {
 		return errors.New("this sandbox cannot run long-lived processes")
 	}

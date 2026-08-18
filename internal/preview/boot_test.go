@@ -153,6 +153,16 @@ var _ = Describe("StartServices", func() {
 		Expect(err).To(MatchError(ContainSubstring(`start serve step "web server"`)))
 	})
 
+	It("has nothing to start when the repository declares no serve steps", func() {
+		// A container stack brought up by setup serves the preview without any
+		// long-lived command of its own, so this must not be an error even on a
+		// sandbox that could not supervise one.
+		bare := &project.Config{Preview: project.Preview{
+			Sites: map[string]project.PreviewSite{"web": {Port: 3000}},
+		}}
+		Expect(preview.StartServices(context.Background(), nil, bare, preview.ServeOpts{})).To(Succeed())
+	})
+
 	It("refuses a sandbox that cannot run long-lived processes", func() {
 		err := preview.StartServices(context.Background(), nil, cfg, preview.ServeOpts{})
 		Expect(err).To(MatchError(ContainSubstring("long-lived processes")))
@@ -170,6 +180,78 @@ var _ = Describe("StartServices", func() {
 		procs.onExit["web server"](137, nil)
 		Expect(gotOutput).To(Equal("web server: listening\n"))
 		Expect(gotExit).To(Equal("web server: 137 (signal 9)"))
+	})
+})
+
+var _ = Describe("ExportURLs", func() {
+	It("exports every site URL into the shell session", func() {
+		runner := &stubRunner{}
+		err := preview.ExportURLs(context.Background(), runner, "shell", map[string]string{
+			"web":      "https://main.preview.example.com",
+			"admin-ui": "https://admin-main.preview.example.com",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(runner.calls()).To(Equal([]string{
+			"export KVARN_PREVIEW_URL_ADMIN_UI='https://admin-main.preview.example.com'\n" +
+				"export KVARN_PREVIEW_URL_WEB='https://main.preview.example.com'",
+		}))
+	})
+
+	It("does nothing when there are no sites", func() {
+		runner := &stubRunner{}
+		Expect(preview.ExportURLs(context.Background(), runner, "shell", nil)).To(Succeed())
+		Expect(runner.calls()).To(BeEmpty())
+	})
+
+	It("reports a shell that would not take the exports", func() {
+		runner := &stubRunner{responses: []*v1.SessionExecResponse{{ExitCode: 1, Stderr: "read-only"}}}
+		err := preview.ExportURLs(context.Background(), runner, "shell", map[string]string{"web": "https://x"})
+		Expect(err).To(MatchError(ContainSubstring("export preview URLs")))
+	})
+})
+
+var _ = Describe("RunSetup", func() {
+	It("runs each step once, in order, in its working directory", func() {
+		runner := &stubRunner{}
+		var started, done []string
+		err := preview.RunSetup(context.Background(), runner, "shell", []project.Step{
+			{Name: "domains", Run: "./bin/configure-domains", WorkingDir: "ops"},
+			{Name: "seed", Run: "./bin/seed"},
+		},
+			func(name string) { started = append(started, name) },
+			nil,
+			func(name string) { done = append(done, name) },
+		)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(runner.calls()).To(Equal([]string{"cd 'ops' && ./bin/configure-domains", "./bin/seed"}))
+		Expect(started).To(Equal([]string{"domains", "seed"}))
+		Expect(done).To(Equal([]string{"domains", "seed"}))
+	})
+
+	It("fails the boot on the first step that will not pass, naming it", func() {
+		runner := &stubRunner{responses: []*v1.SessionExecResponse{{ExitCode: 2, Stderr: "no such zone"}}}
+		err := preview.RunSetup(context.Background(), runner, "shell", []project.Step{
+			{Name: "domains", Run: "./bin/configure-domains"},
+			{Name: "seed", Run: "./bin/seed"},
+		}, nil, nil, nil)
+		Expect(err).To(MatchError(ContainSubstring(`preview setup step "domains" failed`)))
+		Expect(err).To(MatchError(ContainSubstring("no such zone")))
+		// The step after the failure never ran.
+		Expect(runner.calls()).To(HaveLen(1))
+	})
+
+	It("honours a step's retry count", func() {
+		runner := &stubRunner{responses: []*v1.SessionExecResponse{{ExitCode: 1}, {ExitCode: 0}}}
+		err := preview.RunSetup(context.Background(), runner, "shell",
+			[]project.Step{{Name: "domains", Run: "./bin/configure-domains", Retry: 1}}, nil, nil, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(runner.calls()).To(HaveLen(2))
+	})
+
+	It("does nothing when the repository declares no setup steps", func() {
+		runner := &stubRunner{}
+		Expect(preview.RunSetup(context.Background(), runner, "shell", nil, nil, nil, nil)).To(Succeed())
+		Expect(runner.calls()).To(BeEmpty())
 	})
 })
 

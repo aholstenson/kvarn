@@ -255,9 +255,15 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 		}
 	}
 
-	s.sessionMgr.UpdateState(ctx, sessionID, session.StateRunning, "Starting services")
-	if err := s.startPreviewServices(ctx, sandboxSession, cfg, sites, p.ID, logs); err != nil {
+	if err := s.runPreviewSetup(ctx, sandboxSession, cfg, sites, sessionID, logs); err != nil {
 		return nil, err
+	}
+
+	if len(cfg.Preview.Serve) > 0 {
+		s.sessionMgr.UpdateState(ctx, sessionID, session.StateRunning, "Starting services")
+		if err := s.startPreviewServices(ctx, sandboxSession, cfg, sites, p.ID, logs); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := s.waitPreviewReady(ctx, sandboxSession, cfg, sessionID); err != nil {
@@ -391,6 +397,49 @@ func (s *Service) resolvePreviewSecrets(ctx context.Context, projectName string,
 	return env, managed, nil
 }
 
+// runPreviewSetup publishes the site URLs into the boot's shell and runs the
+// preview's one-shot setup steps there, reporting each onto the boot's session
+// so a slow domain-configuration step is visible on the holding page.
+func (s *Service) runPreviewSetup(
+	ctx context.Context,
+	sess previewBootSandbox,
+	cfg *projconfig.Config,
+	sites []projconfig.ResolvedSite,
+	sessionID string,
+	logs *preview.LogBuffer,
+) error {
+	if err := preview.ExportURLs(ctx, sess.GetRunner(), sess.GetShellSessionID(), previewURLs(sites)); err != nil {
+		return err
+	}
+	if len(cfg.Preview.Setup) == 0 {
+		return nil
+	}
+
+	s.sessionMgr.UpdateState(ctx, sessionID, session.StateSetup, "Running preview setup")
+	return preview.RunSetup(ctx, sess.GetRunner(), sess.GetShellSessionID(), cfg.Preview.Setup,
+		func(name string) {
+			logs.Append(fmt.Sprintf("==> %s\n", name))
+		},
+		func(_ string, stdout, stderr string) {
+			logs.Append(stdout)
+			logs.Append(stderr)
+		},
+		func(name string) {
+			s.sessionMgr.UpdateState(ctx, sessionID, session.StateSetup,
+				fmt.Sprintf("Preview setup step %q completed", name))
+		},
+	)
+}
+
+// previewURLs maps site name to the address that site answers on.
+func previewURLs(sites []projconfig.ResolvedSite) map[string]string {
+	urls := make(map[string]string, len(sites))
+	for _, site := range sites {
+		urls[site.Name] = site.URL()
+	}
+	return urls
+}
+
 // startPreviewServices starts each declared serve command as a long-lived
 // process in the guest, wiring its output into the preview's ring buffer.
 func (s *Service) startPreviewServices(
@@ -401,10 +450,7 @@ func (s *Service) startPreviewServices(
 	previewID string,
 	logs *preview.LogBuffer,
 ) error {
-	urls := make(map[string]string, len(sites))
-	for _, site := range sites {
-		urls[site.Name] = site.URL()
-	}
+	urls := previewURLs(sites)
 
 	return preview.StartServices(ctx, sess.Processes(), cfg, preview.ServeOpts{
 		WorkspaceDir: s.workspaceDir,

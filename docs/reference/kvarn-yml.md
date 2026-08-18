@@ -513,12 +513,37 @@ when the file is read. Without that rule a `kvarn.yml` on any branch could write
 `host: "admin.example.com"` and have the orchestrator serve a name in the
 operator's zone, which is not the repository's to claim.
 
+### `preview.setup`
+
+Ordinary [steps](#step-fields), run to completion in order before the serve
+steps, with the preview's own site URLs already in their environment. This is
+where anything that has to know the hostnames the preview answers on belongs —
+registering domains with an application, seeding a tenant, pointing a container
+stack that setup already started at its URLs — because `setup.steps` runs long
+before a hostname exists.
+
+They run in the same shell as the ready checks, so environment they export
+carries into those. A step that fails, after its `retry` attempts, fails the
+boot: a preview whose domains were never configured is not one worth serving.
+
+```yaml
+preview:
+  sites:
+    web: { port: 3000 }
+  setup:
+    - { name: Domains, run: ./bin/configure-domains }
+```
+
 ### `preview.serve`
 
-The commands that bring the preview up. They are started in order after setup
-completes, each in its own process group under the same unprivileged user every
-step runs as, and supervised for the preview's whole life; stopping the preview
-signals the group.
+The long-lived commands that bring the preview up. They are started in order
+after `preview.setup`, each in its own process group under the same unprivileged
+user every step runs as, and supervised for the preview's whole life; stopping
+the preview signals the group.
+
+A repository whose servers are already running by the time setup finishes — a
+container stack brought up by `setup.steps`, say — declares none at all, and
+`ready` is what decides whether they answer.
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -530,8 +555,7 @@ signals the group.
 Which command binds which port is the repository's business — kvarn does not
 ask, and a step is free to start something that binds nothing at all. What the
 sites declare is where traffic is sent; `ready` is what decides whether anything
-is listening there. A preview that declares sites but no serve steps is rejected
-when the file is read, since nothing would ever bring it up.
+is listening there.
 
 One command may therefore serve every site, whether they share a port or not:
 
@@ -544,12 +568,12 @@ preview:
     - { name: Web, run: npm start }
 ```
 
-Before the serve commands run, each site's resolved URL is exported as
+Before any preview step runs, each site's resolved URL is exported as
 `KVARN_PREVIEW_URL_<SITE>` — `KVARN_PREVIEW_URL_WEB`,
 `KVARN_PREVIEW_URL_ADMIN_UI` — with the site name uppercased and hyphens turned
-into underscores. Every serve step gets all of them, so a server hosting several
-sites has the names it needs to route between them. Read them for anything that
-has to be an absolute URL: asset prefixes, OAuth redirect URIs, CORS origins. A
+into underscores. Every setup step, serve step and ready check gets all of them,
+so a server hosting several sites has the names it needs to route between them.
+Read them for anything that has to be an absolute URL: asset prefixes, OAuth redirect URIs, CORS origins. A
 server that hardcodes `http://localhost:3000` instead is the most common way a
 preview ends up half-broken.
 
@@ -566,7 +590,7 @@ connection error.
 ## Step fields
 
 Used by `setup.steps`, `setup.health_checks`, `validation.required`,
-`validation.advisory` and `preview.ready`.
+`validation.advisory`, `preview.setup` and `preview.ready`.
 
 | Field | Type | Notes |
 | --- | --- | --- |

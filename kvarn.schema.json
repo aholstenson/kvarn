@@ -180,8 +180,13 @@
           "propertyNames": { "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
           "additionalProperties": { "$ref": "#/$defs/previewSite" }
         },
+        "setup": {
+          "description": "One-shot commands run to completion, in order, before the serve steps, with the preview's site URLs in their environment. Where anything that has to know the preview's own hostnames belongs, since `setup.steps` runs long before a hostname exists.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" }
+        },
         "serve": {
-          "description": "Long-lived commands that bring the preview up. At least one is required when sites are declared; they are started in order and supervised for the preview's whole life.",
+          "description": "Long-lived commands that bring the preview up, started in order and supervised for the preview's whole life. A repository whose servers are already running by the end of setup declares none.",
           "type": "array",
           "items": { "$ref": "#/$defs/previewProcess" }
         },

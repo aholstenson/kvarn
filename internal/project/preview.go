@@ -26,10 +26,17 @@ type Preview struct {
 	// A site is one hostname and the port behind it; several sites may name one
 	// port when a single server answers under several names.
 	Sites map[string]PreviewSite `yaml:"sites,omitempty"`
-	// Serve are the long-lived commands that bring the preview up. They are
-	// started in order and supervised for the preview's whole life; which one
-	// binds which port is the repository's business, and the ready checks are
-	// what decide whether it worked.
+	// Setup are one-shot commands run to completion, in order, before the serve
+	// steps. They are where anything that has to know the preview's own
+	// hostnames belongs — configuring domains, seeding a tenant, pointing a
+	// running container at its URLs — since `setup.steps` runs long before a
+	// hostname exists. A failure fails the boot.
+	Setup []Step `yaml:"setup,omitempty"`
+	// Serve are the long-lived commands that bring the preview up, started in
+	// order and supervised for the preview's whole life. Which one binds which
+	// port is the repository's business, and the ready checks are what decide
+	// whether it worked. A repository whose servers are already running by the
+	// end of setup — a container stack, say — declares none.
 	Serve []PreviewProcess `yaml:"serve,omitempty"`
 	// Ready are the checks that decide when the preview may take traffic. They
 	// are ordinary steps, run in order, and retried until they pass or the boot
@@ -232,7 +239,7 @@ func EnvVarName(site string) string {
 }
 
 // validate checks the preview block on its own terms: names, ports, the shape
-// of each host pattern, and that something is declared to bring the preview up.
+// of each host pattern, and that every step it declares is runnable.
 //
 // The patterns are checked without a domain, since kvarn.yml is read long
 // before the orchestrator's configured domain is in hand. What can be checked
@@ -241,8 +248,8 @@ func EnvVarName(site string) string {
 // happens at resolution.
 func (p Preview) validate() error {
 	if len(p.Sites) == 0 {
-		if len(p.Serve) > 0 || len(p.Ready) > 0 {
-			return errors.New("declares serve or ready steps but no sites")
+		if len(p.Setup) > 0 || len(p.Serve) > 0 || len(p.Ready) > 0 {
+			return errors.New("declares setup, serve or ready steps but no sites")
 		}
 		return nil
 	}
@@ -281,14 +288,6 @@ func (p Preview) validate() error {
 		}
 	}
 
-	// Sites are addresses, serve steps are what makes something answer on them.
-	// A preview that declares the first without the second has no way to ever
-	// come up, which is worth saying when the file is read rather than when the
-	// ready checks time out.
-	if len(p.Serve) == 0 {
-		return errors.New("declares sites but no serve steps, so nothing would ever answer on their hostnames")
-	}
-
 	serveNames := make(map[string]struct{}, len(p.Serve))
 	for _, proc := range p.Serve {
 		if strings.TrimSpace(proc.Name) == "" {
@@ -313,18 +312,26 @@ func (p Preview) validate() error {
 		}
 	}
 
-	for _, step := range p.Ready {
+	if err := validatePreviewSteps("setup step", p.Setup); err != nil {
+		return err
+	}
+	return validatePreviewSteps("ready check", p.Ready)
+}
+
+// validatePreviewSteps checks the shape shared by the preview's one-shot step
+// lists. The label completes a sentence naming the offending entry.
+func validatePreviewSteps(label string, steps []Step) error {
+	for _, step := range steps {
 		if strings.TrimSpace(step.Name) == "" {
-			return errors.New("ready check has empty name")
+			return fmt.Errorf("%s has empty name", label)
 		}
 		if strings.TrimSpace(step.Run) == "" {
-			return fmt.Errorf("ready check %q has empty run command", step.Name)
+			return fmt.Errorf("%s %q has empty run command", label, step.Name)
 		}
 		if filepath.IsAbs(step.WorkingDir) {
-			return fmt.Errorf("ready check %q has absolute working_dir %q (must be relative)", step.Name, step.WorkingDir)
+			return fmt.Errorf("%s %q has absolute working_dir %q (must be relative)", label, step.Name, step.WorkingDir)
 		}
 	}
-
 	return nil
 }
 

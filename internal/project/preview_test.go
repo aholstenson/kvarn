@@ -196,6 +196,21 @@ preview:
 			Expect(cfg.Preview.Serve).To(HaveLen(1))
 		})
 
+		It("accepts a preview whose servers are already up after setup", func() {
+			cfg, err := writePreviewConfig(`
+preview:
+  sites:
+    web: { port: 3000 }
+  setup:
+    - { name: Domains, run: ./bin/configure-domains }
+  ready:
+    - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
+`)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Preview.Serve).To(BeEmpty())
+			Expect(cfg.Preview.Setup).To(HaveLen(1))
+		})
+
 		It("treats a config with no preview block as having no preview", func() {
 			cfg, err := writePreviewConfig("setup:\n  steps: []\n")
 			Expect(err).NotTo(HaveOccurred())
@@ -266,12 +281,14 @@ preview:
     - { name: Web, run: npm start }
     - { name: Web, run: npm run assets }
 `, "is declared twice"),
-			Entry("sites with nothing to bring them up",
+			Entry("a preview setup step with no run command",
 				`
 preview:
   sites:
     web: { port: 3000 }
-`, "declares sites but no serve steps"),
+  setup:
+    - { name: Domains }
+`, "setup step \"Domains\" has empty run command"),
 			Entry("a serve step with no run command",
 				`
 preview:
@@ -301,7 +318,7 @@ preview:
 preview:
   serve:
     - { name: Web, run: npm start }
-`, "declares serve or ready steps but no sites"),
+`, "declares setup, serve or ready steps but no sites"),
 			Entry("a ready check with no run command",
 				`
 preview:

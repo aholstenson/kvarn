@@ -225,43 +225,89 @@ func (c *Cmd) Run() error {
 	// is drained to stdout and later output follows it live.
 	logs := newServiceLog()
 
-	serveItem := renderer.AddItem("Starting services")
-	renderer.SetStatus(serveItem, taskui.StatusRunning, "")
-	serveChildren := make(map[string]*taskui.Item, len(cfg.Preview.Serve))
-	err = preview.StartServices(ctx, sess.Processes(), cfg, preview.ServeOpts{
-		WorkspaceDir: sess.GetWorkingDir(),
-		URLs:         sites.urls(),
-		IDPrefix:     "local",
-		OnStarting: func(name string) {
-			item := renderer.AddChild(serveItem, name)
-			renderer.SetStatus(item, taskui.StatusRunning, "")
-			serveChildren[name] = item
-		},
-		OnOutput: func(name, stdout, stderr string) {
-			logs.write(name, stdout)
-			logs.write(name, stderr)
-		},
-		OnExit: func(name string, exitCode int32, exitErr error) {
-			// A server that dies is reported where the reader is looking. Before
-			// the preview is up that is the task UI; after it, the log stream.
-			if item, ok := serveChildren[name]; ok && !logs.streaming() {
-				renderer.SetStatus(item, taskui.StatusFailed,
-					fmt.Sprintf("exited with status %s", preview.FormatExitCode(exitCode)))
-			}
-			if exitErr != nil {
-				logs.note(fmt.Sprintf("%s exited: %v", name, exitErr))
-				return
-			}
-			logs.note(fmt.Sprintf("%s exited with status %s", name, preview.FormatExitCode(exitCode)))
-		},
-	})
-	if err != nil {
-		renderer.SetStatus(serveItem, taskui.StatusFailed, "")
+	// The site URLs go into the shell before any preview step runs: a step that
+	// configures domains needs the names it is configuring, and so does a ready
+	// check that curls one.
+	if err := preview.ExportURLs(ctx, sess.GetRunner(), sess.GetShellSessionID(), sites.urls()); err != nil {
 		stopRenderer()
-		logs.dump(os.Stdout)
 		return err
 	}
-	renderer.SetStatus(serveItem, taskui.StatusPassed, "")
+
+	if len(cfg.Preview.Setup) > 0 {
+		previewSetupItem := renderer.AddItem("Preview setup")
+		renderer.SetStatus(previewSetupItem, taskui.StatusRunning, "")
+		children := make(map[string]*taskui.Item, len(cfg.Preview.Setup))
+		var running *taskui.Item
+		err := preview.RunSetup(ctx, sess.GetRunner(), sess.GetShellSessionID(), cfg.Preview.Setup,
+			func(name string) {
+				child := renderer.AddChild(previewSetupItem, name)
+				renderer.SetStatus(child, taskui.StatusRunning, "")
+				children[name] = child
+				running = child
+			},
+			func(name, stdout, stderr string) {
+				logs.write(name, stdout)
+				logs.write(name, stderr)
+			},
+			func(name string) {
+				renderer.SetStatus(children[name], taskui.StatusPassed, "")
+				running = nil
+			},
+		)
+		if err != nil {
+			if running != nil {
+				renderer.SetStatus(running, taskui.StatusFailed, "")
+			}
+			renderer.SetStatus(previewSetupItem, taskui.StatusFailed, "")
+			stopRenderer()
+			logs.dump(os.Stdout)
+			return err
+		}
+		renderer.SetStatus(previewSetupItem, taskui.StatusPassed, "")
+	}
+
+	// A repository whose servers are already up by the end of setup — a
+	// container stack, say — declares no serve steps, and there is nothing to
+	// report starting.
+	if len(cfg.Preview.Serve) > 0 {
+		serveItem := renderer.AddItem("Starting services")
+		renderer.SetStatus(serveItem, taskui.StatusRunning, "")
+		serveChildren := make(map[string]*taskui.Item, len(cfg.Preview.Serve))
+		err = preview.StartServices(ctx, sess.Processes(), cfg, preview.ServeOpts{
+			WorkspaceDir: sess.GetWorkingDir(),
+			URLs:         sites.urls(),
+			IDPrefix:     "local",
+			OnStarting: func(name string) {
+				item := renderer.AddChild(serveItem, name)
+				renderer.SetStatus(item, taskui.StatusRunning, "")
+				serveChildren[name] = item
+			},
+			OnOutput: func(name, stdout, stderr string) {
+				logs.write(name, stdout)
+				logs.write(name, stderr)
+			},
+			OnExit: func(name string, exitCode int32, exitErr error) {
+				// A server that dies is reported where the reader is looking. Before
+				// the preview is up that is the task UI; after it, the log stream.
+				if item, ok := serveChildren[name]; ok && !logs.streaming() {
+					renderer.SetStatus(item, taskui.StatusFailed,
+						fmt.Sprintf("exited with status %s", preview.FormatExitCode(exitCode)))
+				}
+				if exitErr != nil {
+					logs.note(fmt.Sprintf("%s exited: %v", name, exitErr))
+					return
+				}
+				logs.note(fmt.Sprintf("%s exited with status %s", name, preview.FormatExitCode(exitCode)))
+			},
+		})
+		if err != nil {
+			renderer.SetStatus(serveItem, taskui.StatusFailed, "")
+			stopRenderer()
+			logs.dump(os.Stdout)
+			return err
+		}
+		renderer.SetStatus(serveItem, taskui.StatusPassed, "")
+	}
 
 	if len(cfg.Preview.Ready) > 0 {
 		readyItem := renderer.AddItem("Ready checks")

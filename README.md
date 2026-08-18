@@ -181,7 +181,7 @@ Write-capable modes require one of `--diff` or `--apply`. Useful options include
 - `--no-cache` to disable cache persistence for a run.
 - `--project` and `--secrets-file` when the project declares secrets in `kvarn.yml`.
 
-Run the repository's preview environment from the working tree. Setup runs, the servers the `preview:` block declares start, the ready checks have to pass, and then each app is forwarded to a `localhost` port until you stop it:
+Run the repository's preview environment from the working tree. Setup runs, the servers the `preview:` block declares start, the ready checks have to pass, and then each site is forwarded to a `localhost` port until you stop it:
 
 ```sh
 kvarn local preview

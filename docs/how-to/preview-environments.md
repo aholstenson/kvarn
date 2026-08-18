@@ -125,10 +125,33 @@ no domain and each site is reached on its own loopback port instead.
 
 See [`kvarn.yml`](../reference/kvarn-yml.md#preview) for the full reference.
 
+### Servers that setup already started
+
+If setup brings the application up on its own — a container stack, a process
+manager — there is no foreground command for kvarn to supervise, and `serve` is
+left out entirely. What is usually still needed is a one-shot command per boot
+that tells the application the names it now answers on. That is `preview.setup`:
+run to completion before the serve steps, with the site URLs already exported.
+
+```yaml
+preview:
+  sites:
+    web: { port: 3000 }
+  setup:
+    - { name: Domains, run: ./bin/configure-domains }
+  ready:
+    - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
+```
+
+Setup steps run before any hostname exists, which is why this list is separate:
+`KVARN_PREVIEW_URL_<SITE>` is only known once the preview has been resolved
+against a ref and a domain. A step here that fails fails the boot.
+
 ### Give the server its own URLs
 
-Before the serve commands run, each site's URL is exported as
-`KVARN_PREVIEW_URL_<SITE>`, and every serve step gets all of them:
+Before any preview step runs, each site's URL is exported as
+`KVARN_PREVIEW_URL_<SITE>`, and every setup step, serve step and ready check
+gets all of them:
 
 ```yaml
 preview:
