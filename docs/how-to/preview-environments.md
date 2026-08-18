@@ -76,69 +76,69 @@ block to `kvarn.yml`:
 
 ```yaml
 preview:
-  apps:
+  sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 3000 }
   ready:
     - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
 ```
 
-That is the whole single-app case. `apps` says what listens where, `serve` says
-what to run, and `ready` says how to tell when it is up. Setup steps still run
-first, so dependency installation and migrations belong in `setup.steps` exactly
-as they do for a job.
+That is the whole single-site case. `sites` says which hostname is served from
+which port, `serve` says what to run, and `ready` says how to tell when it is up.
+Setup steps still run first, so dependency installation and migrations belong in
+`setup.steps` exactly as they do for a job.
 
-A preview with several addressable services names a host pattern per app:
+A preview with several addressable services names a host pattern per site:
 
 ```yaml
 preview:
-  apps:
+  sites:
     web:    { port: 3000, host: "{ref}.{domain}" }
     assets: { port: 8080, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, app: web }
-    - { name: Assets, run: npm run assets, app: assets }
+    - { name: Web, run: npm start, port: 3000 }
+    - { name: Assets, run: npm run assets, port: 8080 }
 ```
 
 A pattern has to end in `{domain}`, so a branch cannot claim a name outside the
 domain the operator configured. `{ref}` always expands to exactly one DNS label,
 whatever the branch is called.
 
-Several apps may name the same port when one virtual-hosting server answers
+Several sites may name the same port when one virtual-hosting server answers
 under several names. Only the hostnames have to be unique, and only one serve
 step is needed, because only one process binds the port:
 
 ```yaml
 preview:
-  apps:
+  sites:
     web:    { port: 80 }
     assets: { port: 80, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 80 }
 ```
 
-Kvarn passes the app the hostname the browser asked for, so its own virtual-host
-matching decides which name got the request. Configure that matching from
-`KVARN_PREVIEW_URL_<APP>` rather than hardcoding the names — that is also what
-makes the shared-port case work under `kvarn local preview`, where there is no
-domain and each app is reached on its own loopback port instead.
+Kvarn passes the server the hostname the browser asked for, so its own
+virtual-host matching decides which name got the request. Configure that matching
+from `KVARN_PREVIEW_URL_<SITE>` rather than hardcoding the names — that is also
+what makes the shared-port case work under `kvarn local preview`, where there is
+no domain and each site is reached on its own loopback port instead.
 
 See [`kvarn.yml`](../reference/kvarn-yml.md#preview) for the full reference.
 
-### Give the app its own URL
+### Give the server its own URLs
 
-Before the serve commands run, each app's URL is exported as
-`KVARN_PREVIEW_URL_<APP>`:
+Before the serve commands run, each site's URL is exported as
+`KVARN_PREVIEW_URL_<SITE>`, and every serve step gets all of them:
 
 ```yaml
 preview:
-  apps:
+  sites:
     web: { port: 3000 }
   serve:
     - name: Web
       run: npm start
-      app: web
+      port: 3000
 ```
 
 ```js
@@ -148,8 +148,9 @@ module.exports = {
 };
 ```
 
-Use it anywhere the app has to emit an absolute URL — asset prefixes, OAuth
-redirect URIs, CORS origins, links in outgoing mail. An app that hardcodes
+Use them anywhere the server has to emit an absolute URL — asset prefixes, OAuth
+redirect URIs, CORS origins, links in outgoing mail — and to configure which
+hostname each virtual host answers to. A server that hardcodes
 `http://localhost:3000` will render, and then break on the first absolute link.
 
 ## Try it locally first
@@ -162,7 +163,7 @@ kvarn local preview
 ```
 
 It boots the same sandbox, runs setup, starts the same serve steps and waits for
-the same ready checks. What it does not have is a domain, so each app is
+the same ready checks. What it does not have is a domain, so each site is
 forwarded to a loopback port instead of a hostname:
 
 ```
@@ -172,12 +173,13 @@ forwarded to a loopback port instead of a hostname:
 Press Ctrl-C to stop.
 ```
 
-An app keeps the port it listens on inside the VM whenever that port is free on
+A site keeps the port it listens on inside the VM whenever that port is free on
 the host; if it is taken, another is chosen and the printed URL is the one that
-works. `--port web=4000` pins one explicitly. `KVARN_PREVIEW_URL_<APP>` is set
-to these `localhost` URLs, so an app that reads it correctly works in both
-places and one that hardcodes its own address fails here too — which is the
-point of running it locally.
+works. Sites sharing a guest port get a host port each, since locally the port is
+what tells them apart. `--port web=4000` pins one explicitly.
+`KVARN_PREVIEW_URL_<SITE>` is set to these `localhost` URLs, so a server that
+reads them correctly works in both places and one that hardcodes its own address
+fails here too — which is the point of running it locally.
 
 Once the preview is up, whatever the servers print streams to the terminal,
 prefixed with the service that wrote it. If the boot fails instead, that output
@@ -295,10 +297,10 @@ setup:
       run: npm run db:migrate
 
 preview:
-  apps:
+  sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 3000 }
   ready:
     - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
 ```
@@ -325,12 +327,17 @@ kvarn jobs events <session-id>
 ```
 
 **502 from the app.** The VM is up but the server is not answering on the port
-the app declares. `kvarn preview logs` shows what it printed — usually a crash
+the site declares. `kvarn preview logs` shows what it printed — usually a crash
 on startup, or a server bound to `127.0.0.1` in a way the port declaration does
 not match.
 
-**Assets 404 or load from the wrong host.** The app is emitting absolute URLs it
-built itself. Wire `KVARN_PREVIEW_URL_<APP>` into its asset prefix.
+**One hostname serves another site's content.** Several sites share that port and
+the server is not matching on the `Host` header, so every name reaches whichever
+virtual host it defaults to. Configure its virtual hosts from
+`KVARN_PREVIEW_URL_<SITE>`.
+
+**Assets 404 or load from the wrong host.** The server is emitting absolute URLs
+it built itself. Wire `KVARN_PREVIEW_URL_<SITE>` into its asset prefix.
 
 ## Related
 

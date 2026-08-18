@@ -3,7 +3,7 @@ CREATE TABLE previews (
     project         TEXT NOT NULL,
     ref             TEXT NOT NULL,
     state           TEXT NOT NULL,
-    apps_json       TEXT NOT NULL DEFAULT '[]',
+    sites_json      TEXT NOT NULL DEFAULT '[]',
     session_id      TEXT NOT NULL DEFAULT '',
     error           TEXT NOT NULL DEFAULT '',
     created_at      INTEGER NOT NULL,   -- unix micros UTC
@@ -18,7 +18,7 @@ CREATE TABLE previews (
 CREATE UNIQUE INDEX idx_previews_project_ref ON previews (project, ref);
 
 -- Hostnames are the routing key, so they are a table with a primary key rather
--- than a field inside apps_json: two previews claiming one name has to fail at
+-- than a field inside sites_json: two previews claiming one name has to fail at
 -- the write, not be discovered when a request arrives.
 CREATE TABLE preview_hosts (
     host       TEXT PRIMARY KEY,

@@ -50,9 +50,10 @@ const (
 // resources for.
 func (s State) IsLive() bool { return s == StateBooting || s == StateRunning }
 
-// App is one addressable server inside a preview, with its hostname already
-// resolved against the project's domain.
-type App struct {
+// Site is one address a preview answers on, with its hostname already resolved
+// against the project's domain. Several sites may share a port when one
+// virtual-hosting server answers under several names.
+type Site struct {
 	Name string
 	Host string
 	Port uint16
@@ -69,11 +70,11 @@ type Preview struct {
 	Ref     string
 
 	State State
-	// Apps are the resolved hostnames and guest ports. They are recorded rather
+	// Sites are the resolved hostnames and guest ports. They are recorded rather
 	// than recomputed so a restart can rebuild the route table without cloning
 	// the repository first — the hostname has to answer before the boot that
 	// would tell us the hostname.
-	Apps []App
+	Sites []Site
 
 	// SessionID is the session the current (or most recent) boot narrated
 	// itself through. It is how the holding page reports real progress.
@@ -95,41 +96,41 @@ type Preview struct {
 
 // Hosts returns every hostname that routes to this preview.
 func (p *Preview) Hosts() []string {
-	out := make([]string, 0, len(p.Apps))
-	for _, a := range p.Apps {
-		out = append(out, a.Host)
+	out := make([]string, 0, len(p.Sites))
+	for _, s := range p.Sites {
+		out = append(out, s.Host)
 	}
 	return out
 }
 
-// AppForHost returns the app serving a hostname, matched exactly. Ingress does
-// not fall back to a default app: a request for a name nothing claims is a
-// misconfiguration, and quietly serving it from some other app produces a
+// SiteForHost returns the site serving a hostname, matched exactly. Ingress does
+// not fall back to a default site: a request for a name nothing claims is a
+// misconfiguration, and quietly serving it from some other site produces a
 // preview that looks like it works and is wrong.
-func (p *Preview) AppForHost(host string) (App, bool) {
+func (p *Preview) SiteForHost(host string) (Site, bool) {
 	host = NormalizeHost(host)
-	for _, a := range p.Apps {
-		if a.Host == host {
-			return a, true
+	for _, s := range p.Sites {
+		if s.Host == host {
+			return s, true
 		}
 	}
-	return App{}, false
+	return Site{}, false
 }
 
 // PrimaryURL is the address to hand a person who asked for "the" preview: the
-// app named "web" if there is one, else the first by name.
+// site named "web" if there is one, else the first by name.
 func (p *Preview) PrimaryURL() string {
-	if len(p.Apps) == 0 {
+	if len(p.Sites) == 0 {
 		return ""
 	}
-	best := p.Apps[0]
-	for _, a := range p.Apps {
-		if a.Name == "web" {
-			best = a
+	best := p.Sites[0]
+	for _, s := range p.Sites {
+		if s.Name == "web" {
+			best = s
 			break
 		}
-		if a.Name < best.Name {
-			best = a
+		if s.Name < best.Name {
+			best = s
 		}
 	}
 	return "https://" + best.Host

@@ -241,19 +241,20 @@ exactly one of `--diff` or `--apply`.
 
 Brings the repository's [`preview:` block](kvarn-yml.md#preview) up against the
 working tree: setup runs, the serve steps start, the ready checks have to pass,
-and then each app is forwarded to a loopback port until Ctrl-C. Output from the
+and then each site is forwarded to a loopback port until Ctrl-C. Output from the
 servers streams to the terminal once the preview is up.
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--port app=N` | the app's own port | Bind an app on a specific host port. Repeatable. Fails if the port is taken. |
+| `--port site=N` | the site's own port | Bind a site on a specific host port. Repeatable. Fails if the port is taken. |
 
-An app is served on the port it listens on inside the VM whenever that port is
+A site is served on the port it listens on inside the VM whenever that port is
 free on the host, so its own absolute URLs keep working; if it is taken, the
-kernel picks another and the printed URL is the one to use. Each app's URL is in
-the environment as `KVARN_PREVIEW_URL_<APP>` before the serve steps run, exactly
-as it is on the orchestrator — the difference is that it is a `localhost` URL
-rather than a hostname in the operator's domain.
+kernel picks another and the printed URL is the one to use. Sites that share a
+guest port get a host port each, since locally the port is what tells them apart.
+Each site's URL is in the environment as `KVARN_PREVIEW_URL_<SITE>` before the
+serve steps run, exactly as it is on the orchestrator — the difference is that
+it is a `localhost` URL rather than a hostname in the operator's domain.
 
 ## `kvarn key`
 

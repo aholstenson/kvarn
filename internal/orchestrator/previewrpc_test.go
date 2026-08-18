@@ -53,7 +53,7 @@ var _ = Describe("Preview RPCs", func() {
 			booted <- p.ID
 			return &previewBoot{
 				Sandbox: &dialSandbox{},
-				Apps: []preview.App{
+				Sites: []preview.Site{
 					{Name: "web", Host: projconfig.RefLabel(p.Ref) + ".preview.example.com", Port: 3000},
 				},
 			}, nil
@@ -80,8 +80,8 @@ var _ = Describe("Preview RPCs", func() {
 			}))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(resp.Msg.Preview.State).To(Equal(string(preview.StateRunning)))
-			Expect(resp.Msg.Preview.Apps).To(HaveLen(1))
-			Expect(resp.Msg.Preview.Apps[0].Url).To(HavePrefix("https://"))
+			Expect(resp.Msg.Preview.Sites).To(HaveLen(1))
+			Expect(resp.Msg.Preview.Sites[0].Url).To(HavePrefix("https://"))
 			Expect(resp.Msg.Preview.Url).NotTo(BeEmpty())
 		})
 
@@ -115,7 +115,7 @@ var _ = Describe("Preview RPCs", func() {
 				logs.Append("listening on :3000\n")
 				return &previewBoot{
 					Sandbox: &dialSandbox{},
-					Apps:    []preview.App{{Name: "web", Host: projconfig.RefLabel(p.Ref) + ".preview.example.com", Port: 3000}},
+					Sites:   []preview.Site{{Name: "web", Host: projconfig.RefLabel(p.Ref) + ".preview.example.com", Port: 3000}},
 				}, nil
 			}
 

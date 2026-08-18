@@ -29,7 +29,7 @@ func NewMemStore() Store {
 // have to behave the same.
 func clone(p *Preview) *Preview {
 	out := *p
-	out.Apps = append([]App(nil), p.Apps...)
+	out.Sites = append([]Site(nil), p.Sites...)
 	return &out
 }
 
@@ -37,15 +37,15 @@ func (m *memStore) Put(_ context.Context, p *Preview) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for _, app := range p.Apps {
-		host := NormalizeHost(app.Host)
+	for _, site := range p.Sites {
+		host := NormalizeHost(site.Host)
 		if owner, taken := m.hostIndex[host]; taken && owner != p.ID {
 			return ErrHostTaken
 		}
 	}
 
 	// Release the hostnames the previous version of this preview claimed; its
-	// apps may have changed since.
+	// sites may have changed since.
 	for host, owner := range m.hostIndex {
 		if owner == p.ID {
 			delete(m.hostIndex, host)
@@ -53,9 +53,9 @@ func (m *memStore) Put(_ context.Context, p *Preview) error {
 	}
 
 	stored := clone(p)
-	for i, app := range stored.Apps {
-		stored.Apps[i].Host = NormalizeHost(app.Host)
-		m.hostIndex[stored.Apps[i].Host] = p.ID
+	for i, site := range stored.Sites {
+		stored.Sites[i].Host = NormalizeHost(site.Host)
+		m.hostIndex[stored.Sites[i].Host] = p.ID
 	}
 	m.previews[p.ID] = stored
 	return nil

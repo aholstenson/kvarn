@@ -122,7 +122,7 @@ var _ = Describe("Preview ingress", func() {
 			Project: "proj",
 			Ref:     "main",
 			State:   preview.StateRunning,
-			Apps:    []preview.App{{Name: "web", Host: host, Port: 3000}},
+			Sites:   []preview.Site{{Name: "web", Host: host, Port: 3000}},
 		}
 		Expect(store.Put(ctx, p)).To(Succeed())
 		svc.previews.mu.Lock()
@@ -140,7 +140,7 @@ var _ = Describe("Preview ingress", func() {
 			Project: "proj",
 			Ref:     "main",
 			State:   preview.StateStopped,
-			Apps:    []preview.App{{Name: "web", Host: host, Port: 3000}},
+			Sites:   []preview.Site{{Name: "web", Host: host, Port: 3000}},
 		}
 		Expect(store.Put(ctx, p)).To(Succeed())
 		return p
@@ -183,7 +183,7 @@ var _ = Describe("Preview ingress", func() {
 			}
 			return &previewBoot{
 				Sandbox: sandbox,
-				Apps:    []preview.App{{Name: "web", Host: host, Port: 3000}},
+				Sites:   []preview.Site{{Name: "web", Host: host, Port: 3000}},
 			}, nil
 		}
 
@@ -245,7 +245,7 @@ var _ = Describe("Preview ingress", func() {
 			p := &preview.Preview{
 				ID: preview.ID("proj", "main"), Project: "proj", Ref: "main",
 				State: preview.StateRunning,
-				Apps: []preview.App{
+				Sites: []preview.Site{
 					{Name: "web", Host: host, Port: 3000},
 					{Name: "assets", Host: "assets-main.preview.example.com", Port: 8080},
 				},

@@ -14,16 +14,16 @@ import (
 
 // makePreview builds a preview with deterministic timestamps for store tests.
 func makePreview(id, project, ref string, state preview.State, at time.Time, hosts ...string) *preview.Preview {
-	apps := make([]preview.App, 0, len(hosts))
+	sites := make([]preview.Site, 0, len(hosts))
 	for i, host := range hosts {
-		apps = append(apps, preview.App{Name: "app" + string(rune('a'+i)), Host: host, Port: uint16(3000 + i)})
+		sites = append(sites, preview.Site{Name: "site" + string(rune('a'+i)), Host: host, Port: uint16(3000 + i)})
 	}
 	return &preview.Preview{
 		ID:        id,
 		Project:   project,
 		Ref:       ref,
 		State:     state,
-		Apps:      apps,
+		Sites:     sites,
 		CreatedAt: at,
 		UpdatedAt: at,
 	}
@@ -70,10 +70,10 @@ func DescribeStore(name string, newStore func() preview.Store) bool {
 			Expect(got.Ref).To(Equal("main"))
 			Expect(got.State).To(Equal(preview.StateRunning))
 			Expect(got.SessionID).To(Equal("sess-1"))
-			Expect(got.Apps).To(HaveLen(2))
-			Expect(got.Apps[0].Host).To(Equal("main.preview.example.com"))
-			Expect(got.Apps[0].Port).To(Equal(uint16(3000)))
-			Expect(got.Apps[1].Port).To(Equal(uint16(3001)))
+			Expect(got.Sites).To(HaveLen(2))
+			Expect(got.Sites[0].Host).To(Equal("main.preview.example.com"))
+			Expect(got.Sites[0].Port).To(Equal(uint16(3000)))
+			Expect(got.Sites[1].Port).To(Equal(uint16(3001)))
 			Expect(got.CreatedAt).To(BeTemporally("==", base))
 			Expect(got.StartedAt).To(BeTemporally("==", base.Add(time.Minute)))
 			Expect(got.LastRequestAt).To(BeTemporally("==", base.Add(2*time.Minute)))
@@ -174,7 +174,7 @@ func DescribeStore(name string, newStore func() preview.Store) bool {
 				"main.preview.example.com", "assets-main.preview.example.com")
 			Expect(store.Put(ctx, p)).To(Succeed())
 
-			p.Apps = p.Apps[:1]
+			p.Sites = p.Sites[:1]
 			Expect(store.Put(ctx, p)).To(Succeed())
 
 			_, err := store.FindByHost(ctx, "assets-main.preview.example.com")
@@ -295,7 +295,7 @@ func DescribeStore(name string, newStore func() preview.Store) bool {
 
 			got, err := store.Get(ctx, "proj/main")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Apps).To(BeEmpty())
+			Expect(got.Sites).To(BeEmpty())
 		})
 	})
 }

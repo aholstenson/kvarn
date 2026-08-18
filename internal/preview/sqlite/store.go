@@ -103,14 +103,14 @@ func isUniqueViolation(err error) bool {
 }
 
 func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
-	apps := make([]preview.App, len(p.Apps))
-	copy(apps, p.Apps)
-	for i := range apps {
-		apps[i].Host = preview.NormalizeHost(apps[i].Host)
+	sites := make([]preview.Site, len(p.Sites))
+	copy(sites, p.Sites)
+	for i := range sites {
+		sites[i].Host = preview.NormalizeHost(sites[i].Host)
 	}
-	appsJSON, err := json.Marshal(apps)
+	sitesJSON, err := json.Marshal(sites)
 	if err != nil {
-		return fmt.Errorf("encode preview apps: %w", err)
+		return fmt.Errorf("encode preview sites: %w", err)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -121,42 +121,42 @@ func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO previews (
-		    id, project, ref, state, apps_json, session_id, error,
+		    id, project, ref, state, sites_json, session_id, error,
 		    created_at, updated_at, started_at, last_request_at, expires_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		    project = excluded.project,
 		    ref = excluded.ref,
 		    state = excluded.state,
-		    apps_json = excluded.apps_json,
+		    sites_json = excluded.sites_json,
 		    session_id = excluded.session_id,
 		    error = excluded.error,
 		    updated_at = excluded.updated_at,
 		    started_at = excluded.started_at,
 		    last_request_at = excluded.last_request_at,
 		    expires_at = excluded.expires_at`,
-		p.ID, p.Project, p.Ref, string(p.State), string(appsJSON), p.SessionID, p.Error,
+		p.ID, p.Project, p.Ref, string(p.State), string(sitesJSON), p.SessionID, p.Error,
 		toMicros(p.CreatedAt), toMicros(p.UpdatedAt), toMicros(p.StartedAt),
 		toMicros(p.LastRequestAt), toMicros(p.ExpiresAt),
 	); err != nil {
 		return fmt.Errorf("upsert preview: %w", err)
 	}
 
-	// Rewrite the hostname claims wholesale: the app set can change between
+	// Rewrite the hostname claims wholesale: the site set can change between
 	// boots, and a name this preview no longer serves must not keep routing.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM preview_hosts WHERE preview_id = ?`, p.ID); err != nil {
 		return fmt.Errorf("clear preview hosts: %w", err)
 	}
-	for _, app := range apps {
-		if app.Host == "" {
+	for _, site := range sites {
+		if site.Host == "" {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO preview_hosts (host, preview_id) VALUES (?, ?)`, app.Host, p.ID); err != nil {
+			`INSERT INTO preview_hosts (host, preview_id) VALUES (?, ?)`, site.Host, p.ID); err != nil {
 			if isUniqueViolation(err) {
-				return fmt.Errorf("%w: %s", preview.ErrHostTaken, app.Host)
+				return fmt.Errorf("%w: %s", preview.ErrHostTaken, site.Host)
 			}
-			return fmt.Errorf("claim preview host %q: %w", app.Host, err)
+			return fmt.Errorf("claim preview host %q: %w", site.Host, err)
 		}
 	}
 
@@ -166,23 +166,23 @@ func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
 	return nil
 }
 
-const previewColumns = `id, project, ref, state, apps_json, session_id, error, ` +
+const previewColumns = `id, project, ref, state, sites_json, session_id, error, ` +
 	`created_at, updated_at, started_at, last_request_at, expires_at`
 
 // scanPreview reads one row in previewColumns order.
 func scanPreview(row interface{ Scan(...any) error }) (*preview.Preview, error) {
 	var (
 		p                                                         preview.Preview
-		state, appsJSON                                           string
+		state, sitesJSON                                          string
 		createdAt, updatedAt, startedAt, lastRequestAt, expiresAt int64
 	)
-	if err := row.Scan(&p.ID, &p.Project, &p.Ref, &state, &appsJSON, &p.SessionID, &p.Error,
+	if err := row.Scan(&p.ID, &p.Project, &p.Ref, &state, &sitesJSON, &p.SessionID, &p.Error,
 		&createdAt, &updatedAt, &startedAt, &lastRequestAt, &expiresAt); err != nil {
 		return nil, err
 	}
 	p.State = preview.State(state)
-	if err := json.Unmarshal([]byte(appsJSON), &p.Apps); err != nil {
-		return nil, fmt.Errorf("decode preview apps for %q: %w", p.ID, err)
+	if err := json.Unmarshal([]byte(sitesJSON), &p.Sites); err != nil {
+		return nil, fmt.Errorf("decode preview sites for %q: %w", p.ID, err)
 	}
 	p.CreatedAt = fromMicros(createdAt)
 	p.UpdatedAt = fromMicros(updatedAt)

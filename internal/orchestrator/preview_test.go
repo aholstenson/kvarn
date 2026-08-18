@@ -113,7 +113,7 @@ func (b *fakeBooter) boot(_ context.Context, p *preview.Preview, logs *preview.L
 	logs.Append("==> booted " + p.ID + "\n")
 	return &previewBoot{
 		Sandbox:   sb,
-		Apps:      []preview.App{{Name: "web", Host: host, Port: 3000}},
+		Sites:     []preview.Site{{Name: "web", Host: host, Port: 3000}},
 		SessionID: "sess-" + p.ID,
 		Lease:     nil,
 	}, nil
@@ -217,11 +217,11 @@ var _ = Describe("Preview manager", func() {
 	})
 
 	Describe("booting", func() {
-		It("boots on Ensure and records the resolved apps", func() {
+		It("boots on Ensure and records the resolved sites", func() {
 			got := bootAndWait(mgr, "proj", "main")
 			Expect(got.State).To(Equal(preview.StateRunning))
-			Expect(got.Apps).To(HaveLen(1))
-			Expect(got.Apps[0].Host).To(Equal("main.preview.example.com"))
+			Expect(got.Sites).To(HaveLen(1))
+			Expect(got.Sites[0].Host).To(Equal("main.preview.example.com"))
 			Expect(got.SessionID).To(Equal("sess-proj/main"))
 			Expect(got.StartedAt).To(BeTemporally("==", clock.Now()))
 		})
@@ -508,7 +508,7 @@ var _ = Describe("Preview manager", func() {
 					Project:   "proj",
 					Ref:       ref,
 					State:     preview.StateRunning,
-					Apps:      []preview.App{{Name: "web", Host: ref + ".preview.example.com", Port: 3000}},
+					Sites:     []preview.Site{{Name: "web", Host: ref + ".preview.example.com", Port: 3000}},
 					SessionID: "old-session",
 					StartedAt: clock.Now(),
 					CreatedAt: clock.Now(),
@@ -526,7 +526,7 @@ var _ = Describe("Preview manager", func() {
 				Expect(got.SessionID).To(BeEmpty())
 				Expect(got.StartedAt.IsZero()).To(BeTrue())
 				// The hostname survives, so the next request boots it again.
-				Expect(got.Apps).To(HaveLen(1))
+				Expect(got.Sites).To(HaveLen(1))
 			}
 		})
 

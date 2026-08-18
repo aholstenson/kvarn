@@ -105,81 +105,94 @@ var _ = Describe("Preview config", func() {
 	})
 
 	Describe("EnvVarName", func() {
-		It("uppercases the app name and replaces hyphens", func() {
+		It("uppercases the site name and replaces hyphens", func() {
 			Expect(project.EnvVarName("web")).To(Equal("KVARN_PREVIEW_URL_WEB"))
 			Expect(project.EnvVarName("admin-ui")).To(Equal("KVARN_PREVIEW_URL_ADMIN_UI"))
 		})
 	})
 
 	Describe("Resolve", func() {
-		It("resolves every app, sorted by name", func() {
-			preview := project.Preview{Apps: map[string]project.PreviewApp{
+		It("resolves every site, sorted by name", func() {
+			preview := project.Preview{Sites: map[string]project.PreviewSite{
 				"web":    {Port: 3000},
 				"assets": {Port: 8080, Host: "assets-{ref}.{domain}"},
 			}}
-			apps, err := preview.Resolve("feat/login", "preview.example.com")
+			sites, err := preview.Resolve("feat/login", "preview.example.com")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(apps).To(HaveLen(2))
-			Expect(apps[0].Name).To(Equal("assets"))
-			Expect(apps[0].Port).To(Equal(uint16(8080)))
-			Expect(apps[0].Host).To(HavePrefix("assets-feat-login-"))
-			Expect(apps[1].Name).To(Equal("web"))
-			Expect(apps[1].Host).To(HaveSuffix(".preview.example.com"))
+			Expect(sites).To(HaveLen(2))
+			Expect(sites[0].Name).To(Equal("assets"))
+			Expect(sites[0].Port).To(Equal(uint16(8080)))
+			Expect(sites[0].Host).To(HavePrefix("assets-feat-login-"))
+			Expect(sites[1].Name).To(Equal("web"))
+			Expect(sites[1].Host).To(HaveSuffix(".preview.example.com"))
 		})
 
-		It("reports which app's pattern was rejected", func() {
-			preview := project.Preview{Apps: map[string]project.PreviewApp{
+		It("gives sites that share a port their own hostnames", func() {
+			preview := project.Preview{Sites: map[string]project.PreviewSite{
+				"web":    {Port: 80},
+				"assets": {Port: 80, Host: "assets-{ref}.{domain}"},
+			}}
+			sites, err := preview.Resolve("main", "preview.example.com")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sites).To(HaveLen(2))
+			Expect(sites[0].Port).To(Equal(sites[1].Port))
+			Expect(sites[0].Host).To(Equal("assets-main.preview.example.com"))
+			Expect(sites[1].Host).To(Equal("main.preview.example.com"))
+		})
+
+		It("reports which site's pattern was rejected", func() {
+			preview := project.Preview{Sites: map[string]project.PreviewSite{
 				"web": {Port: 3000, Host: "admin.other.com"},
 			}}
 			_, err := preview.Resolve("main", "preview.example.com")
-			Expect(err).To(MatchError(ContainSubstring("preview.apps.web.host")))
+			Expect(err).To(MatchError(ContainSubstring("preview.sites.web.host")))
 		})
 	})
 
 	Describe("validation at load time", func() {
-		It("accepts the single-app shorthand", func() {
+		It("accepts the single-site shorthand", func() {
 			cfg, err := writePreviewConfig(`
 preview:
-  apps:
+  sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 3000 }
   ready:
     - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
 `)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg.Preview.Enabled()).To(BeTrue())
-			Expect(cfg.Preview.Apps["web"].Port).To(Equal(uint16(3000)))
-			Expect(cfg.Preview.Apps["web"].Host).To(BeEmpty())
+			Expect(cfg.Preview.Sites["web"].Port).To(Equal(uint16(3000)))
+			Expect(cfg.Preview.Sites["web"].Host).To(BeEmpty())
 			Expect(cfg.Preview.Serve).To(HaveLen(1))
 			Expect(cfg.Preview.Ready).To(HaveLen(1))
 		})
 
-		It("accepts several apps with explicit hosts", func() {
+		It("accepts several sites with explicit hosts", func() {
 			cfg, err := writePreviewConfig(`
 preview:
-  apps:
+  sites:
     web:    { port: 3000, host: "{ref}.{domain}" }
     assets: { port: 8080, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, app: web }
-    - { name: Assets, run: npm run assets, app: assets }
+    - { name: Web, run: npm start, port: 3000 }
+    - { name: Assets, run: npm run assets, port: 8080 }
 `)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.Preview.Apps).To(HaveLen(2))
+			Expect(cfg.Preview.Sites).To(HaveLen(2))
 		})
 
-		It("accepts several apps on one port when their hosts differ", func() {
+		It("accepts several sites on one port, served by one step", func() {
 			cfg, err := writePreviewConfig(`
 preview:
-  apps:
+  sites:
     web:    { port: 80 }
     assets: { port: 80, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 80 }
 `)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.Preview.Apps).To(HaveLen(2))
+			Expect(cfg.Preview.Sites).To(HaveLen(2))
 			Expect(cfg.Preview.Serve).To(HaveLen(1))
 		})
 
@@ -197,135 +210,126 @@ preview:
 			Entry("a host pattern escaping the domain",
 				`
 preview:
-  apps:
+  sites:
     web: { port: 3000, host: "admin.example.com" }
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 3000 }
 `, "must end in {domain}"),
 			Entry("a host pattern with a scheme",
 				`
 preview:
-  apps:
+  sites:
     web: { port: 3000, host: "https://{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 3000 }
 `, "must not contain a scheme"),
 			Entry("a host pattern with a path",
 				`
 preview:
-  apps:
+  sites:
     web: { port: 3000, host: "{ref}.{domain}/app" }
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 3000 }
 `, "must not contain a path"),
 			Entry("an unknown placeholder",
 				`
 preview:
-  apps:
+  sites:
     web: { port: 3000, host: "{branch}.{domain}" }
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 3000 }
 `, "unknown placeholder"),
-			Entry("an app with no port",
+			Entry("a site with no port",
 				`
 preview:
-  apps:
+  sites:
     web: {}
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 3000 }
 `, "has no port"),
-			Entry("two apps answering on the same host",
+			Entry("two sites answering on the same host",
 				`
 preview:
-  apps:
+  sites:
     web:    { port: 3000 }
     assets: { port: 8080, host: "{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, app: web }
-    - { name: Assets, run: npm run assets, app: assets }
+    - { name: Web, run: npm start, port: 3000 }
+    - { name: Assets, run: npm run assets, port: 8080 }
 `, `both answer on host "{ref}.{domain}"`),
 			Entry("two serve steps binding one shared port",
 				`
 preview:
-  apps:
+  sites:
     web:    { port: 80 }
     assets: { port: 80, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, app: web }
-    - { name: Assets, run: npm run assets, app: assets }
-`, "share port 80"),
-			Entry("a serve step naming an unknown app",
+    - { name: Web, run: npm start, port: 80 }
+    - { name: Assets, run: npm run assets, port: 80 }
+`, "is served by both"),
+			Entry("a serve step on a port no site names",
 				`
 preview:
-  apps:
+  sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, app: web }
-    - { name: Other, run: npm run other, app: nope }
-`, `names unknown app "nope"`),
-			Entry("an app nothing serves",
+    - { name: Web, run: npm start, port: 3000 }
+    - { name: Other, run: npm run other, port: 9999 }
+`, "which no site listens on"),
+			Entry("a site nothing serves",
 				`
 preview:
-  apps:
+  sites:
     web:    { port: 3000 }
     assets: { port: 8080, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, app: web }
-`, "has no serve step"),
-			Entry("two serve steps for one app",
+    - { name: Web, run: npm start, port: 3000 }
+`, "has no serve step for port 8080"),
+			Entry("a serve step with no port",
 				`
 preview:
-  apps:
-    web: { port: 3000 }
-  serve:
-    - { name: Web, run: npm start, app: web }
-    - { name: Web again, run: npm start, app: web }
-`, "is served by both"),
-			Entry("a serve step with no app",
-				`
-preview:
-  apps:
+  sites:
     web: { port: 3000 }
   serve:
     - { name: Web, run: npm start }
-`, "does not name an app"),
+`, "does not name a port"),
 			Entry("a serve step with no run command",
 				`
 preview:
-  apps:
+  sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, app: web }
+    - { name: Web, port: 3000 }
 `, "has empty run command"),
 			Entry("a serve step with an absolute working_dir",
 				`
 preview:
-  apps:
+  sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, app: web, working_dir: /srv/web }
+    - { name: Web, run: npm start, port: 3000, working_dir: /srv/web }
 `, "absolute working_dir"),
-			Entry("an app name that is not env-var safe",
+			Entry("a site name that is not env-var safe",
 				`
 preview:
-  apps:
-    Web_App: { port: 3000 }
+  sites:
+    Web_Site: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, app: Web_App }
+    - { name: Web, run: npm start, port: 3000 }
 `, "must be lowercase alphanumerics"),
-			Entry("serve steps without apps",
+			Entry("serve steps without sites",
 				`
 preview:
   serve:
-    - { name: Web, run: npm start, app: web }
-`, "declares serve or ready steps but no apps"),
+    - { name: Web, run: npm start, port: 3000 }
+`, "declares serve or ready steps but no sites"),
 			Entry("a ready check with no run command",
 				`
 preview:
-  apps:
+  sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 3000 }
   ready:
     - { name: Web up }
 `, "has empty run command"),

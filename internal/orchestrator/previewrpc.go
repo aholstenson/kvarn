@@ -272,12 +272,12 @@ func previewToProto(p *preview.Preview) *v1.Preview {
 		Error:     p.Error,
 		Url:       p.PrimaryURL(),
 	}
-	for _, app := range p.Apps {
-		out.Apps = append(out.Apps, &v1.PreviewApp{
-			Name: app.Name,
-			Host: app.Host,
-			Port: uint32(app.Port),
-			Url:  "https://" + app.Host,
+	for _, site := range p.Sites {
+		out.Sites = append(out.Sites, &v1.PreviewSite{
+			Name: site.Name,
+			Host: site.Host,
+			Port: uint32(site.Port),
+			Url:  "https://" + site.Host,
 		})
 	}
 	if !p.CreatedAt.IsZero() {

@@ -77,7 +77,7 @@ func (h *previewIngress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	app, ok := p.AppForHost(host)
+	site, ok := p.SiteForHost(host)
 	if !ok {
 		h.notFound(w, r, host)
 		return
@@ -97,7 +97,7 @@ func (h *previewIngress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.proxy(w, r, p, app)
+	h.proxy(w, r, p, site)
 }
 
 // notFound answers a hostname no preview claims.
@@ -230,8 +230,8 @@ func previewPhaseLabel(state session.State) string {
 }
 
 // proxy forwards the request into the guest.
-func (h *previewIngress) proxy(w http.ResponseWriter, r *http.Request, p *preview.Preview, app preview.App) {
-	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("%s:%d", preview.NormalizeHost(app.Host), app.Port)}
+func (h *previewIngress) proxy(w http.ResponseWriter, r *http.Request, p *preview.Preview, site preview.Site) {
+	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("%s:%d", preview.NormalizeHost(site.Host), site.Port)}
 
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -251,7 +251,7 @@ func (h *previewIngress) proxy(w http.ResponseWriter, r *http.Request, p *previe
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				dialCtx, cancel := context.WithTimeout(ctx, previewDialTimeout)
 				defer cancel()
-				conn, live, err := h.svc.previews.DialGuest(dialCtx, p.ID, app.Port)
+				conn, live, err := h.svc.previews.DialGuest(dialCtx, p.ID, site.Port)
 				if err != nil {
 					return nil, err
 				}
@@ -280,7 +280,7 @@ func (h *previewIngress) proxy(w http.ResponseWriter, r *http.Request, p *previe
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			h.log.Warn("preview upstream failed", "preview", p.ID, "app", app.Name, "error", err)
+			h.log.Warn("preview upstream failed", "preview", p.ID, "site", site.Name, "error", err)
 			w.Header().Set("X-Robots-Tag", "noindex")
 			if !wantsHTML(r) {
 				http.Error(w, "preview upstream unavailable", http.StatusBadGateway)
@@ -288,7 +288,7 @@ func (h *previewIngress) proxy(w http.ResponseWriter, r *http.Request, p *previe
 			}
 			writeHTML(w, http.StatusBadGateway, previewErrorPage(
 				"The app is not answering",
-				fmt.Sprintf("The %s service in this preview did not respond.", app.Name),
+				fmt.Sprintf("The %s service in this preview did not respond.", site.Name),
 				"Check kvarn preview logs for what it printed."))
 		},
 		ErrorLog: slog.NewLogLogger(h.log.Handler(), slog.LevelDebug),

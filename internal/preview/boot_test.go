@@ -112,18 +112,18 @@ var _ = Describe("StartServices", func() {
 
 	BeforeEach(func() {
 		cfg = &project.Config{Preview: project.Preview{
-			Apps: map[string]project.PreviewApp{
+			Sites: map[string]project.PreviewSite{
 				"web": {Port: 3000},
 				"api": {Port: 8080},
 			},
 			Serve: []project.PreviewProcess{
-				{Name: "web server", Run: "npm start", App: "web"},
-				{Name: "api server", Run: "go run ./cmd/api", App: "api", WorkingDir: "backend"},
+				{Name: "web server", Run: "npm start", Port: 3000},
+				{Name: "api server", Run: "go run ./cmd/api", Port: 8080, WorkingDir: "backend"},
 			},
 		}}
 	})
 
-	It("starts every serve step with all app URLs in its environment", func() {
+	It("starts every serve step with all site URLs in its environment", func() {
 		procs := newStubProcesses()
 		err := preview.StartServices(context.Background(), procs, cfg, preview.ServeOpts{
 			WorkspaceDir: "/home/kvarn/workspace",
@@ -135,10 +135,11 @@ var _ = Describe("StartServices", func() {
 
 		web := procs.started[0]
 		Expect(web.Name).To(Equal("web server"))
-		Expect(web.ProcessId).To(Equal("local/web"))
+		Expect(web.ProcessId).To(Equal("local/port-3000"))
 		Expect(web.WorkingDir).To(Equal("/home/kvarn/workspace"))
-		// Every process sees every app's URL, not just its own: apps in one
-		// preview have to be able to link to each other.
+		// Every process sees every site's URL, not just the ones on its own
+		// port: sites in one preview have to be able to link to each other, and
+		// a server hosting several needs all of their names.
 		Expect(web.Env).To(HaveKeyWithValue("KVARN_PREVIEW_URL_WEB", "http://localhost:3000"))
 		Expect(web.Env).To(HaveKeyWithValue("KVARN_PREVIEW_URL_API", "http://localhost:8080"))
 

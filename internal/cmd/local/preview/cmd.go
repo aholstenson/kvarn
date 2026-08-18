@@ -5,8 +5,11 @@
 // It is the same preview the orchestrator serves — same sandbox, same serve
 // steps, same ready checks — with the two things a developer's machine does not
 // have taken out. There is no clone, because the working tree is the source,
-// and there are no hostnames, because there is no domain: each app is forwarded
-// to a loopback port instead. Everything the repository can get wrong about its
+// and there are no hostnames, because there is no domain: each site is
+// forwarded to a loopback port instead, and a server that virtual-hosts several
+// sites tells them apart by that port rather than by name, since it reads both
+// from KVARN_PREVIEW_URL_<SITE> either way. Everything the repository can get
+// wrong about its
 // preview is therefore wrong here too, which is the point of running it.
 package preview
 
@@ -51,7 +54,7 @@ type Cmd struct {
 	Project       string `help:"Project name for secret lookup. Falls back to git remote → project store if omitted." short:"p"`
 	SecretsFile   string `help:"Override path to secrets store (default: ~/.config/kvarn/secrets.toml)." name:"secrets-file"`
 
-	Port map[string]uint16 `help:"Bind an app on a specific host port, as app=port. Repeatable." name:"port"`
+	Port map[string]uint16 `help:"Bind a site on a specific host port, as site=port. Repeatable." name:"port"`
 }
 
 func (c *Cmd) Run() error {
@@ -84,18 +87,18 @@ func (c *Cmd) Run() error {
 		return errors.New("no kvarn.yml found in project directory")
 	}
 	if !cfg.Preview.Enabled() {
-		return errors.New("kvarn.yml declares no preview: add a `preview:` block with at least one app")
+		return errors.New("kvarn.yml declares no preview: add a `preview:` block with at least one site")
 	}
 
-	// Bind every app's host port before booting anything. A port collision is a
+	// Bind every site's host port before booting anything. A port collision is a
 	// configuration problem, and discovering it after a VM has come up wastes a
 	// boot; binding also fixes the URLs, which the serve commands need in their
 	// environment before they start.
-	apps, err := c.bindApps(cfg)
+	sites, err := c.bindSites(cfg)
 	if err != nil {
 		return err
 	}
-	defer apps.closeListeners()
+	defer sites.closeListeners()
 
 	// Resolve any secrets declared in kvarn.yml against the per-project secret
 	// store, exactly as a job or an orchestrator-hosted preview would. Note what
@@ -118,13 +121,13 @@ func (c *Cmd) Run() error {
 		}
 	}
 
-	// The app URLs go into the environment the whole VM sees, so setup steps and
+	// The site URLs go into the environment the whole VM sees, so setup steps and
 	// ready checks read the same values the serve steps do.
 	if secretEnv == nil {
 		secretEnv = map[string]string{}
 	}
-	for _, app := range apps.apps {
-		secretEnv[project.EnvVarName(app.Name)] = app.URL
+	for _, site := range sites.sites {
+		secretEnv[project.EnvVarName(site.Name)] = site.URL
 	}
 
 	renderer := taskui.New(os.Stdout, c.Verbose)
@@ -227,7 +230,7 @@ func (c *Cmd) Run() error {
 	serveChildren := make(map[string]*taskui.Item, len(cfg.Preview.Serve))
 	err = preview.StartServices(ctx, sess.Processes(), cfg, preview.ServeOpts{
 		WorkspaceDir: sess.GetWorkingDir(),
-		URLs:         apps.urls(),
+		URLs:         sites.urls(),
 		IDPrefix:     "local",
 		OnStarting: func(name string) {
 			item := renderer.AddChild(serveItem, name)
@@ -295,11 +298,11 @@ func (c *Cmd) Run() error {
 	// Only start forwarding once the preview says it is ready: a browser opened
 	// on a URL that is not serving yet shows a connection error, and the URLs are
 	// printed at the same moment they start working.
-	forwards := apps.startForwards(sess.DialGuest)
+	forwards := sites.startForwards(sess.DialGuest)
 	defer forwards.close()
 
 	stopRenderer()
-	apps.report(os.Stdout)
+	sites.report(os.Stdout)
 	logs.streamTo(os.Stdout)
 
 	<-ctx.Done()
@@ -307,36 +310,39 @@ func (c *Cmd) Run() error {
 	return nil
 }
 
-// boundApp is one app of the preview with its loopback listener already bound.
-type boundApp struct {
+// boundSite is one site of the preview with its loopback listener already
+// bound.
+type boundSite struct {
 	Name      string
 	GuestPort uint16
 	Listener  net.Listener
 	URL       string
 }
 
-// boundApps is the preview's apps in stable name order.
-type boundApps struct {
-	apps []boundApp
+// boundSites is the preview's sites in stable name order.
+type boundSites struct {
+	sites []boundSite
 }
 
-// bindApps claims a loopback port for every declared app.
-func (c *Cmd) bindApps(cfg *project.Config) (*boundApps, error) {
-	names := make([]string, 0, len(cfg.Preview.Apps))
-	for name := range cfg.Preview.Apps {
+// bindSites claims a loopback port for every declared site. Sites that share a
+// guest port still get one host port each: locally the port is what tells them
+// apart, since there are no hostnames to route on.
+func (c *Cmd) bindSites(cfg *project.Config) (*boundSites, error) {
+	names := make([]string, 0, len(cfg.Preview.Sites))
+	for name := range cfg.Preview.Sites {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
 	for name := range c.Port {
-		if _, ok := cfg.Preview.Apps[name]; !ok {
-			return nil, fmt.Errorf("--port names app %q, which kvarn.yml does not declare", name)
+		if _, ok := cfg.Preview.Sites[name]; !ok {
+			return nil, fmt.Errorf("--port names site %q, which kvarn.yml does not declare", name)
 		}
 	}
 
-	bound := &boundApps{}
+	bound := &boundSites{}
 	for _, name := range names {
-		want := cfg.Preview.Apps[name].Port
+		want := cfg.Preview.Sites[name].Port
 		explicit := false
 		if p, ok := c.Port[name]; ok {
 			want = p
@@ -346,7 +352,7 @@ func (c *Cmd) bindApps(cfg *project.Config) (*boundApps, error) {
 		ln, err := bindHostPort(want)
 		if err != nil {
 			bound.closeListeners()
-			return nil, fmt.Errorf("bind a port for app %q: %w", name, err)
+			return nil, fmt.Errorf("bind a port for site %q: %w", name, err)
 		}
 		port := uint16(ln.Addr().(*net.TCPAddr).Port)
 		// An explicit --port is a request, not a preference: silently serving
@@ -354,12 +360,12 @@ func (c *Cmd) bindApps(cfg *project.Config) (*boundApps, error) {
 		if explicit && port != want {
 			ln.Close()
 			bound.closeListeners()
-			return nil, fmt.Errorf("port %d for app %q is already in use", want, name)
+			return nil, fmt.Errorf("port %d for site %q is already in use", want, name)
 		}
 
-		bound.apps = append(bound.apps, boundApp{
+		bound.sites = append(bound.sites, boundSite{
 			Name:      name,
-			GuestPort: cfg.Preview.Apps[name].Port,
+			GuestPort: cfg.Preview.Sites[name].Port,
 			Listener:  ln,
 			URL:       fmt.Sprintf("http://localhost:%d", port),
 		})
@@ -367,11 +373,11 @@ func (c *Cmd) bindApps(cfg *project.Config) (*boundApps, error) {
 	return bound, nil
 }
 
-// urls maps app name to the address it answers on, for the serve environment.
-func (b *boundApps) urls() map[string]string {
-	out := make(map[string]string, len(b.apps))
-	for _, app := range b.apps {
-		out[app.Name] = app.URL
+// urls maps site name to the address it answers on, for the serve environment.
+func (b *boundSites) urls() map[string]string {
+	out := make(map[string]string, len(b.sites))
+	for _, site := range b.sites {
+		out[site.Name] = site.URL
 	}
 	return out
 }
@@ -379,39 +385,39 @@ func (b *boundApps) urls() map[string]string {
 // closeListeners releases the bound ports. It is the cleanup path for a preview
 // that never started forwarding; once forwarders own the listeners, closing
 // them is their job.
-func (b *boundApps) closeListeners() {
-	for _, app := range b.apps {
-		if app.Listener != nil {
-			app.Listener.Close()
+func (b *boundSites) closeListeners() {
+	for _, site := range b.sites {
+		if site.Listener != nil {
+			site.Listener.Close()
 		}
 	}
-	b.apps = nil
+	b.sites = nil
 }
 
 // startForwards hands every bound listener to a forwarder into the guest.
-func (b *boundApps) startForwards(dial func(context.Context, uint16) (net.Conn, error)) *forwards {
+func (b *boundSites) startForwards(dial func(context.Context, uint16) (net.Conn, error)) *forwards {
 	log := slog.With("component", "local-preview")
 	f := &forwards{}
-	for _, app := range b.apps {
-		f.list = append(f.list, startForward(app.Listener, app.GuestPort, dial, log))
+	for _, site := range b.sites {
+		f.list = append(f.list, startForward(site.Listener, site.GuestPort, dial, log))
 	}
 	// The forwarders own the listeners now, so the deferred bind cleanup must
 	// not close them a second time.
-	b.apps = nil
+	b.sites = nil
 	return f
 }
 
 // report prints the addresses the preview is serving on.
-func (b *boundApps) report(w io.Writer) {
+func (b *boundSites) report(w io.Writer) {
 	fmt.Fprintln(w)
 	width := 0
-	for _, app := range b.apps {
-		if len(app.Name) > width {
-			width = len(app.Name)
+	for _, site := range b.sites {
+		if len(site.Name) > width {
+			width = len(site.Name)
 		}
 	}
-	for _, app := range b.apps {
-		fmt.Fprintf(w, "  %-*s  %s\n", width, app.Name, app.URL)
+	for _, site := range b.sites {
+		fmt.Fprintf(w, "  %-*s  %s\n", width, site.Name, site.URL)
 	}
 	fmt.Fprintln(w, "\nPress Ctrl-C to stop.")
 }

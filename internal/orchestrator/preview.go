@@ -110,7 +110,7 @@ func defaultPreviewSandboxFactory(ctx context.Context, opts sandbox.Opts) (previ
 // previewInstance is a running preview's in-memory half.
 type previewInstance struct {
 	sandbox   PreviewSandbox
-	apps      []preview.App
+	sites     []preview.Site
 	sessionID string
 	// lease is the capacity the VM holds; released when the preview stops.
 	lease scheduler.Lease
@@ -136,7 +136,7 @@ func (i *previewInstance) close() {
 // previewBoot is the result of provisioning one preview.
 type previewBoot struct {
 	Sandbox   PreviewSandbox
-	Apps      []preview.App
+	Sites     []preview.Site
 	SessionID string
 	Lease     scheduler.Lease
 }
@@ -422,7 +422,7 @@ func (m *previewManager) runBoot(ctx context.Context, p *preview.Preview, logs *
 
 	instance := &previewInstance{
 		sandbox:   boot.Sandbox,
-		apps:      boot.Apps,
+		sites:     boot.Sites,
 		sessionID: boot.SessionID,
 		lease:     boot.Lease,
 		startedAt: m.now().UTC(),
@@ -448,7 +448,7 @@ func (m *previewManager) runBoot(ctx context.Context, p *preview.Preview, logs *
 
 	now := m.now().UTC()
 	p.State = preview.StateRunning
-	p.Apps = boot.Apps
+	p.Sites = boot.Sites
 	p.SessionID = boot.SessionID
 	p.Error = ""
 	p.StartedAt = instance.startedAt

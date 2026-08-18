@@ -14,11 +14,11 @@ import (
 	"github.com/aholstenson/kvarn/internal/project"
 )
 
-// twoApps is a preview declaring the shape most repositories have: a couple of
+// twoSites is a preview declaring the shape most repositories have: a couple of
 // named servers on fixed guest ports.
-func twoApps() *project.Config {
+func twoSites() *project.Config {
 	return &project.Config{Preview: project.Preview{
-		Apps: map[string]project.PreviewApp{
+		Sites: map[string]project.PreviewSite{
 			"web": {Port: 3000},
 			"api": {Port: 8080},
 		},
@@ -33,82 +33,100 @@ func takePort() (uint16, net.Listener) {
 	return uint16(ln.Addr().(*net.TCPAddr).Port), ln
 }
 
-var _ = Describe("bindApps", func() {
-	It("gives every app a loopback URL, in name order", func() {
+var _ = Describe("bindSites", func() {
+	It("gives every site a loopback URL, in name order", func() {
 		cmd := &Cmd{}
-		bound, err := cmd.bindApps(twoApps())
+		bound, err := cmd.bindSites(twoSites())
 		Expect(err).NotTo(HaveOccurred())
 		defer bound.closeListeners()
 
-		Expect(bound.apps).To(HaveLen(2))
-		Expect(bound.apps[0].Name).To(Equal("api"))
-		Expect(bound.apps[1].Name).To(Equal("web"))
-		for _, app := range bound.apps {
-			Expect(app.URL).To(HavePrefix("http://localhost:"))
+		Expect(bound.sites).To(HaveLen(2))
+		Expect(bound.sites[0].Name).To(Equal("api"))
+		Expect(bound.sites[1].Name).To(Equal("web"))
+		for _, site := range bound.sites {
+			Expect(site.URL).To(HavePrefix("http://localhost:"))
 		}
 	})
 
-	It("serves an app on its own port when that port is free", func() {
+	It("serves a site on its own port when that port is free", func() {
 		port, ln := takePort()
 		Expect(ln.Close()).To(Succeed())
 
 		cfg := &project.Config{Preview: project.Preview{
-			Apps: map[string]project.PreviewApp{"web": {Port: port}},
+			Sites: map[string]project.PreviewSite{"web": {Port: port}},
 		}}
-		bound, err := (&Cmd{}).bindApps(cfg)
+		bound, err := (&Cmd{}).bindSites(cfg)
 		Expect(err).NotTo(HaveOccurred())
 		defer bound.closeListeners()
 
-		Expect(bound.apps[0].URL).To(Equal(fmt.Sprintf("http://localhost:%d", port)))
-		Expect(bound.apps[0].GuestPort).To(Equal(port))
+		Expect(bound.sites[0].URL).To(Equal(fmt.Sprintf("http://localhost:%d", port)))
+		Expect(bound.sites[0].GuestPort).To(Equal(port))
 	})
 
-	It("falls back to a free port when the app's own port is taken", func() {
+	It("falls back to a free port when the site's own port is taken", func() {
 		port, ln := takePort()
 		defer ln.Close()
 
 		cfg := &project.Config{Preview: project.Preview{
-			Apps: map[string]project.PreviewApp{"web": {Port: port}},
+			Sites: map[string]project.PreviewSite{"web": {Port: port}},
 		}}
-		bound, err := (&Cmd{}).bindApps(cfg)
+		bound, err := (&Cmd{}).bindSites(cfg)
 		Expect(err).NotTo(HaveOccurred())
 		defer bound.closeListeners()
 
-		Expect(bound.apps[0].URL).NotTo(Equal(fmt.Sprintf("http://localhost:%d", port)))
+		Expect(bound.sites[0].URL).NotTo(Equal(fmt.Sprintf("http://localhost:%d", port)))
 		// The forward still goes to the port the server inside the VM listens on.
-		Expect(bound.apps[0].GuestPort).To(Equal(port))
+		Expect(bound.sites[0].GuestPort).To(Equal(port))
 	})
 
-	It("honours --port for an app", func() {
+	It("gives sites that share a guest port a host port each", func() {
+		cfg := &project.Config{Preview: project.Preview{
+			Sites: map[string]project.PreviewSite{
+				"web":    {Port: 80},
+				"assets": {Port: 80, Host: "assets-{ref}.{domain}"},
+			},
+		}}
+		bound, err := (&Cmd{}).bindSites(cfg)
+		Expect(err).NotTo(HaveOccurred())
+		defer bound.closeListeners()
+
+		Expect(bound.sites).To(HaveLen(2))
+		Expect(bound.sites[0].URL).NotTo(Equal(bound.sites[1].URL))
+		// Both forward into the one server that binds the shared guest port.
+		Expect(bound.sites[0].GuestPort).To(Equal(uint16(80)))
+		Expect(bound.sites[1].GuestPort).To(Equal(uint16(80)))
+	})
+
+	It("honours --port for a site", func() {
 		port, ln := takePort()
 		Expect(ln.Close()).To(Succeed())
 
 		cmd := &Cmd{Port: map[string]uint16{"web": port}}
-		bound, err := cmd.bindApps(twoApps())
+		bound, err := cmd.bindSites(twoSites())
 		Expect(err).NotTo(HaveOccurred())
 		defer bound.closeListeners()
 
-		for _, app := range bound.apps {
-			if app.Name == "web" {
-				Expect(app.URL).To(Equal(fmt.Sprintf("http://localhost:%d", port)))
-				Expect(app.GuestPort).To(Equal(uint16(3000)))
+		for _, site := range bound.sites {
+			if site.Name == "web" {
+				Expect(site.URL).To(Equal(fmt.Sprintf("http://localhost:%d", port)))
+				Expect(site.GuestPort).To(Equal(uint16(3000)))
 			}
 		}
 	})
 
-	It("refuses --port for an app the repository does not declare", func() {
+	It("refuses --port for a site the repository does not declare", func() {
 		cmd := &Cmd{Port: map[string]uint16{"worker": 9000}}
-		_, err := cmd.bindApps(twoApps())
-		Expect(err).To(MatchError(ContainSubstring(`--port names app "worker"`)))
+		_, err := cmd.bindSites(twoSites())
+		Expect(err).To(MatchError(ContainSubstring(`--port names site "worker"`)))
 	})
 
-	It("refuses a --port that is already in use rather than moving the app", func() {
+	It("refuses a --port that is already in use rather than moving the site", func() {
 		port, ln := takePort()
 		defer ln.Close()
 
 		cmd := &Cmd{Port: map[string]uint16{"web": port}}
-		_, err := cmd.bindApps(twoApps())
-		Expect(err).To(MatchError(ContainSubstring(fmt.Sprintf("port %d for app %q is already in use", port, "web"))))
+		_, err := cmd.bindSites(twoSites())
+		Expect(err).To(MatchError(ContainSubstring(fmt.Sprintf("port %d for site %q is already in use", port, "web"))))
 	})
 })
 

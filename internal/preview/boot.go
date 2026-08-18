@@ -40,13 +40,14 @@ type ServeOpts struct {
 	// WorkspaceDir is the guest directory the serve commands run in. A step's
 	// own relative working_dir is resolved under it.
 	WorkspaceDir string
-	// URLs maps app name to the address that app answers on. Every serve step
-	// gets all of them in its environment, because an app that cannot emit
-	// correct absolute URLs — for its own assets, for OAuth redirects — is the
-	// most common way a preview ends up half-broken.
+	// URLs maps site name to the address that site answers on. Every serve step
+	// gets all of them in its environment: a server that cannot emit correct
+	// absolute URLs — for its own assets, for OAuth redirects — is the most
+	// common way a preview ends up half-broken, and one serving several sites
+	// needs all of their names to tell its virtual hosts apart.
 	URLs map[string]string
 	// IDPrefix namespaces the guest process IDs, so two previews sharing a
-	// runner cannot collide on the app name alone.
+	// runner cannot collide on the port alone.
 	IDPrefix string
 
 	// OnStarting is called with a serve step's name just before it is started.
@@ -84,7 +85,7 @@ func StartServices(ctx context.Context, procs sandbox.ProcessRunner, cfg *projec
 
 		startCtx, cancel := context.WithTimeout(ctx, GuestCallTimeout)
 		_, err := procs.StartProcess(startCtx, &v1.StartProcessRequest{
-			ProcessId:  opts.IDPrefix + "/" + proc.App,
+			ProcessId:  fmt.Sprintf("%s/port-%d", opts.IDPrefix, proc.Port),
 			Name:       name,
 			Command:    proc.Run,
 			WorkingDir: workingDir,

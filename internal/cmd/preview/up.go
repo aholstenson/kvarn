@@ -89,11 +89,11 @@ func report(p *v1.Preview) error {
 	switch p.State {
 	case "running":
 		fmt.Fprintf(os.Stderr, "Preview of %s is running.\n", p.Ref)
-		for _, app := range p.Apps {
-			fmt.Fprintf(os.Stderr, "  %-12s ", app.Name)
-			fmt.Fprintln(os.Stdout, app.Url)
+		for _, site := range p.Sites {
+			fmt.Fprintf(os.Stderr, "  %-12s ", site.Name)
+			fmt.Fprintln(os.Stdout, site.Url)
 		}
-		if len(p.Apps) == 0 {
+		if len(p.Sites) == 0 {
 			fmt.Fprintln(os.Stdout, p.Url)
 		}
 		return nil

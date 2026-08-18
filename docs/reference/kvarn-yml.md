@@ -26,7 +26,7 @@ The home directory is `/home/kvarn`.
 | `validation` | object | Steps run after the agent. |
 | `modes` | map | Agent modes this repository defines, beside the built-in ones. |
 | `pull_request` | object | What the pull requests, commits and comments a run produces should say. |
-| `preview` | object | Preview environments: which ports serve which hostnames, and what to run to bring them up. |
+| `preview` | object | Preview environments: which hostnames are served from which ports, and what to run to bring them up. |
 
 All keys are optional; a repository with no `kvarn.yml` gets a bare VM with no
 setup and no validation.
@@ -455,48 +455,48 @@ long-lived VM pinned to a branch, reachable over HTTP at a stable hostname,
 booted on demand and stopped when it goes idle.
 
 The operator owns the domain and the repository owns the shape. This block says
-which ports serve which hostnames and what to run; the base domain comes from
-the orchestrator's [`[preview]` section](orchestrator-toml.md#preview) or the
-project's override.
+which hostnames are served from which ports and what to run; the base domain
+comes from the orchestrator's [`[preview]` section](orchestrator-toml.md#preview)
+or the project's override.
 
 ```yaml
 preview:
-  apps:
+  sites:
     web:    { port: 3000, host: "{ref}.{domain}" }
     assets: { port: 8080, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, app: web }
-    - { name: Assets, run: npm run assets, app: assets }
+    - { name: Web, run: npm start, port: 3000 }
+    - { name: Assets, run: npm run assets, port: 8080 }
   ready:
     - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
 ```
 
-`host` defaults to `{ref}.{domain}`, so the single-app case is just:
+`host` defaults to `{ref}.{domain}`, so the single-site case is just:
 
 ```yaml
 preview:
-  apps:
+  sites:
     web: { port: 3000 }
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 3000 }
   ready:
     - { name: Web up, run: "curl -fsS http://localhost:3000/healthz" }
 ```
 
-### `preview.apps`
+### `preview.sites`
 
-A map of app name to the server it names. App names are lowercase
-alphanumerics separated by single hyphens.
+A map of site name to the address it names: one hostname, and the port behind
+it. Site names are lowercase alphanumerics separated by single hyphens.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `port` | int | Required. The guest port the server listens on. Several apps may share one. |
-| `host` | string | Hostname pattern. Defaults to `{ref}.{domain}`. Must be unique across apps. |
+| `port` | int | Required. The guest port the server listens on. Several sites may share one. |
+| `host` | string | Hostname pattern. Defaults to `{ref}.{domain}`. Must be unique across sites. |
 
 Hostnames are what route, so they are what must be unique; ports need not be.
-Several apps naming one port is one virtual-hosting server answering under
-several names — ingress passes the app the hostname the browser asked for, so
-it can tell the requests apart.
+Several sites naming one port is one virtual-hosting server answering under
+several names — ingress passes it the hostname the browser asked for, so it can
+tell the requests apart.
 
 Two placeholders are available:
 
@@ -515,42 +515,43 @@ operator's zone, which is not the repository's to claim.
 
 ### `preview.serve`
 
-The long-lived commands that start the apps. Each is spawned in its own process
-group under the same unprivileged user every step runs as, and supervised for
-the preview's whole life; stopping the preview signals the group.
+The long-lived commands that bring the ports up. Each is spawned in its own
+process group under the same unprivileged user every step runs as, and
+supervised for the preview's whole life; stopping the preview signals the group.
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `name` | string | Required. Identifies the process in logs and events. |
 | `run` | string | Required. Executed via `sh -c`. Should stay in the foreground. |
-| `app` | string | Required. The app in `apps` this command serves. |
+| `port` | int | Required. The guest port this command binds. Some site must name it. |
 | `working_dir` | string | Relative to the workspace root. |
 | `env` | list | Additional environment variable names to forward into the process. |
 
-Every port the apps listen on must be served by exactly one entry, and every
-entry must name an app that exists: a port nothing starts is a hostname that
-will never answer, and a command for an app that does not exist is a server
-nothing can reach. Both are rejected when the file is read.
+Every port the sites name must be bound by exactly one entry, and every entry
+must bind a port some site names: a port nothing starts is a hostname that will
+never answer, a port no site names is a server nothing can reach, and two
+entries on one port cannot both bind it. All three are rejected when the file is
+read.
 
-Coverage is counted per port because only one process can bind a port. Apps that
-share one are served by the single entry that names any of them:
+Sites sharing a port therefore share the one entry that binds it:
 
 ```yaml
 preview:
-  apps:
+  sites:
     web:    { port: 80 }
     assets: { port: 80, host: "assets-{ref}.{domain}" }
   serve:
-    - { name: Web, run: npm start, app: web }
+    - { name: Web, run: npm start, port: 80 }
 ```
 
-Before the serve commands run, each app's resolved URL is exported as
-`KVARN_PREVIEW_URL_<APP>` — `KVARN_PREVIEW_URL_WEB`,
-`KVARN_PREVIEW_URL_ADMIN_UI` — with the app name uppercased and hyphens turned
-into underscores. Read them for anything that has to be an absolute URL: asset
-prefixes, OAuth redirect URIs, CORS origins. An app that hardcodes
-`http://localhost:3000` instead is the most common way a preview ends up
-half-broken.
+Before the serve commands run, each site's resolved URL is exported as
+`KVARN_PREVIEW_URL_<SITE>` — `KVARN_PREVIEW_URL_WEB`,
+`KVARN_PREVIEW_URL_ADMIN_UI` — with the site name uppercased and hyphens turned
+into underscores. Every serve step gets all of them, so a server hosting several
+sites has the names it needs to route between them. Read them for anything that
+has to be an absolute URL: asset prefixes, OAuth redirect URIs, CORS origins. A
+server that hardcodes `http://localhost:3000` instead is the most common way a
+preview ends up half-broken.
 
 ### `preview.ready`
 

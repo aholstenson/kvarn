@@ -159,22 +159,22 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 		return nil, fmt.Errorf("load kvarn.yml: %w", err)
 	}
 	if cfg == nil || !cfg.Preview.Enabled() {
-		return nil, fmt.Errorf("%s declares no preview: add a `preview:` block with at least one app to kvarn.yml", p.Ref)
+		return nil, fmt.Errorf("%s declares no preview: add a `preview:` block with at least one site to kvarn.yml", p.Ref)
 	}
 
-	apps, err := cfg.Preview.Resolve(p.Ref, domain)
+	sites, err := cfg.Preview.Resolve(p.Ref, domain)
 	if err != nil {
 		return nil, err
 	}
-	resolved := make([]preview.App, 0, len(apps))
-	for _, a := range apps {
-		resolved = append(resolved, preview.App{Name: a.Name, Host: a.Host, Port: a.Port})
+	resolved := make([]preview.Site, 0, len(sites))
+	for _, s := range sites {
+		resolved = append(resolved, preview.Site{Name: s.Name, Host: s.Host, Port: s.Port})
 	}
 
 	// Claim the hostnames before booting anything. A name another preview holds
 	// is a configuration error, and finding it out after a VM is up wastes a
 	// boot and leaves the operator with two previews that disagree.
-	p.Apps = resolved
+	p.Sites = resolved
 	p.UpdatedAt = time.Now().UTC()
 	if err := s.putPreview(ctx, p); err != nil {
 		return nil, fmt.Errorf("claim preview hostnames: %w", err)
@@ -203,14 +203,14 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 	}
 	s.applyPreviewLimits(&createOpts, cfg)
 
-	// The app URLs have to be in the environment before the serve commands run:
-	// an app that cannot emit correct absolute URLs for its own assets is the
+	// The site URLs have to be in the environment before the serve commands run:
+	// a server that cannot emit correct absolute URLs for its own assets is the
 	// most common way a preview ends up half-broken.
-	for _, app := range apps {
+	for _, site := range sites {
 		if secretEnv == nil {
 			secretEnv = map[string]string{}
 		}
-		secretEnv[projconfig.EnvVarName(app.Name)] = app.URL()
+		secretEnv[projconfig.EnvVarName(site.Name)] = site.URL()
 	}
 
 	create := s.previewSandboxFactory
@@ -256,7 +256,7 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 	}
 
 	s.sessionMgr.UpdateState(ctx, sessionID, session.StateRunning, "Starting services")
-	if err := s.startPreviewServices(ctx, sandboxSession, cfg, apps, p.ID, logs); err != nil {
+	if err := s.startPreviewServices(ctx, sandboxSession, cfg, sites, p.ID, logs); err != nil {
 		return nil, err
 	}
 
@@ -275,17 +275,17 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 	succeeded = true
 	return &previewBoot{
 		Sandbox:   sandboxSession,
-		Apps:      resolved,
+		Sites:     resolved,
 		SessionID: sessionID,
 		Lease:     lease,
 	}, nil
 }
 
-// hostsOf reduces resolved apps to their hostnames.
-func hostsOf(apps []preview.App) []string {
-	out := make([]string, 0, len(apps))
-	for _, a := range apps {
-		out = append(out, a.Host)
+// hostsOf reduces resolved sites to their hostnames.
+func hostsOf(sites []preview.Site) []string {
+	out := make([]string, 0, len(sites))
+	for _, s := range sites {
+		out = append(out, s.Host)
 	}
 	return out
 }
@@ -397,13 +397,13 @@ func (s *Service) startPreviewServices(
 	ctx context.Context,
 	sess previewBootSandbox,
 	cfg *projconfig.Config,
-	apps []projconfig.ResolvedApp,
+	sites []projconfig.ResolvedSite,
 	previewID string,
 	logs *preview.LogBuffer,
 ) error {
-	urls := make(map[string]string, len(apps))
-	for _, app := range apps {
-		urls[app.Name] = app.URL()
+	urls := make(map[string]string, len(sites))
+	for _, site := range sites {
+		urls[site.Name] = site.URL()
 	}
 
 	return preview.StartServices(ctx, sess.Processes(), cfg, preview.ServeOpts{

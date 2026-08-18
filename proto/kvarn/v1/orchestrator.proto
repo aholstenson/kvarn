@@ -554,7 +554,9 @@ message Preview {
   string ref = 3;
   // State is one of stopped, booting, running, failed.
   string state = 4;
-  repeated PreviewApp apps = 5;
+  // Sites are the addresses this preview answers on. Several may share a port
+  // when one server answers under several hostnames.
+  repeated PreviewSite sites = 5;
   // SessionId is the session the current or most recent boot narrates itself
   // through, for following a boot's progress with WatchSession.
   string session_id = 6;
@@ -573,7 +575,7 @@ message Preview {
   string url = 13;
 }
 
-message PreviewApp {
+message PreviewSite {
   string name = 1;
   string host = 2;
   uint32 port = 3;
