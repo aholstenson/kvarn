@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.7.0](https://github.com/aholstenson/kvarn/compare/v0.6.0...v0.7.0) (2026-08-18)
+
+
+### Features
+
+* Bound tool output so one runaway command can't blow the context window ([a79d425](https://github.com/aholstenson/kvarn/commit/a79d425b566e49d1f1776ab65cba922b906265c5))
+* Drop result header in review comments ([83a64e5](https://github.com/aholstenson/kvarn/commit/83a64e5b2be5f624b18224f88817dac4c44bea98))
+* Give read_file a default window and refuse files too large to anchor ([e5d9e76](https://github.com/aholstenson/kvarn/commit/e5d9e7686d985161f1dc119be39f9c365fe2b912))
+* Improve PR title and description to be more resilient to LLM errors ([3a0f434](https://github.com/aholstenson/kvarn/commit/3a0f43488af469142ceaa3a94fff26db4f94cf4f))
+* Let operators template a per-comment metadata header onto PR comments ([a920ca4](https://github.com/aholstenson/kvarn/commit/a920ca43cf1d9d31cfaf4b393d6a5c23ff0b30b0))
+* Make search_files use ripgrep, add result caps and an overflow summary ([22a620e](https://github.com/aholstenson/kvarn/commit/22a620e03ab3caa76c381c7ffb9a9b8a9a94793b))
+* Prune noise from list_files, cap it and show directories ([8216cd0](https://github.com/aholstenson/kvarn/commit/8216cd040e916902c67dacd76fd80a4d571b58f1))
+
+
+### Bug Fixes
+
+* Make sections in agent summary non-empty to support OpenAI strict mode ([3a647c8](https://github.com/aholstenson/kvarn/commit/3a647c8946736dffac4a9f0361f19ffcfc837132))
+* Re-read model config per job so agents.toml edits apply without a restart ([25fe18d](https://github.com/aholstenson/kvarn/commit/25fe18d29562c385111d3b614e3a4213983e6641))
+* Truncate over-long PR titles when submitting to Github ([2931829](https://github.com/aholstenson/kvarn/commit/2931829653ac31f8751348d84dfc769aceae7369))
+
 ## [0.6.0](https://github.com/aholstenson/kvarn/compare/v0.5.0...v0.6.0) (2026-08-11)
 
 
