@@ -169,6 +169,20 @@ preview:
 			Expect(cfg.Preview.Apps).To(HaveLen(2))
 		})
 
+		It("accepts several apps on one port when their hosts differ", func() {
+			cfg, err := writePreviewConfig(`
+preview:
+  apps:
+    web:    { port: 80 }
+    assets: { port: 80, host: "assets-{ref}.{domain}" }
+  serve:
+    - { name: Web, run: npm start, app: web }
+`)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Preview.Apps).To(HaveLen(2))
+			Expect(cfg.Preview.Serve).To(HaveLen(1))
+		})
+
 		It("treats a config with no preview block as having no preview", func() {
 			cfg, err := writePreviewConfig("setup:\n  steps: []\n")
 			Expect(err).NotTo(HaveOccurred())
@@ -220,16 +234,26 @@ preview:
   serve:
     - { name: Web, run: npm start, app: web }
 `, "has no port"),
-			Entry("two apps on the same port",
+			Entry("two apps answering on the same host",
 				`
 preview:
   apps:
     web:    { port: 3000 }
-    assets: { port: 3000, host: "assets-{ref}.{domain}" }
+    assets: { port: 8080, host: "{ref}.{domain}" }
   serve:
     - { name: Web, run: npm start, app: web }
     - { name: Assets, run: npm run assets, app: assets }
-`, "both listen on port 3000"),
+`, `both answer on host "{ref}.{domain}"`),
+			Entry("two serve steps binding one shared port",
+				`
+preview:
+  apps:
+    web:    { port: 80 }
+    assets: { port: 80, host: "assets-{ref}.{domain}" }
+  serve:
+    - { name: Web, run: npm start, app: web }
+    - { name: Assets, run: npm run assets, app: assets }
+`, "share port 80"),
 			Entry("a serve step naming an unknown app",
 				`
 preview:

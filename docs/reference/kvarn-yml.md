@@ -490,8 +490,13 @@ alphanumerics separated by single hyphens.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `port` | int | Required. The guest port the server listens on. Ports must be unique across apps. |
-| `host` | string | Hostname pattern. Defaults to `{ref}.{domain}`. |
+| `port` | int | Required. The guest port the server listens on. Several apps may share one. |
+| `host` | string | Hostname pattern. Defaults to `{ref}.{domain}`. Must be unique across apps. |
+
+Hostnames are what route, so they are what must be unique; ports need not be.
+Several apps naming one port is one virtual-hosting server answering under
+several names — ingress passes the app the hostname the browser asked for, so
+it can tell the requests apart.
 
 Two placeholders are available:
 
@@ -522,10 +527,22 @@ the preview's whole life; stopping the preview signals the group.
 | `working_dir` | string | Relative to the workspace root. |
 | `env` | list | Additional environment variable names to forward into the process. |
 
-Every declared app must be served by exactly one entry, and every entry must
-name an app that exists: an app nothing starts is a hostname that will never
-answer, and a command for an app that does not exist is a server nothing can
-reach. Both are rejected when the file is read.
+Every port the apps listen on must be served by exactly one entry, and every
+entry must name an app that exists: a port nothing starts is a hostname that
+will never answer, and a command for an app that does not exist is a server
+nothing can reach. Both are rejected when the file is read.
+
+Coverage is counted per port because only one process can bind a port. Apps that
+share one are served by the single entry that names any of them:
+
+```yaml
+preview:
+  apps:
+    web:    { port: 80 }
+    assets: { port: 80, host: "assets-{ref}.{domain}" }
+  serve:
+    - { name: Web, run: npm start, app: web }
+```
 
 Before the serve commands run, each app's resolved URL is exported as
 `KVARN_PREVIEW_URL_<APP>` — `KVARN_PREVIEW_URL_WEB`,

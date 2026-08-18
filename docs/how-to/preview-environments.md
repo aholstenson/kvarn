@@ -105,6 +105,25 @@ A pattern has to end in `{domain}`, so a branch cannot claim a name outside the
 domain the operator configured. `{ref}` always expands to exactly one DNS label,
 whatever the branch is called.
 
+Several apps may name the same port when one virtual-hosting server answers
+under several names. Only the hostnames have to be unique, and only one serve
+step is needed, because only one process binds the port:
+
+```yaml
+preview:
+  apps:
+    web:    { port: 80 }
+    assets: { port: 80, host: "assets-{ref}.{domain}" }
+  serve:
+    - { name: Web, run: npm start, app: web }
+```
+
+Kvarn passes the app the hostname the browser asked for, so its own virtual-host
+matching decides which name got the request. Configure that matching from
+`KVARN_PREVIEW_URL_<APP>` rather than hardcoding the names — that is also what
+makes the shared-port case work under `kvarn local preview`, where there is no
+domain and each app is reached on its own loopback port instead.
+
 See [`kvarn.yml`](../reference/kvarn-yml.md#preview) for the full reference.
 
 ### Give the app its own URL

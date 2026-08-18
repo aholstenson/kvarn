@@ -24,8 +24,9 @@ type Preview struct {
 	// Apps are the servers this preview exposes, keyed by the name the serve
 	// steps refer to.
 	Apps map[string]PreviewApp `yaml:"apps,omitempty"`
-	// Serve are the long-lived commands that start the apps. Each names the app
-	// it serves; every declared app must be served by exactly one.
+	// Serve are the long-lived commands that start the apps. Each names an app
+	// it serves; every port the apps listen on must be served by exactly one,
+	// so apps that share a port share the one command that binds it.
 	Serve []PreviewProcess `yaml:"serve,omitempty"`
 	// Ready are the checks that decide when the preview may take traffic. They
 	// are ordinary steps, run in order, and retried until they pass or the boot
@@ -35,7 +36,9 @@ type Preview struct {
 
 // PreviewApp is one addressable server inside the preview.
 type PreviewApp struct {
-	// Port is the guest port the server listens on.
+	// Port is the guest port the server listens on. Several apps may name the
+	// same port when they are different hostnames on one virtual-hosting
+	// server; what has to be unique is the hostname, since that is what routes.
 	Port uint16 `yaml:"port"`
 	// Host is the hostname pattern this app answers on. It may use `{ref}` for
 	// the slugged git ref and `{domain}` for the project's configured preview
@@ -245,7 +248,10 @@ func (p Preview) validate() error {
 	}
 	sort.Strings(names)
 
-	usedPorts := make(map[uint16]string, len(p.Apps))
+	// Hostnames are what route, so they are what must be unique. Ports need not
+	// be: two apps on one port are two names on one virtual-hosting server, and
+	// ingress hands the app the hostname the browser asked for.
+	usedHosts := make(map[string]string, len(p.Apps))
 	for _, name := range names {
 		app := p.Apps[name]
 		if !previewAppNameRe.MatchString(name) {
@@ -254,20 +260,35 @@ func (p Preview) validate() error {
 		if app.Port == 0 {
 			return fmt.Errorf("app %q has no port", name)
 		}
-		if other, dup := usedPorts[app.Port]; dup {
-			return fmt.Errorf("apps %q and %q both listen on port %d", other, name, app.Port)
+
+		pattern := app.Host
+		if pattern == "" {
+			pattern = DefaultHostPattern
 		}
-		usedPorts[app.Port] = name
+		if other, dup := usedHosts[pattern]; dup {
+			return fmt.Errorf("apps %q and %q both answer on host %q, so nothing could tell their requests apart",
+				other, name, pattern)
+		}
+		usedHosts[pattern] = name
 
 		if err := validatePreviewHostPattern(app.Host); err != nil {
 			return fmt.Errorf("app %q host %q %s", name, app.Host, err)
 		}
 	}
 
-	// Every app is served and every serve step names a real app: a declared
-	// app nothing starts is a hostname that will never answer, and a serve step
-	// for an app that does not exist is a server nothing can reach.
-	servedBy := make(map[string]string, len(p.Serve))
+	// Every port the apps listen on is served and every serve step names a real
+	// app: a port nothing starts is a hostname that will never answer, and a
+	// serve step for an app that does not exist is a server nothing can reach.
+	//
+	// Coverage is counted per port rather than per app because only one process
+	// can bind a port. Apps that share one are therefore served by the single
+	// step that names any of them, and a second step for the same port would
+	// fail to bind wherever the preview ran.
+	type server struct {
+		step string
+		app  string
+	}
+	servedBy := make(map[uint16]server, len(p.Serve))
 	for _, proc := range p.Serve {
 		if strings.TrimSpace(proc.Name) == "" {
 			return errors.New("serve step has empty name")
@@ -281,13 +302,18 @@ func (p Preview) validate() error {
 		if proc.App == "" {
 			return fmt.Errorf("serve step %q does not name an app", proc.Name)
 		}
-		if _, ok := p.Apps[proc.App]; !ok {
+		app, ok := p.Apps[proc.App]
+		if !ok {
 			return fmt.Errorf("serve step %q names unknown app %q", proc.Name, proc.App)
 		}
-		if other, dup := servedBy[proc.App]; dup {
-			return fmt.Errorf("app %q is served by both %q and %q", proc.App, other, proc.Name)
+		if other, dup := servedBy[app.Port]; dup {
+			if other.app == proc.App {
+				return fmt.Errorf("app %q is served by both %q and %q", proc.App, other.step, proc.Name)
+			}
+			return fmt.Errorf("apps %q and %q share port %d, so one serve step has to bind it, but %q and %q both do",
+				other.app, proc.App, app.Port, other.step, proc.Name)
 		}
-		servedBy[proc.App] = proc.Name
+		servedBy[app.Port] = server{step: proc.Name, app: proc.App}
 		for _, name := range proc.Env {
 			if !envNameRe.MatchString(name) {
 				return fmt.Errorf("serve step %q env entry %q is not a valid POSIX env-var name", proc.Name, name)
@@ -295,7 +321,7 @@ func (p Preview) validate() error {
 		}
 	}
 	for _, name := range names {
-		if _, ok := servedBy[name]; !ok {
+		if _, ok := servedBy[p.Apps[name].Port]; !ok {
 			return fmt.Errorf("app %q has no serve step, so nothing would ever answer on its hostname", name)
 		}
 	}
