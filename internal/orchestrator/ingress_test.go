@@ -520,6 +520,10 @@ var _ = Describe("Preview ingress", func() {
 			body := bodyOf(resp)
 			Expect(body).To(ContainSubstring("Preparing environment"))
 			Expect(body).To(ContainSubstring(previewStatusPath))
+			// The page has to know both halves of the readiness signal: the
+			// header it watches for, and what it says while the reload runs.
+			Expect(body).To(ContainSubstring(previewStatusHeader))
+			Expect(body).To(ContainSubstring("Redirecting to preview"))
 
 			Eventually(func() int {
 				bootMu.Lock()
@@ -630,6 +634,31 @@ var _ = Describe("Preview ingress", func() {
 			resp := xhrGet(previewStatusPath)
 			Expect(bodyOf(resp)).To(Equal("app handled it"))
 			Expect(seenPath).To(Equal(previewStatusPath))
+		})
+
+		It("marks its own answers, so the page can tell them from the app's", func() {
+			blockBoot = make(chan struct{})
+			DeferCleanup(func() { close(blockBoot) })
+			registerStopped()
+
+			browserGet("/")
+			Eventually(func() string {
+				return xhrGet(previewStatusPath).Header.Get(previewStatusHeader)
+			}).Should(Equal("1"))
+		})
+
+		It("drops the mark once the preview serves, which is what tells the page to reload", func() {
+			// Most apps have no route here and answer 404. The page must read
+			// that as "the preview is up" rather than as a failed poll, so the
+			// mark's absence is the signal and the body is never parsed.
+			upstreamHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.NotFound(w, r)
+			})
+			registerRunning()
+
+			resp := xhrGet(previewStatusPath)
+			Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
+			Expect(resp.Header.Get(previewStatusHeader)).To(BeEmpty())
 		})
 	})
 

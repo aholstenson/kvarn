@@ -13,7 +13,7 @@ import (
 )
 
 // previewWatchInterval is how often WatchPreview re-reads a preview's state.
-// A boot moves through a handful of phases over a minute or two, so polling the
+// A boot moves through a handful of phases over minutes, so polling the
 // store is both simpler and sufficient: there is no event stream to subscribe
 // to, and the phases themselves come from the boot's session, which the client
 // can watch directly if it wants every event.

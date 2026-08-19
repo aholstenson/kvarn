@@ -35,6 +35,17 @@ import (
 // once it is, the path belongs to the app like everything else.
 const previewStatusPath = "/_kvarn/preview/status"
 
+// previewStatusHeader marks a status answer as the ingress's own. The holding
+// page needs to tell "the preview is still booting" from "the preview is
+// serving and the app is answering this path now", and the body cannot say so:
+// once the path belongs to the app, the reply is whatever that app makes of an
+// unknown route, which is usually a 404 in some shape the page cannot read.
+//
+// The absence of this header is therefore the readiness signal, and it is a
+// header rather than a status code because an app is free to answer the path
+// with a 200.
+const previewStatusHeader = "X-Kvarn-Preview-Status"
+
 // previewRetryAfter is what a non-browser client is told to wait before trying
 // again. A first boot takes longer than this, but the point is a cadence a
 // polling client can follow, not an accurate prediction.
@@ -185,7 +196,11 @@ func (h *previewIngress) startAndHold(w http.ResponseWriter, r *http.Request, p 
 	}
 
 	h.unavailable(w, r, "Preparing environment",
-		fmt.Sprintf("Starting a preview of %s. This takes a minute or two on a first boot.", p.Ref))
+		// No duration is promised: a first boot clones the branch, installs the
+		// project's dependencies and runs its setup steps, which is minutes for
+		// one project and much longer for another. The phase below is what tells
+		// somebody it is still moving.
+		fmt.Sprintf("Starting a preview of %s. A first boot has to clone the branch and install its dependencies, so it can take a while.", p.Ref))
 }
 
 // unavailable writes the holding page or a 503, depending on what the client
@@ -226,6 +241,7 @@ func (h *previewIngress) writeStatus(w http.ResponseWriter, r *http.Request, p *
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Robots-Tag", "noindex")
+	w.Header().Set(previewStatusHeader, "1")
 	_ = json.NewEncoder(w).Encode(status)
 }
 
@@ -427,11 +443,29 @@ func previewHoldingPage(title, detail string) string {
 (function () {
   var text = document.getElementById("phase-text");
   var row = document.getElementById("phase");
+  var going = false;
+  // The reload is announced before it starts: the app's first reply has to come
+  // back through the guest, which takes a moment, and the browser keeps showing
+  // this page until it does. Without the message that pause reads as a stall.
+  function go() {
+    if (going) { return; }
+    going = true;
+    row.className = "phase";
+    text.textContent = "Redirecting to preview";
+    setTimeout(function () { location.reload(); }, 150);
+  }
   function poll() {
     fetch(%[3]q, { headers: { "Accept": "application/json" }, cache: "no-store" })
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        // Once the preview serves, this path belongs to the app and our marker
+        // header is gone. Whatever answered — a 404, an SPA's index, anything —
+        // is proof the preview is up, so the body is not worth reading.
+        if (r.headers.get(%[4]q) !== "1") { go(); return null; }
+        return r.json();
+      })
       .then(function (s) {
-        if (s.ready) { location.reload(); return; }
+        if (!s) { return; }
+        if (s.ready) { go(); return; }
         if (s.state === "failed") {
           row.className = "phase failed";
           text.textContent = s.error ? ("Failed: " + s.error) : "Failed to start";
@@ -447,7 +481,7 @@ func previewHoldingPage(title, detail string) string {
 </script>
 </body>
 </html>
-`, html.EscapeString(title), html.EscapeString(detail), previewStatusPath)
+`, html.EscapeString(title), html.EscapeString(detail), previewStatusPath, previewStatusHeader)
 }
 
 // previewErrorPage is the static counterpart to the holding page: something has
