@@ -351,12 +351,23 @@ umount -R "$ROOTFS/dev" 2>/dev/null || umount -lR "$ROOTFS/dev"
 
 # Sandbox is off because the VM is already an isolation boundary; flake
 # commands are required for the dependency-install path.
+#
+# The download settings are about how a dependency install fails. It is a
+# job's first network contact and its most common way to lose to someone
+# else's outage, so give Nix's own retrying a wider budget than the default
+# five attempts a few hundred milliseconds apart, and bound the two ways a
+# download hangs instead of failing — never connecting, and connecting then
+# going quiet — so a wedged transfer is retried rather than sat on until the
+# install's own timeout expires.
 mkdir -p "$ROOTFS/etc/nix"
 cat > "$ROOTFS/etc/nix/nix.conf" <<'NIXCONF'
 experimental-features = nix-command flakes
 sandbox = false
 substituters = https://cache.nixos.org
 trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+download-attempts = 7
+connect-timeout = 15
+stalled-download-timeout = 90
 NIXCONF
 
 # Expose the kvarn-user nix profile to system login shells (su -l, sh -l) so
