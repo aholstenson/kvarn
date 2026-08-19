@@ -190,7 +190,7 @@ long-lived VM pinned to a branch, reachable at a stable hostname.
 
 | Subcommand | Purpose |
 | --- | --- |
-| `up <project> <ref>` | Register a preview of a branch and boot it. Prints each boot phase to stderr and the URLs to stdout. `--no-wait` returns as soon as the boot starts. |
+| `up <project> <ref>` | Register a preview of a branch and boot it. Prints each boot phase to stderr and the URLs to stdout. `--no-wait` returns as soon as the boot starts. `--pr <n>` gives the pull request that a repository whose site hostnames use `{pr}` needs. |
 | `down <project> <ref>` | Stop the VM, keeping the record and hostname so the next request boots it again. `--remove` forgets the preview entirely and releases its hostnames. |
 | `ls` | Preview environments with their state, URL, and how long since each booted and was last requested. `--project`. |
 | `logs <project> <ref>` | The retained tail of what the preview's services printed. |
@@ -249,6 +249,7 @@ servers streams to the terminal once the preview is up.
 | `--port site=N` | the site's own port | Bind a site on a specific host port. Repeatable. Fails if the port is taken. |
 | `--base-domain` | — | Serve the sites on hostnames under this domain instead of loopback ports. |
 | `--ref` | `local` | Ref label the `{ref}` part of a site's host pattern expands to. |
+| `--pr` | `local` | What the `{pr}` part of a site's host pattern expands to, for a repository whose sites are named by pull request. |
 | `--ingress-port` | the shared guest port, else `8080` | Host port every site is served on with `--base-domain`. |
 
 A site is served on the port it listens on inside the VM whenever that port is

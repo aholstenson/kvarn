@@ -48,9 +48,10 @@ type projectEntry struct {
 // is a pointer so a config without the block round-trips through Put without
 // gaining an empty table.
 type previewEntry struct {
-	Enabled    *bool  `toml:"enabled,omitempty"`
-	Domain     string `toml:"domain,omitempty"`
-	AllowForks *bool  `toml:"allow_forks,omitempty"`
+	Enabled    *bool    `toml:"enabled,omitempty"`
+	Domain     string   `toml:"domain,omitempty"`
+	AllowForks *bool    `toml:"allow_forks,omitempty"`
+	AutoStart  []string `toml:"auto_start,omitempty"`
 }
 
 // toPreview converts a parsed block to the domain type. A nil receiver is the
@@ -63,19 +64,21 @@ func (e *previewEntry) toPreview() project.Preview {
 		Enabled:    e.Enabled,
 		Domain:     e.Domain,
 		AllowForks: e.AllowForks,
+		AutoStart:  e.AutoStart,
 	}
 }
 
 // previewEntryFrom converts the domain type back to a parsed block, returning
 // nil when nothing is set.
 func previewEntryFrom(p project.Preview) *previewEntry {
-	if p.Enabled == nil && p.Domain == "" && p.AllowForks == nil {
+	if p.Enabled == nil && p.Domain == "" && p.AllowForks == nil && len(p.AutoStart) == 0 {
 		return nil
 	}
 	return &previewEntry{
 		Enabled:    p.Enabled,
 		Domain:     p.Domain,
 		AllowForks: p.AllowForks,
+		AutoStart:  p.AutoStart,
 	}
 }
 

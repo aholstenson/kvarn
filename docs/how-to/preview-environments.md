@@ -267,6 +267,51 @@ repository mirror and the tool caches are warm.
 
 Pass `--no-wait` to return as soon as the boot has started.
 
+## Start previews on demand
+
+A preview can also start because somebody asked for it. Give the project the
+hostnames it should answer to, in `projects.toml`:
+
+```toml
+[projects.my-project.preview]
+auto_start = ["pr-{pr}.{domain}"]
+```
+
+and name the repository's sites the same way, in `kvarn.yml`:
+
+```yaml
+preview:
+  sites:
+    web: { port: 3000, host: "pr-{pr}.{domain}" }
+```
+
+Now the first request for `pr-12.preview.example.com` reads `12` out of the
+hostname, asks the forge which branch pull request 12 is, registers a preview of
+that branch and boots it. The person who opened the link waits on the same
+holding page a stopped preview shows, and the tab reloads into the app.
+
+Nothing has to run at pull-request time. The name works because the pattern
+says it will, so a link in a pull request template or a forge check is enough —
+there is no webhook to wire up and no preview sitting idle for a branch nobody
+opened.
+
+The two patterns have to agree. `auto_start` is what turns a hostname into a
+pull request, and `kvarn.yml` is what the preview actually answers on; if they
+resolve to different names, the boot fails and says so on the holding page
+rather than coming up under a name nobody asked for.
+
+**What it refuses.** Only open pull requests start anything. A pull request
+whose head branch lives in a fork needs `allow_forks` for that project, because
+a preview runs that branch's code with the project's real secrets. Hostnames
+that resolve to nothing are remembered as such for a minute, and first-time
+resolutions are rate limited, so walking pull request numbers at the ingress
+does not turn into a walk of your forge's API.
+
+**What tidies up.** A preview started this way is removed — record, hostname and
+all — once its pull request closes or merges. Until then it stops and restarts
+on the ordinary idle and lifetime rules. A preview started with `kvarn preview
+up` is never removed on its own, whoever else asks for it.
+
 ## Live with it
 
 ```sh
@@ -299,6 +344,10 @@ exits.
   orchestrator process, reachable only through the network that process owns —
   so `kvarn queue drain` stops previews outright, and a restart resets every
   record to stopped. In both cases the next request boots it again.
+- **A closed pull request**, for a preview that
+  [started itself](#start-previews-on-demand). That one is removed rather than
+  stopped: the record and its hostname go too, since nobody registered it and
+  nobody should have to unregister it.
 
 None of these lose anything, because a preview holds nothing: it is derived from
 its branch and rebuilt from it.

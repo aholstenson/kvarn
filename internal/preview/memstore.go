@@ -53,6 +53,7 @@ func (m *memStore) Put(_ context.Context, p *Preview) error {
 	}
 
 	stored := clone(p)
+	stored.AutoStartHost = NormalizeHost(stored.AutoStartHost)
 	for i, site := range stored.Sites {
 		stored.Sites[i].Host = NormalizeHost(site.Host)
 		m.hostIndex[stored.Sites[i].Host] = p.ID

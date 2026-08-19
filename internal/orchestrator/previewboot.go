@@ -162,13 +162,16 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 		return nil, fmt.Errorf("%s declares no preview: add a `preview:` block with at least one site to kvarn.yml", p.Ref)
 	}
 
-	sites, err := cfg.Preview.Resolve(p.Ref, domain)
+	sites, err := cfg.Preview.Resolve(projconfig.HostVars{Ref: p.Ref, PR: p.PR}, domain)
 	if err != nil {
 		return nil, err
 	}
 	resolved := make([]preview.Site, 0, len(sites))
 	for _, s := range sites {
 		resolved = append(resolved, preview.Site{Name: s.Name, Host: s.Host, Port: s.Port})
+	}
+	if err := checkAutoStartHost(p, resolved); err != nil {
+		return nil, err
 	}
 
 	// Claim the hostnames before booting anything. A name another preview holds
@@ -285,6 +288,31 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 		SessionID: sessionID,
 		Lease:     lease,
 	}, nil
+}
+
+// checkAutoStartHost fails a boot whose sites do not answer on the hostname
+// that asked for it.
+//
+// A preview started by a request has one job the request can see: serve that
+// name. If the repository's own `host` patterns resolve to something else — the
+// usual cause is sites named by `{ref}` under a project configured to auto-start
+// by `{pr}` — the VM would come up perfectly and the browser waiting on the
+// holding page would reload into a 404 with nothing to explain it. Failing here
+// puts the mismatch on the holding page instead, naming both sides.
+func checkAutoStartHost(p *preview.Preview, sites []preview.Site) error {
+	if !p.AutoStarted() {
+		return nil
+	}
+	want := preview.NormalizeHost(p.AutoStartHost)
+	for _, site := range sites {
+		if preview.NormalizeHost(site.Host) == want {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"%s was started by a request for %s, but its kvarn.yml sites answer on %s: "+
+			"give a site the host pattern the project's preview auto_start claims",
+		p.Ref, want, strings.Join(hostsOf(sites), ", "))
 }
 
 // hostsOf reduces resolved sites to their hostnames.

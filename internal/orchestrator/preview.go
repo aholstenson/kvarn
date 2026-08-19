@@ -157,6 +157,14 @@ type previewManager struct {
 	boot   previewBooter
 	now    func() time.Time
 	log    *slog.Logger
+	// auto turns a hostname nothing claims into a preview to boot. Nil when no
+	// project has auto-start configured, or on a manager built without one, in
+	// which case an unclaimed hostname is simply not found.
+	auto *autoStarter
+	// prState reads whether a pull request is still open, which is what decides
+	// that an auto-started preview has outlived its reason to exist. Nil leaves
+	// those previews to the ordinary idle and lifetime reaping.
+	prState previewPRState
 
 	mu sync.Mutex
 	// live holds the in-memory half of every preview currently holding
@@ -258,10 +266,24 @@ func (m *previewManager) Touch(ctx context.Context, id string) {
 	}
 }
 
+// previewOrigin is what the caller of Register knows about why the preview
+// exists. Both fields are empty for a preview an operator asked for by name.
+type previewOrigin struct {
+	// PR is the pull request the preview is of.
+	PR string
+	// AutoStartHost is the hostname whose request brought it into being.
+	AutoStartHost string
+}
+
 // Register creates or refreshes the durable record for a preview of a ref,
 // without booting it. It is what `kvarn preview up` calls first: the row (and
 // with it the hostname) has to exist before anything can route to the preview.
-func (m *previewManager) Register(ctx context.Context, project, ref string) (*preview.Preview, error) {
+//
+// A preview that already exists keeps its identity and gains whatever the
+// caller knows that it does not: a branch registered by hand and then reached
+// through its pull request's hostname is one preview, not two, and the second
+// route is what teaches the first which pull request it belongs to.
+func (m *previewManager) Register(ctx context.Context, project, ref string, origin previewOrigin) (*preview.Preview, error) {
 	if !m.enabled() {
 		return nil, ErrPreviewsDisabled
 	}
@@ -274,16 +296,34 @@ func (m *previewManager) Register(ctx context.Context, project, ref string) (*pr
 		return nil, err
 	}
 	if existing != nil {
+		changed := false
+		if origin.PR != "" && existing.PR != origin.PR {
+			existing.PR = origin.PR
+			changed = true
+		}
+		if origin.AutoStartHost != "" && existing.AutoStartHost != origin.AutoStartHost {
+			existing.AutoStartHost = origin.AutoStartHost
+			changed = true
+		}
+		if !changed {
+			return existing, nil
+		}
+		existing.UpdatedAt = now
+		if err := m.store.Put(ctx, existing); err != nil {
+			return nil, err
+		}
 		return existing, nil
 	}
 
 	p := &preview.Preview{
-		ID:        id,
-		Project:   project,
-		Ref:       ref,
-		State:     preview.StateStopped,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:            id,
+		Project:       project,
+		Ref:           ref,
+		PR:            origin.PR,
+		AutoStartHost: origin.AutoStartHost,
+		State:         preview.StateStopped,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	if err := m.store.Put(ctx, p); err != nil {
 		return nil, err
@@ -718,26 +758,44 @@ func (m *previewManager) SetDraining(ctx context.Context, draining bool) {
 	}
 }
 
-// StartReaper runs idle and max-lifetime reaping until ctx is cancelled.
+// StartReaper runs idle, max-lifetime and closed-pull-request reaping until ctx
+// is cancelled.
 func (m *previewManager) StartReaper(ctx context.Context) {
 	if !m.enabled() {
 		return
 	}
-	if m.policy.IdleTimeout <= 0 && m.policy.MaxLifetime <= 0 {
-		return
-	}
-	go func() {
-		t := time.NewTicker(previewReapInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				m.Reap(ctx)
+	if m.policy.IdleTimeout > 0 || m.policy.MaxLifetime > 0 {
+		go func() {
+			t := time.NewTicker(previewReapInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					m.Reap(ctx)
+				}
 			}
-		}
-	}()
+		}()
+	}
+
+	// Closed pull requests are swept on their own, far slower clock: it costs a
+	// forge call per auto-started preview, and a pull request that merged a
+	// minute ago is not urgent — idle reaping has already taken its VM down.
+	if m.prState != nil {
+		go func() {
+			t := time.NewTicker(previewPRSweepInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					m.ReapClosedPullRequests(ctx)
+				}
+			}
+		}()
+	}
 }
 
 // Reap stops previews that have gone idle or outlived their cap. Exported to

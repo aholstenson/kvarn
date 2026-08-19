@@ -143,16 +143,19 @@ func (c *Cmd) bindPorts(cfg *project.Config, names []string) (*sitePlan, error) 
 // bindDomain resolves every site's hostname under the base domain and binds the
 // one listener all of them are served from.
 func (c *Cmd) bindDomain(ctx context.Context, cfg *project.Config, names []string) (*sitePlan, error) {
-	ref := c.Ref
-	if ref == "" {
-		ref = DefaultRefLabel
+	vars := project.HostVars{Ref: c.Ref, PR: c.PR}
+	if vars.Ref == "" {
+		vars.Ref = DefaultRefLabel
+	}
+	if vars.PR == "" {
+		vars.PR = DefaultRefLabel
 	}
 
 	plan := &sitePlan{domain: strings.Trim(c.BaseDomain, ".")}
 	claimed := make(map[string]string, len(names))
 	for _, name := range names {
 		site := cfg.Preview.Sites[name]
-		host, err := project.ResolveHost(site.Host, ref, c.BaseDomain)
+		host, err := project.ResolveHost(site.Host, vars, c.BaseDomain)
 		if err != nil {
 			return nil, fmt.Errorf("site %q: %w", name, err)
 		}

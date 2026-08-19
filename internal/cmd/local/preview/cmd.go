@@ -60,13 +60,15 @@ type Cmd struct {
 
 	BaseDomain  string `help:"Serve the sites on hostnames under this domain, e.g. sws.local, instead of loopback ports. The names have to resolve to 127.0.0.1 on this machine." name:"base-domain"`
 	Ref         string `help:"Ref label the site hostnames are formed with, for the {ref} part of a site's host pattern." default:"local" name:"ref"`
+	PR          string `help:"Pull request the site hostnames are formed with, for the {pr} part of a site's host pattern." default:"local" name:"pr"`
 	IngressPort uint16 `help:"Host port the sites are served on with --base-domain. Defaults to the port the sites share inside the VM, else 8080." name:"ingress-port"`
 }
 
-// DefaultRefLabel is the {ref} a local preview's hostnames are formed with. It
-// is a fixed word rather than the checked-out branch so the names — and
-// therefore /etc/hosts entries and anything registered against them, such as
-// OAuth redirect URLs — survive switching branches.
+// DefaultRefLabel is the {ref} — and, for a repository whose sites are named by
+// pull request, the {pr} — a local preview's hostnames are formed with. It is a
+// fixed word rather than the checked-out branch so the names — and therefore
+// /etc/hosts entries and anything registered against them, such as OAuth
+// redirect URLs — survive switching branches.
 const DefaultRefLabel = "local"
 
 func (c *Cmd) Run() error {

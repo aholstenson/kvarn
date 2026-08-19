@@ -64,40 +64,61 @@ var _ = Describe("Preview config", func() {
 
 	Describe("ResolveHost", func() {
 		It("defaults to {ref}.{domain}", func() {
-			host, err := project.ResolveHost("", "main", "preview.example.com")
+			host, err := project.ResolveHost("", project.HostVars{Ref: "main"}, "preview.example.com")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(Equal("main.preview.example.com"))
 		})
 
 		It("expands an explicit pattern", func() {
-			host, err := project.ResolveHost("assets-{ref}.{domain}", "main", "preview.example.com")
+			host, err := project.ResolveHost("assets-{ref}.{domain}", project.HostVars{Ref: "main"}, "preview.example.com")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(Equal("assets-main.preview.example.com"))
 		})
 
 		It("tolerates a domain written with leading or trailing dots", func() {
-			host, err := project.ResolveHost("", "main", ".preview.example.com.")
+			host, err := project.ResolveHost("", project.HostVars{Ref: "main"}, ".preview.example.com.")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(host).To(Equal("main.preview.example.com"))
 		})
 
 		It("refuses a hostname outside the configured domain", func() {
-			_, err := project.ResolveHost("admin.example.com", "main", "preview.example.com")
+			_, err := project.ResolveHost("admin.example.com", project.HostVars{Ref: "main"}, "preview.example.com")
 			Expect(err).To(MatchError(ContainSubstring("outside the configured preview domain")))
 		})
 
 		It("refuses a suffix match that is not on a label boundary", func() {
-			_, err := project.ResolveHost("evilpreview.example.com", "main", "preview.example.com")
+			_, err := project.ResolveHost("evilpreview.example.com", project.HostVars{Ref: "main"}, "preview.example.com")
 			Expect(err).To(MatchError(ContainSubstring("outside the configured preview domain")))
 		})
 
 		It("refuses to resolve without a domain", func() {
-			_, err := project.ResolveHost("", "main", "")
+			_, err := project.ResolveHost("", project.HostVars{Ref: "main"}, "")
 			Expect(err).To(MatchError(ContainSubstring("no preview domain is configured")))
 		})
 
+		It("expands a pull request into the hostname", func() {
+			host, err := project.ResolveHost("pr-{pr}.{domain}",
+				project.HostVars{Ref: "feature/login", PR: "42"}, "preview.example.com")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(host).To(Equal("pr-42.preview.example.com"))
+		})
+
+		It("refuses {pr} for a preview that is not of a pull request", func() {
+			// Otherwise the site would answer on `pr-.preview.example.com`,
+			// which nothing would ever ask for.
+			_, err := project.ResolveHost("pr-{pr}.{domain}",
+				project.HostVars{Ref: "main"}, "preview.example.com")
+			Expect(err).To(MatchError(ContainSubstring("not started for a pull request")))
+		})
+
+		It("refuses a pull request that cannot stand as a hostname label", func() {
+			_, err := project.ResolveHost("pr-{pr}.{domain}",
+				project.HostVars{Ref: "main", PR: "1/evil"}, "preview.example.com")
+			Expect(err).To(MatchError(ContainSubstring("cannot stand as a hostname label")))
+		})
+
 		It("keeps a hostile ref inside one label", func() {
-			host, err := project.ResolveHost("", "evil.admin", "preview.example.com")
+			host, err := project.ResolveHost("", project.HostVars{Ref: "evil.admin"}, "preview.example.com")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(strings.Count(host, ".")).To(Equal(strings.Count("main.preview.example.com", ".")))
 			Expect(host).To(HaveSuffix(".preview.example.com"))
@@ -117,7 +138,7 @@ var _ = Describe("Preview config", func() {
 				"web":    {Port: 3000},
 				"assets": {Port: 8080, Host: "assets-{ref}.{domain}"},
 			}}
-			sites, err := preview.Resolve("feat/login", "preview.example.com")
+			sites, err := preview.Resolve(project.HostVars{Ref: "feat/login"}, "preview.example.com")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sites).To(HaveLen(2))
 			Expect(sites[0].Name).To(Equal("assets"))
@@ -132,7 +153,7 @@ var _ = Describe("Preview config", func() {
 				"web":    {Port: 80},
 				"assets": {Port: 80, Host: "assets-{ref}.{domain}"},
 			}}
-			sites, err := preview.Resolve("main", "preview.example.com")
+			sites, err := preview.Resolve(project.HostVars{Ref: "main"}, "preview.example.com")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sites).To(HaveLen(2))
 			Expect(sites[0].Port).To(Equal(sites[1].Port))
@@ -144,7 +165,7 @@ var _ = Describe("Preview config", func() {
 			preview := project.Preview{Sites: map[string]project.PreviewSite{
 				"web": {Port: 3000, Host: "admin.other.com"},
 			}}
-			_, err := preview.Resolve("main", "preview.example.com")
+			_, err := preview.Resolve(project.HostVars{Ref: "main"}, "preview.example.com")
 			Expect(err).To(MatchError(ContainSubstring("preview.sites.web.host")))
 		})
 	})
@@ -209,6 +230,25 @@ preview:
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg.Preview.Serve).To(BeEmpty())
 			Expect(cfg.Preview.Setup).To(HaveLen(1))
+		})
+
+		It("accepts sites named by pull request, which is what auto-start matches", func() {
+			cfg, err := writePreviewConfig(`
+preview:
+  sites:
+    web: { port: 3000, host: "pr-{pr}.{domain}" }
+    api: { port: 4000, host: "api-pr-{pr}.{domain}" }
+  serve:
+    - { name: Web, run: npm start }
+`)
+			Expect(err).NotTo(HaveOccurred())
+
+			sites, err := cfg.Preview.Resolve(
+				project.HostVars{Ref: "feature/login", PR: "12"}, "preview.example.com")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sites).To(HaveLen(2))
+			Expect(sites[0].Host).To(Equal("api-pr-12.preview.example.com"))
+			Expect(sites[1].Host).To(Equal("pr-12.preview.example.com"))
 		})
 
 		It("treats a config with no preview block as having no preview", func() {

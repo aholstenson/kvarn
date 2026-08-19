@@ -96,6 +96,32 @@ func DescribeStore(name string, newStore func() preview.Store) bool {
 			Expect(err).To(MatchError(preview.ErrNotFound))
 		})
 
+		It("remembers which pull request a preview is of and which name asked for it", func() {
+			p := makePreview("proj/feature", "proj", "feature", preview.StateStopped, base,
+				"pr-12.preview.example.com")
+			p.PR = "12"
+			p.AutoStartHost = "PR-12.Preview.Example.Com"
+			Expect(store.Put(ctx, p)).To(Succeed())
+
+			got, err := store.Get(ctx, "proj/feature")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.PR).To(Equal("12"))
+			// Normalized on the way in, so it can be compared with a Host header.
+			Expect(got.AutoStartHost).To(Equal("pr-12.preview.example.com"))
+			Expect(got.AutoStarted()).To(BeTrue())
+		})
+
+		It("reports a preview nobody auto-started as such", func() {
+			p := makePreview("proj/main", "proj", "main", preview.StateStopped, base,
+				"main.preview.example.com")
+			Expect(store.Put(ctx, p)).To(Succeed())
+
+			got, err := store.Get(ctx, "proj/main")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.PR).To(BeEmpty())
+			Expect(got.AutoStarted()).To(BeFalse())
+		})
+
 		It("updates an existing preview in place", func() {
 			p := makePreview("proj/main", "proj", "main", preview.StateBooting, base, "main.preview.example.com")
 			Expect(store.Put(ctx, p)).To(Succeed())

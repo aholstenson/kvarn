@@ -121,12 +121,14 @@ func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO previews (
-		    id, project, ref, state, sites_json, session_id, error,
+		    id, project, ref, pr, auto_start_host, state, sites_json, session_id, error,
 		    created_at, updated_at, started_at, last_request_at, expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		    project = excluded.project,
 		    ref = excluded.ref,
+		    pr = excluded.pr,
+		    auto_start_host = excluded.auto_start_host,
 		    state = excluded.state,
 		    sites_json = excluded.sites_json,
 		    session_id = excluded.session_id,
@@ -135,7 +137,8 @@ func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
 		    started_at = excluded.started_at,
 		    last_request_at = excluded.last_request_at,
 		    expires_at = excluded.expires_at`,
-		p.ID, p.Project, p.Ref, string(p.State), string(sitesJSON), p.SessionID, p.Error,
+		p.ID, p.Project, p.Ref, p.PR, preview.NormalizeHost(p.AutoStartHost),
+		string(p.State), string(sitesJSON), p.SessionID, p.Error,
 		toMicros(p.CreatedAt), toMicros(p.UpdatedAt), toMicros(p.StartedAt),
 		toMicros(p.LastRequestAt), toMicros(p.ExpiresAt),
 	); err != nil {
@@ -166,7 +169,7 @@ func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
 	return nil
 }
 
-const previewColumns = `id, project, ref, state, sites_json, session_id, error, ` +
+const previewColumns = `id, project, ref, pr, auto_start_host, state, sites_json, session_id, error, ` +
 	`created_at, updated_at, started_at, last_request_at, expires_at`
 
 // scanPreview reads one row in previewColumns order.
@@ -176,7 +179,8 @@ func scanPreview(row interface{ Scan(...any) error }) (*preview.Preview, error) 
 		state, sitesJSON                                          string
 		createdAt, updatedAt, startedAt, lastRequestAt, expiresAt int64
 	)
-	if err := row.Scan(&p.ID, &p.Project, &p.Ref, &state, &sitesJSON, &p.SessionID, &p.Error,
+	if err := row.Scan(&p.ID, &p.Project, &p.Ref, &p.PR, &p.AutoStartHost,
+		&state, &sitesJSON, &p.SessionID, &p.Error,
 		&createdAt, &updatedAt, &startedAt, &lastRequestAt, &expiresAt); err != nil {
 		return nil, err
 	}

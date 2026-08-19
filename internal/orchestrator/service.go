@@ -498,6 +498,8 @@ func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
 		running:        make(map[string]runningJob),
 	}
 	s.previews = newPreviewManager(nil, PreviewPolicy{}, s.bootPreview)
+	s.previews.auto = newAutoStarter(s.resolvePreviewHost, s.previews.now)
+	s.previews.prState = s.previewPRState
 	s.startDispatcher(DispatchPolicy{})
 	return s
 }
@@ -553,6 +555,8 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		previewSandboxFactory: opts.PreviewSandboxFactory,
 	}
 	s.previews = newPreviewManager(opts.PreviewStore, opts.PreviewPolicy, s.bootPreview)
+	s.previews.auto = newAutoStarter(s.resolvePreviewHost, s.previews.now)
+	s.previews.prState = s.previewPRState
 	s.startDispatcher(opts.Dispatch)
 	return s
 }

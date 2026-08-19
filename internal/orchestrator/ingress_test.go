@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -189,6 +190,93 @@ var _ = Describe("Preview ingress", func() {
 
 		ingress = httptest.NewServer(PreviewIngressHandler(svc))
 		DeferCleanup(ingress.Close)
+	})
+
+	Describe("starting a preview by being asked for it", func() {
+		const autoHost = "pr-12.preview.example.com"
+
+		// getAuto issues a browser request for a hostname no preview claims yet.
+		getAuto := func(hostname string) *http.Response {
+			GinkgoHelper()
+			req, err := http.NewRequest(http.MethodGet, ingress.URL+"/", nil)
+			Expect(err).NotTo(HaveOccurred())
+			req.Host = hostname
+			req.Header.Set("Accept", "text/html")
+			resp, err := ingress.Client().Do(req)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { resp.Body.Close() })
+			return resp
+		}
+
+		// resolvesTo wires auto-start to answer with a fixed outcome, standing
+		// in for the route table and the forge lookup behind it.
+		resolvesTo := func(target previewTarget, err error) {
+			svc.previews.auto = newAutoStarter(
+				func(context.Context, string) (previewTarget, error) { return target, err },
+				time.Now)
+		}
+
+		It("registers and boots the preview a claimed hostname names", func() {
+			resolvesTo(previewTarget{Project: "proj", Ref: "feature/login", PR: "12"}, nil)
+
+			resp := getAuto(autoHost)
+			Expect(resp.StatusCode).To(Equal(http.StatusServiceUnavailable))
+			Expect(bodyOf(resp)).To(ContainSubstring("Preparing environment"))
+
+			p, err := store.Get(ctx, preview.ID("proj", "feature/login"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(p.PR).To(Equal("12"))
+			Expect(p.AutoStartHost).To(Equal(autoHost))
+			Eventually(func() int {
+				bootMu.Lock()
+				defer bootMu.Unlock()
+				return booted
+			}).Should(Equal(1))
+		})
+
+		It("tells a client that cannot read HTML to come back", func() {
+			resolvesTo(previewTarget{Project: "proj", Ref: "feature/login", PR: "12"}, nil)
+
+			req, err := http.NewRequest(http.MethodGet, ingress.URL+"/", nil)
+			Expect(err).NotTo(HaveOccurred())
+			req.Host = autoHost
+			req.Header.Set("Accept", "application/json")
+			resp, err := ingress.Client().Do(req)
+			Expect(err).NotTo(HaveOccurred())
+			defer resp.Body.Close()
+
+			Expect(resp.StatusCode).To(Equal(http.StatusServiceUnavailable))
+			Expect(resp.Header.Get("Retry-After")).NotTo(BeEmpty())
+		})
+
+		It("says why a claimed hostname is not going to start anything", func() {
+			// "No preview here" in front of a hostname the forge just handed
+			// somebody is baffling; the reason is the whole answer.
+			resolvesTo(previewTarget{}, errors.New("pull request 12 is closed"))
+
+			resp := getAuto(autoHost)
+			Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
+			Expect(bodyOf(resp)).To(ContainSubstring("pull request 12 is closed"))
+		})
+
+		It("answers a hostname no project claims with the ordinary 404", func() {
+			resolvesTo(previewTarget{}, preview.ErrNoRoute)
+
+			resp := getAuto("www.preview.example.com")
+			Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
+			Expect(bodyOf(resp)).To(ContainSubstring("No preview here"))
+			bootMu.Lock()
+			defer bootMu.Unlock()
+			Expect(booted).To(Equal(0))
+		})
+
+		It("holds off rather than refusing when it cannot answer right now", func() {
+			resolvesTo(previewTarget{}, ErrAutoStartUnavailable)
+
+			resp := getAuto(autoHost)
+			Expect(resp.StatusCode).To(Equal(http.StatusServiceUnavailable))
+			Expect(resp.Header.Get("Retry-After")).NotTo(BeEmpty())
+		})
 	})
 
 	Describe("routing", func() {

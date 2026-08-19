@@ -68,18 +68,20 @@ func (h *previewIngress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Exact match, no fallback. Serving an unknown name from whichever
 		// preview happens to be running would produce something that looks like
 		// it works and is showing the wrong branch.
-		h.notFound(w, r, host)
-		return
+		//
+		// A name no preview claims may still be one a project has said it will
+		// answer to, which is where a preview that nobody has started yet comes
+		// from.
+		p = h.autoStart(w, r, host)
+		if p == nil {
+			// Nothing to route to, and autoStart has already answered.
+			return
+		}
+		err = nil
 	}
 	if err != nil {
 		h.log.Error("could not resolve preview host", "host", host, "error", err)
 		http.Error(w, "preview lookup failed", http.StatusInternalServerError)
-		return
-	}
-
-	site, ok := p.SiteForHost(host)
-	if !ok {
-		h.notFound(w, r, host)
 		return
 	}
 
@@ -97,7 +99,59 @@ func (h *previewIngress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Which site serves this name is only knowable once the preview has booted:
+	// a preview that has never run has no sites recorded yet, because the host
+	// patterns live in the kvarn.yml the boot clones.
+	site, ok := p.SiteForHost(host)
+	if !ok {
+		h.notFound(w, r, host)
+		return
+	}
+
 	h.proxy(w, r, p, site)
+}
+
+// autoStart tries to bring a preview into being for a hostname nothing claims
+// yet. It returns the registered preview, or nil after answering the request
+// itself.
+//
+// The three outcomes are three different answers. A name no project claims is
+// the ordinary 404. A name a project claims but whose pull request is closed,
+// or from a fork, is also a 404 — nothing is going to make it work — but it says
+// which, because "no preview here" in front of a hostname somebody was just
+// given by their forge is baffling. Anything else is temporary and gets the
+// holding page's 503, so a client that retries is not told the preview will
+// never exist.
+func (h *previewIngress) autoStart(w http.ResponseWriter, r *http.Request, host string) *preview.Preview {
+	p, err := h.svc.previews.AutoStart(r.Context(), host)
+	switch {
+	case err == nil:
+		return p
+	case errors.Is(err, preview.ErrNoRoute), errors.Is(err, ErrPreviewsDisabled):
+		h.notFound(w, r, host)
+	case errors.Is(err, ErrAutoStartUnavailable), errors.Is(err, ErrPreviewDraining):
+		h.unavailable(w, r, "Not starting environments right now",
+			"This host is not starting new preview environments at the moment. Try again shortly.")
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// The client went away mid-resolution; there is nobody to answer.
+	default:
+		h.log.Info("could not auto-start a preview", "host", host, "error", err)
+		h.refused(w, r, host, err)
+	}
+	return nil
+}
+
+// refused answers a hostname that is claimed but cannot be started, saying why.
+func (h *previewIngress) refused(w http.ResponseWriter, r *http.Request, host string, cause error) {
+	w.Header().Set("X-Robots-Tag", "noindex")
+	if !wantsHTML(r) {
+		http.Error(w, fmt.Sprintf("no preview environment for %s: %v", host, cause), http.StatusNotFound)
+		return
+	}
+	writeHTML(w, http.StatusNotFound, previewErrorPage(
+		"No preview here",
+		fmt.Sprintf("%s should have started a preview, but %v.", host, cause),
+		"Start one with kvarn preview up <project> <ref>."))
 }
 
 // notFound answers a hostname no preview claims.

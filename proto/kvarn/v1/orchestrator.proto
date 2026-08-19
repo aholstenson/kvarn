@@ -592,6 +592,11 @@ message StartPreviewRequest {
   // Without it the call returns as soon as the boot has started, which is what
   // a caller that intends to watch the session wants.
   bool wait = 3;
+  // Pr is the pull request this preview is of, spelled the way its forge spells
+  // one. It is what a site's `{pr}` host pattern expands to, so a repository
+  // whose preview hostnames are named by pull request needs it; a repository
+  // whose sites are named by ref does not.
+  string pr = 4;
 }
 
 message StartPreviewResponse {

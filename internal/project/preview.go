@@ -52,8 +52,14 @@ type PreviewSite struct {
 	// what has to be unique is the hostname, since that is what routes.
 	Port uint16 `yaml:"port"`
 	// Host is the hostname pattern this site answers on. It may use `{ref}` for
-	// the slugged git ref and `{domain}` for the project's configured preview
-	// domain. Empty defaults to DefaultHostPattern.
+	// the slugged git ref, `{pr}` for the pull request the preview belongs to,
+	// and `{domain}` for the project's configured preview domain. Empty defaults
+	// to DefaultHostPattern.
+	//
+	// A pattern using `{pr}` is what the operator's `auto_start` matches against
+	// to turn a hostname nobody has visited yet into a preview, so a repository
+	// that wants previews to start themselves names its sites by pull request
+	// rather than by ref.
 	Host string `yaml:"host,omitempty"`
 }
 
@@ -141,10 +147,28 @@ func refDigest(ref string) string {
 	return strings.ToLower(encoded[:refLabelHashLen])
 }
 
-// ResolveHost expands one host pattern against a ref and a domain. It is the
-// single place a preview hostname is produced, so ingress and the CLI cannot
-// disagree about what a preview is called.
-func ResolveHost(pattern, ref, domain string) (string, error) {
+// HostVars are the values a host pattern's placeholders expand to. A preview
+// always knows its ref; it knows a pull request only when it was started for
+// one, which is why PR is checked at expansion rather than assumed.
+type HostVars struct {
+	// Ref is the git ref the preview is pinned to, unslugged.
+	Ref string
+	// PR identifies the pull request the preview belongs to, in whatever
+	// spelling the forge uses (a decimal number on GitHub). Empty when the
+	// preview was started for a ref on its own.
+	PR string
+}
+
+// prLabelRe constrains a pull request identifier to something that can stand as
+// one DNS label. The value is opaque to kvarn — each forge spells its own — so
+// it is checked rather than trusted: it ends up in a hostname the ingress
+// routes on.
+var prLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// ResolveHost expands one host pattern against a preview's variables and a
+// domain. It is the single place a preview hostname is produced, so ingress and
+// the CLI cannot disagree about what a preview is called.
+func ResolveHost(pattern string, vars HostVars, domain string) (string, error) {
 	if pattern == "" {
 		pattern = DefaultHostPattern
 	}
@@ -152,7 +176,17 @@ func ResolveHost(pattern, ref, domain string) (string, error) {
 		return "", errors.New("no preview domain is configured")
 	}
 
-	host := strings.ReplaceAll(pattern, "{ref}", RefLabel(ref))
+	if strings.Contains(pattern, "{pr}") {
+		if vars.PR == "" {
+			return "", errors.New("uses {pr}, but this preview was not started for a pull request")
+		}
+		if !prLabelRe.MatchString(strings.ToLower(vars.PR)) {
+			return "", fmt.Errorf("uses {pr}, but %q cannot stand as a hostname label", vars.PR)
+		}
+	}
+
+	host := strings.ReplaceAll(pattern, "{ref}", RefLabel(vars.Ref))
+	host = strings.ReplaceAll(host, "{pr}", strings.ToLower(vars.PR))
 	host = strings.ReplaceAll(host, "{domain}", strings.Trim(domain, "."))
 	host = strings.ToLower(strings.Trim(host, "."))
 
@@ -208,9 +242,9 @@ type ResolvedSite struct {
 // will be using.
 func (s ResolvedSite) URL() string { return "https://" + s.Host }
 
-// Resolve expands every site's host pattern for a ref, returning them sorted by
-// site name so callers produce stable output.
-func (p Preview) Resolve(ref, domain string) ([]ResolvedSite, error) {
+// Resolve expands every site's host pattern for a preview, returning them
+// sorted by site name so callers produce stable output.
+func (p Preview) Resolve(vars HostVars, domain string) ([]ResolvedSite, error) {
 	names := make([]string, 0, len(p.Sites))
 	for name := range p.Sites {
 		names = append(names, name)
@@ -220,7 +254,7 @@ func (p Preview) Resolve(ref, domain string) ([]ResolvedSite, error) {
 	out := make([]ResolvedSite, 0, len(names))
 	for _, name := range names {
 		site := p.Sites[name]
-		host, err := ResolveHost(site.Host, ref, domain)
+		host, err := ResolveHost(site.Host, vars, domain)
 		if err != nil {
 			return nil, fmt.Errorf("preview.sites.%s.host: %w", name, err)
 		}
@@ -351,9 +385,9 @@ func validatePreviewHostPattern(pattern string) error {
 
 	for _, match := range hostPatternPlaceholder.FindAllStringSubmatch(pattern, -1) {
 		switch match[1] {
-		case "ref", "domain":
+		case "ref", "pr", "domain":
 		default:
-			return fmt.Errorf("uses unknown placeholder %q; only {ref} and {domain} are available", match[0])
+			return fmt.Errorf("uses unknown placeholder %q; only {ref}, {pr} and {domain} are available", match[0])
 		}
 	}
 
@@ -364,9 +398,7 @@ func validatePreviewHostPattern(pattern string) error {
 		return errors.New("must end in {domain} or .{domain} so the name stays inside the configured preview domain")
 	}
 
-	// `{ref}` fills one label, so it must not be glued to a dot-free
-	// neighbour that could push the label past its limit in a way the
-	// repository controls — that part is fine — but it must not be split
+	// `{ref}` and `{pr}` each fill part of one label, so neither may be split
 	// across a dot, which would make it two labels.
 	prefix := strings.TrimSuffix(pattern, "{domain}")
 	prefix = strings.TrimSuffix(prefix, ".")
@@ -378,6 +410,7 @@ func validatePreviewHostPattern(pattern string) error {
 			// Everything outside the placeholders has to be label-legal on its
 			// own; the placeholder's own expansion is already one safe label.
 			literal := strings.ReplaceAll(label, "{ref}", "r")
+			literal = strings.ReplaceAll(literal, "{pr}", "1")
 			if strings.Contains(literal, "{") || strings.Contains(literal, "}") {
 				return errors.New("has an unclosed placeholder")
 			}

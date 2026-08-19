@@ -18,7 +18,8 @@ type UpCmd struct {
 	Project string `arg:"" help:"Project the branch belongs to."`
 	Ref     string `arg:"" help:"Branch to preview."`
 
-	Wait bool `help:"Wait for the preview to be serving before returning." default:"true" negatable:""`
+	PR   string `help:"Pull request the branch belongs to, for repositories whose site hostnames use {pr}." name:"pr"`
+	Wait bool   `help:"Wait for the preview to be serving before returning." default:"true" negatable:""`
 	JSON bool `help:"Emit JSON instead of a summary." name:"json"`
 }
 
@@ -33,6 +34,7 @@ func (c *UpCmd) Run() error {
 	resp, err := oc.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{
 		Project: c.Project,
 		Ref:     c.Ref,
+		Pr:      c.PR,
 	}))
 	if err != nil {
 		return fmt.Errorf("start preview: %w", err)

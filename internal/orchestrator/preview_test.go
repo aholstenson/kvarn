@@ -159,7 +159,7 @@ var _ = Describe("Preview manager", func() {
 	// bootAndWait starts a preview and waits for it to reach running.
 	bootAndWait := func(m *previewManager, project, ref string) *preview.Preview {
 		GinkgoHelper()
-		p, err := m.Register(ctx, project, ref)
+		p, err := m.Register(ctx, project, ref, previewOrigin{})
 		Expect(err).NotTo(HaveOccurred())
 		_, err = m.Ensure(ctx, p.ID)
 		Expect(err).NotTo(HaveOccurred())
@@ -187,7 +187,7 @@ var _ = Describe("Preview manager", func() {
 
 	Describe("registration", func() {
 		It("creates a stopped record without booting anything", func() {
-			p, err := mgr.Register(ctx, "proj", "main")
+			p, err := mgr.Register(ctx, "proj", "main", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(p.ID).To(Equal(preview.ID("proj", "main")))
 			Expect(p.State).To(Equal(preview.StateStopped))
@@ -195,9 +195,9 @@ var _ = Describe("Preview manager", func() {
 		})
 
 		It("is idempotent for a ref that already has a preview", func() {
-			first, err := mgr.Register(ctx, "proj", "main")
+			first, err := mgr.Register(ctx, "proj", "main", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
-			second, err := mgr.Register(ctx, "proj", "main")
+			second, err := mgr.Register(ctx, "proj", "main", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(second.ID).To(Equal(first.ID))
 			Expect(second.CreatedAt).To(BeTemporally("==", first.CreatedAt))
@@ -205,13 +205,13 @@ var _ = Describe("Preview manager", func() {
 
 		It("reports previews as disabled without a domain", func() {
 			disabled := newPreviewManager(store, PreviewPolicy{}, booter.boot)
-			_, err := disabled.Register(ctx, "proj", "main")
+			_, err := disabled.Register(ctx, "proj", "main", previewOrigin{})
 			Expect(err).To(MatchError(ErrPreviewsDisabled))
 		})
 
 		It("reports previews as disabled without a store", func() {
 			disabled := newPreviewManager(nil, PreviewPolicy{Domain: "preview.example.com"}, booter.boot)
-			_, err := disabled.Register(ctx, "proj", "main")
+			_, err := disabled.Register(ctx, "proj", "main", previewOrigin{})
 			Expect(err).To(MatchError(ErrPreviewsDisabled))
 		})
 	})
@@ -236,7 +236,7 @@ var _ = Describe("Preview manager", func() {
 		It("single-flights a burst of requests into one boot", func() {
 			booter.block = make(chan struct{})
 
-			p, err := mgr.Register(ctx, "proj", "main")
+			p, err := mgr.Register(ctx, "proj", "main", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
 			for range 10 {
 				_, err := mgr.Ensure(ctx, p.ID)
@@ -253,7 +253,7 @@ var _ = Describe("Preview manager", func() {
 			booter.block = make(chan struct{})
 			defer close(booter.block)
 
-			p, err := mgr.Register(ctx, "proj", "main")
+			p, err := mgr.Register(ctx, "proj", "main", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = mgr.Ensure(ctx, p.ID)
 			Expect(err).NotTo(HaveOccurred())
@@ -271,7 +271,7 @@ var _ = Describe("Preview manager", func() {
 		It("records a failed boot with its reason", func() {
 			booter.setErr(errors.New("setup step \"build\" failed"))
 
-			p, err := mgr.Register(ctx, "proj", "main")
+			p, err := mgr.Register(ctx, "proj", "main", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = mgr.Ensure(ctx, p.ID)
 			Expect(err).NotTo(HaveOccurred())
@@ -292,7 +292,7 @@ var _ = Describe("Preview manager", func() {
 
 		It("retries a failed preview on the next request", func() {
 			booter.setErr(errors.New("transient"))
-			p, err := mgr.Register(ctx, "proj", "main")
+			p, err := mgr.Register(ctx, "proj", "main", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = mgr.Ensure(ctx, p.ID)
 			Expect(err).NotTo(HaveOccurred())
@@ -345,7 +345,7 @@ var _ = Describe("Preview manager", func() {
 		})
 
 		It("is a no-op for a preview that is already stopped", func() {
-			p, err := mgr.Register(ctx, "proj", "main")
+			p, err := mgr.Register(ctx, "proj", "main", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(mgr.Stop(ctx, p.ID, "spec")).To(Succeed())
 		})
@@ -401,7 +401,7 @@ var _ = Describe("Preview manager", func() {
 				return booter.boot(ctx, p, logs)
 			}
 
-			p, err := mgr.Register(ctx, "proj", "b")
+			p, err := mgr.Register(ctx, "proj", "b", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = mgr.Ensure(ctx, p.ID)
 			Expect(err).NotTo(HaveOccurred())
@@ -417,7 +417,7 @@ var _ = Describe("Preview manager", func() {
 				return nil, scheduler.ErrWouldBlock
 			}
 
-			p, err := mgr.Register(ctx, "proj", "only")
+			p, err := mgr.Register(ctx, "proj", "only", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = mgr.Ensure(ctx, p.ID)
 			Expect(err).NotTo(HaveOccurred())
@@ -435,7 +435,7 @@ var _ = Describe("Preview manager", func() {
 			mgr = build(PreviewPolicy{MaxConcurrent: 1})
 			resident := bootAndWait(mgr, "proj", "a")
 
-			p, err := mgr.Register(ctx, "proj", "b")
+			p, err := mgr.Register(ctx, "proj", "b", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = mgr.Ensure(ctx, p.ID)
 			Expect(err).NotTo(HaveOccurred())
@@ -576,7 +576,7 @@ var _ = Describe("Preview manager", func() {
 		It("tears down a boot that finished after the drain started", func() {
 			booter.block = make(chan struct{})
 
-			p, err := mgr.Register(ctx, "proj", "main")
+			p, err := mgr.Register(ctx, "proj", "main", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = mgr.Ensure(ctx, p.ID)
 			Expect(err).NotTo(HaveOccurred())

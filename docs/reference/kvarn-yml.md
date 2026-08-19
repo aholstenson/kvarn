@@ -498,7 +498,7 @@ Several sites naming one port is one virtual-hosting server answering under
 several names — ingress passes it the hostname the browser asked for, so it can
 tell the requests apart.
 
-Two placeholders are available:
+Three placeholders are available:
 
 - `{ref}` — the branch, reduced to exactly one DNS label: lowercased, with
   anything that is not a letter or digit collapsed to a hyphen. When that is not
@@ -506,7 +506,21 @@ Two placeholders are available:
   otherwise collide, and a long branch has to be shortened — a short digest of
   the original is appended, so the label stays deterministic, stays under 63
   bytes and never names two branches the same thing.
+- `{pr}` — the pull request the preview is of. A preview that is not of a pull
+  request has nothing to put here, so a site using it fails to resolve; give the
+  number with `kvarn preview up --pr` when starting one by hand.
 - `{domain}` — the base domain configured for the project.
+
+Naming sites by `{pr}` is what lets previews start themselves: the operator's
+[`auto_start`](projects-toml.md#auto_start) patterns match the same names, so a
+request for `pr-12.preview.example.com` boots a preview of pull request 12.
+
+```yaml
+preview:
+  sites:
+    web: { port: 3000, host: "pr-{pr}.{domain}" }
+    api: { port: 4000, host: "api-pr-{pr}.{domain}" }
+```
 
 **A pattern must end in `{domain}` or `.{domain}`.** Anything else is rejected
 when the file is read. Without that rule a `kvarn.yml` on any branch could write

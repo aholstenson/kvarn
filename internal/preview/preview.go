@@ -68,6 +68,18 @@ type Preview struct {
 	// asking for a preview of a ref that already has one returns that one.
 	Project string
 	Ref     string
+	// PR is the pull request this preview belongs to, spelled the way its forge
+	// spells one, or empty when the preview was started for a ref on its own.
+	// It is what a site's `{pr}` expands to, and what says which pull request to
+	// re-read when deciding whether an auto-started preview still has a reason
+	// to exist.
+	PR string
+	// AutoStartHost is the hostname whose first request brought this preview
+	// into being, empty for one that was registered explicitly. Recording it is
+	// what lets a boot check that the repository's own sites really produce the
+	// name somebody is waiting on, rather than coming up perfectly under a
+	// different name and leaving that request to 404 forever.
+	AutoStartHost string
 
 	State State
 	// Sites are the resolved hostnames and guest ports. They are recorded rather
@@ -93,6 +105,10 @@ type Preview struct {
 	// traffic. Zero means no cap.
 	ExpiresAt time.Time
 }
+
+// AutoStarted reports whether this preview exists because somebody asked for a
+// hostname, rather than because an operator registered it.
+func (p *Preview) AutoStarted() bool { return p.AutoStartHost != "" }
 
 // Hosts returns every hostname that routes to this preview.
 func (p *Preview) Hosts() []string {

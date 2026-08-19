@@ -31,7 +31,7 @@ func (s *Service) StartPreview(ctx context.Context, req *connect.Request[v1.Star
 		return nil, err
 	}
 
-	p, err := s.previews.Register(ctx, req.Msg.Project, req.Msg.Ref)
+	p, err := s.previews.Register(ctx, req.Msg.Project, req.Msg.Ref, previewOrigin{PR: req.Msg.Pr})
 	if err != nil {
 		return nil, previewConnectError(err)
 	}

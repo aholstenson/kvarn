@@ -100,11 +100,21 @@ type Preview struct {
 	// default: a preview runs the branch's own code with the project's
 	// resolved secrets, and a fork's branch is written by someone who does not
 	// have push access to this repository.
-	//
-	// Nothing reaches it yet. A preview is started explicitly for a ref in the
-	// project's own repository, so there is no fork ref for it to govern; it
-	// becomes live when previews can be created from a pull request's head.
 	AllowForks *bool
+	// AutoStart are the hostname patterns that start a preview by being asked
+	// for. Each must use `{pr}` exactly once and end in `.{domain}`, so a
+	// request for `pr-12.preview.example.com` names the pull request to preview
+	// without anything having registered it first.
+	//
+	// It is configured here rather than in kvarn.yml because the mapping has to
+	// be known before the repository is cloned — there is no checkout to read
+	// when the first request for an unclaimed hostname arrives. The repository
+	// still decides what the preview looks like, and its sites must resolve to
+	// the same names for the hostname to route once the boot finishes.
+	//
+	// Empty means previews for this project start only when something asks for
+	// them by name, through `kvarn preview up` or the API.
+	AutoStart []string
 }
 
 // Store provides CRUD operations for projects. Get and Delete return
