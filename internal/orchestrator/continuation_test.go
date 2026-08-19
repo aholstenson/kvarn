@@ -199,6 +199,7 @@ var _ = Describe("StartJob continuing a pull request", func() {
 			SessionMgr:       sessionMgr,
 			Agent:            testAgent,
 			SandboxFactory:   factory,
+			PreviewPolicy:    orchestrator.PreviewPolicy{Domain: "preview.example.com"},
 		})
 
 		mux := http.NewServeMux()
@@ -268,6 +269,24 @@ var _ = Describe("StartJob continuing a pull request", func() {
 		Expect(mockForgeInst.lastCommentOpts.Body).To(ContainSubstring("## Feedback addressed"))
 		Expect(mockForgeInst.lastCommentOpts.Body).To(ContainSubstring("rename the helper and add a test"))
 		Expect(mockForgeInst.lastCommentOpts.Body).To(ContainSubstring("Renamed the helper"))
+	})
+
+	It("links the branch's preview from the follow-up comment", func() {
+		mockScm.files = map[string][]byte{
+			"kvarn.yml": []byte("preview:\n  sites:\n    web:\n      port: 3000\n      host: \"pr-{pr}.{domain}\"\n"),
+		}
+		projStore.projects["test-project"].PullRequest = forgeconfig.PRContent{
+			CommentHeaders: forgeconfig.CommentHeaders{
+				FollowUpCommit: "{{ with .PreviewURL }}**Preview:** {{ . }}{{ end }}",
+			},
+		}
+
+		resp, err := submit("test-project", "42", "rename the helper")
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+
+		Expect(mockForgeInst.lastCommentOpts.Body).To(HavePrefix("**Preview:** https://pr-42.preview.example.com"),
+			"the pull request is open, so the site addressed by {pr} resolves without anything having started it")
 	})
 
 	It("records the pull request on the session and keeps the raw feedback as its prompt", func() {

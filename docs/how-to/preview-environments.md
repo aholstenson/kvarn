@@ -324,6 +324,24 @@ all — once its pull request closes or merges. Until then it stops and restarts
 on the ordinary idle and lifetime rules. A preview started with `kvarn preview
 up` is never removed on its own, whoever else asks for it.
 
+### Put the link in the pull request
+
+A reviewer still has to learn the hostname. The comment kvarn posts on every
+pull request it opens or commits onto can carry it, through the `.PreviewURL`
+field of a [comment header](../reference/forges-toml.md#preview-addresses):
+
+```toml
+[defaults.pull_request.comment_headers]
+new_pull_request = "{{ with .PreviewURL }}**Preview:** {{ . }}{{ end }}"
+follow_up_commit = "{{ with .PreviewURL }}**Preview:** {{ . }}{{ end }}"
+```
+
+The address is formed from the branch's own site patterns, so the comment
+carries it whether or not anything has started — with an `auto_start` route,
+following the link is what brings the preview up. Keep the `with` guard: a run
+on a branch with no `preview:` block has no address to give, and the guard is
+what leaves the comment saying nothing rather than saying "Preview:".
+
 ## Live with it
 
 ```sh

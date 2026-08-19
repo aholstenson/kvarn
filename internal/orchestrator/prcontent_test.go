@@ -125,6 +125,41 @@ var _ = Describe("renderPRTemplate", func() {
 		})
 	})
 
+	Describe("preview addresses", func() {
+		linked := data.withPreviewLinks(previewLinks{
+			Primary: "https://pr-42.preview.example.com",
+			Sites: map[string]string{
+				"web": "https://pr-42.preview.example.com",
+				"api": "https://api-pr-42.preview.example.com",
+			},
+		})
+
+		It("links the preview a run produced", func() {
+			Expect(renderPRTemplate("Preview: {{ .PreviewURL }}", linked, missingKeyZero, quietLogger())).To(
+				Equal("Preview: https://pr-42.preview.example.com"))
+		})
+
+		It("names one site in particular", func() {
+			Expect(renderPRTemplate(`API: {{ index .PreviewURLs "api" }}`, linked, missingKeyZero, quietLogger())).To(
+				Equal("API: https://api-pr-42.preview.example.com"))
+		})
+
+		It("lets a guard skip a run that has no preview", func() {
+			tmpl := "{{ with .PreviewURL }}Preview: {{ . }}{{ end }}"
+			Expect(renderPRTemplate(tmpl, linked, missingKeyZero, quietLogger())).To(
+				Equal("Preview: https://pr-42.preview.example.com"))
+			Expect(renderPRTemplate(tmpl, data, missingKeyZero, quietLogger())).To(BeEmpty(),
+				"a run with no address to link has to render as absent, not as a failure")
+		})
+
+		It("lets a guard skip a site this repository does not declare", func() {
+			tmpl := `{{ with index .PreviewURLs "docs" }}Docs: {{ . }}{{ end }}`
+			Expect(renderPRTemplate(tmpl, linked, missingKeyZero, quietLogger())).To(BeEmpty())
+			Expect(renderPRTemplate(tmpl, data, missingKeyZero, quietLogger())).To(BeEmpty(),
+				"a nil site map reads as a site nobody declared")
+		})
+	})
+
 	Describe("renderPRTemplates", func() {
 		It("keeps the ones that render and drops the ones that do not", func() {
 			out := renderPRTemplates([]string{

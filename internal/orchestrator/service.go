@@ -1746,6 +1746,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		sandbox:     sess,
 		forgeImpl:   forgeImpl,
 		proj:        proj,
+		cfg:         cfg,
 		agentResult: agentResult,
 		baseBranch:  branch,
 		cloneURL:    cloneURL,
@@ -1856,6 +1857,7 @@ func (s *Service) submitChanges(
 	forgeImpl forge.Forge,
 	agentResult *agent.Result,
 	proj *project.Project,
+	cfg *projconfig.Config,
 	behavior forgeconfig.Behavior,
 	modeName string,
 	branch string,
@@ -1925,6 +1927,10 @@ func (s *Service) submitChanges(
 		Mode:        modeName,
 		Metadata:    metadata,
 	}
+	// The pull request does not exist yet, so only the sites this branch is
+	// addressed by on its own can be named here. A site addressed by `{pr}`
+	// resolves for the comment below, once there is a pull request to name.
+	tmplData = tmplData.withPreviewLinks(s.previewLinksFor(proj, cfg, prBranch, ""))
 	// Trailers render strictly because they land in the commit message, where a
 	// key the submission did not carry would leave a trailer with nothing after
 	// the colon in history nobody will rewrite.
@@ -1971,8 +1977,13 @@ func (s *Service) submitChanges(
 	// Post task + work log as a PR comment so it stays out of any
 	// squash-merge commit message. Configuration that turns off every section
 	// leaves nothing to say, and an empty comment is worse than none.
+	//
+	// The pull request exists now, so the comment can carry a preview address
+	// formed from it — including one nothing has started, which an `auto_start`
+	// route boots when a reviewer follows the link.
+	commentData := tmplData.withPreviewLinks(s.previewLinksFor(proj, cfg, prBranch, pr.Ref))
 	commentBody := formatWorklogComment(prompt, worklog,
-		sectionsFrom(behavior.PullRequest, forgeconfig.CommentNewPullRequest, tmplData, log), costReport)
+		sectionsFrom(behavior.PullRequest, forgeconfig.CommentNewPullRequest, commentData, log), costReport)
 	if commentBody == "" {
 		log.Info("skipping task/work-log comment: every section is turned off")
 		return nil
@@ -2000,6 +2011,7 @@ func (s *Service) submitFollowup(
 	forgeImpl forge.Forge,
 	agentResult *agent.Result,
 	proj *project.Project,
+	cfg *projconfig.Config,
 	behavior forgeconfig.Behavior,
 	modeName string,
 	pr *prTarget,
@@ -2060,6 +2072,8 @@ func (s *Service) submitFollowup(
 		Mode:        modeName,
 		Metadata:    metadata,
 	}
+	// The pull request is already open, so every site it addresses resolves.
+	tmplData = tmplData.withPreviewLinks(s.previewLinksFor(proj, cfg, pr.headBranch, pr.ref))
 	commitMsg = coding.ApplyTrailers(commitMsg,
 		renderPRTemplates(behavior.PullRequest.CommitTrailers, tmplData, missingKeyError, log))
 

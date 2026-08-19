@@ -174,9 +174,10 @@ write is the markdown that appears.
 ### Templates
 
 `comment_headers`, `body_footer` and `commit_trailers` are Go templates. The
-available fields are `.Title`, `.Description`, `.SessionID`, `.Branch`, `.Mode`
-and `.Metadata`. A template that does not parse, or names a field that does not
-exist, is left out with a warning rather than published with the braces intact.
+available fields are `.Title`, `.Description`, `.SessionID`, `.Branch`, `.Mode`,
+`.Metadata`, `.PreviewURL` and `.PreviewURLs`. A template that does not parse,
+or names a field that does not exist, is left out with a warning rather than
+published with the braces intact.
 
 The footer is pull-request only and the trailers are commit only. The body
 itself stays identical between the two, so a squash merge lands what the pull
@@ -210,6 +211,40 @@ Two things about metadata keys are worth knowing:
 Metadata is not a place for secrets. It is already readable by anyone who can
 read the session, and a header publishes it to everyone who can read the pull
 request — which on a public repository is everyone.
+
+#### Preview addresses
+
+`.PreviewURL` is the address of the preview for the branch the run worked on,
+and `.PreviewURLs` is every site the repository declares, keyed by site name.
+`.PreviewURL` is the site named `web` when there is one, else the first by name
+— the same site kvarn reports as a running preview's address.
+
+```toml
+[defaults.pull_request.comment_headers]
+follow_up_commit = "{{ with .PreviewURL }}**Preview:** {{ . }}{{ end }}"
+```
+
+The address is worked out from the branch's
+[`preview.sites`](kvarn-yml.md#previewsites) patterns and the project's preview
+domain, so a comment can carry the link before anything has been started. Where
+the project configures [`auto_start`](projects-toml.md#projectsnamepreview),
+following that link is what boots the preview.
+
+Guard every use with `{{ with … }}` or `{{ if … }}`: the fields are empty
+whenever no address can be formed, which includes previews being off for the
+project, the branch declaring no `preview:` block, and a site addressed by
+`{pr}` on a run that has no pull request. The comment on a **new** pull request
+can name a `{pr}` site, because it is written after the pull request is opened.
+The body footer and the commit trailers are not: they are written before, so
+only a site addressed by `{ref}` resolves for them.
+
+Site names go through `index`, since `.PreviewURLs.api` only works for names the
+field syntax can spell:
+
+```toml
+[defaults.pull_request.comment_headers]
+pr_comment = """{{ with index .PreviewURLs "api" }}**API preview:** {{ . }}{{ end }}"""
+```
 
 ## Resolution order
 

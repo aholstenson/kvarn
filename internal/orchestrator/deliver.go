@@ -12,6 +12,7 @@ import (
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 	"github.com/aholstenson/kvarn/internal/config/project"
 	"github.com/aholstenson/kvarn/internal/forge"
+	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 	"github.com/aholstenson/kvarn/internal/scm"
 	"github.com/aholstenson/kvarn/internal/session"
@@ -19,11 +20,14 @@ import (
 
 // deliveryRequest is everything the delivery step needs from a finished run.
 type deliveryRequest struct {
-	mode        *coding.Mode
-	sessionID   string
-	sandbox     Sandbox
-	forgeImpl   forge.Forge
-	proj        *project.Project
+	mode      *coding.Mode
+	sessionID string
+	sandbox   Sandbox
+	forgeImpl forge.Forge
+	proj      *project.Project
+	// cfg is the branch's kvarn.yml, read here for the preview sites a comment
+	// can link to. Nil when the checkout declares no configuration.
+	cfg         *projconfig.Config
 	agentResult *agent.Result
 	// baseBranch is the branch a new pull request targets.
 	baseBranch string
@@ -132,7 +136,7 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 		switch sink {
 		case coding.SinkNewPullRequest:
 			if err := s.submitChanges(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
-				req.proj, req.behavior, req.mode.Name, req.baseBranch, req.cloneURL, req.cloneDir, req.creds,
+				req.proj, req.cfg, req.behavior, req.mode.Name, req.baseBranch, req.cloneURL, req.cloneDir, req.creds,
 				req.userPrompt, req.metadata, req.worklog, req.cost, req.log); err != nil {
 				return err
 			}
@@ -143,7 +147,7 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 				return fmt.Errorf("mode %q delivers a follow-up commit but the run has no pull request to commit onto", req.mode.Name)
 			}
 			if err := s.submitFollowup(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
-				req.proj, req.behavior, req.mode.Name, req.pr, req.cloneURL, req.cloneDir, req.creds,
+				req.proj, req.cfg, req.behavior, req.mode.Name, req.pr, req.cloneURL, req.cloneDir, req.creds,
 				req.userPrompt, req.metadata, req.worklog, req.cost, req.log); err != nil {
 				return err
 			}
@@ -189,19 +193,21 @@ func (s *Service) postResultComment(ctx context.Context, req deliveryRequest) er
 		title = req.agentResult.Title
 	}
 	// This sink commits nothing, so the branch a header can name is the one the
-	// run read: the pull request's head, or the base it started from.
+	// run read: the pull request's head, or the base it started from. The
+	// preview it can link to is that same branch's.
 	branch := req.baseBranch
 	if req.pr != nil {
 		branch = req.pr.headBranch
 	}
-	sections := sectionsFrom(req.behavior.PullRequest, forgeconfig.CommentPRComment, prTemplateData{
+	data := prTemplateData{
 		Title:       title,
 		Description: result,
 		SessionID:   req.sessionID,
 		Branch:      branch,
 		Mode:        req.mode.Name,
 		Metadata:    req.metadata,
-	}, req.log)
+	}.withPreviewLinks(s.previewLinksFor(req.proj, req.cfg, branch, prRef))
+	sections := sectionsFrom(req.behavior.PullRequest, forgeconfig.CommentPRComment, data, req.log)
 	body := formatResultComment(req.userPrompt, result, req.valResult,
 		req.worklog, sections, req.cost)
 	if body == "" {

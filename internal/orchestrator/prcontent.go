@@ -110,6 +110,11 @@ func sectionsFrom(
 // the session, so an operator naming a key here publishes an identifier their
 // own system chose to attach — which is the point: it is what connects a pull
 // request back to the ticket that asked for it.
+//
+// The preview addresses are bounded the same way. A hostname is expanded from
+// the repository's own site patterns, but every expansion is checked to sit
+// inside the domain the operator configured, so a branch cannot use a comment
+// header to publish a link to somewhere else.
 type prTemplateData struct {
 	Title       string
 	Description string
@@ -117,6 +122,21 @@ type prTemplateData struct {
 	Branch      string
 	Mode        string
 	Metadata    map[string]string
+	// PreviewURL is the address of this branch's preview, and PreviewURLs is
+	// every declared site by name. Both are empty whenever no address can be
+	// formed — previews off, no `preview:` block, or a `{pr}` pattern on a run
+	// that has no pull request — which is what a template guards on.
+	PreviewURL  string
+	PreviewURLs map[string]string
+}
+
+// withPreviewLinks returns the data with the preview addresses filled in. A
+// comment is built after the run has opened its pull request, so the links it
+// carries are resolved later than the rest of the data.
+func (d prTemplateData) withPreviewLinks(links previewLinks) prTemplateData {
+	d.PreviewURL = links.Primary
+	d.PreviewURLs = links.Sites
+	return d
 }
 
 // Go templates only reach a map key through the `.Metadata.key` field syntax
