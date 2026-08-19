@@ -2,11 +2,13 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +30,8 @@ import (
 	"github.com/aholstenson/kvarn/internal/localsock"
 	"github.com/aholstenson/kvarn/internal/observability/metrics"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
+	"github.com/aholstenson/kvarn/internal/preview"
+	previewsqlite "github.com/aholstenson/kvarn/internal/preview/sqlite"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
 	"github.com/aholstenson/kvarn/internal/sandbox/transfer"
@@ -50,6 +54,7 @@ type Cmd struct {
 	AgentsFile       string `help:"Path to agents config TOML file." default:""`
 	APIKeysFile      string `help:"Path to API keys TOML file." default:""`
 	SessionsDB       string `help:"Path to the persistent sessions SQLite database. Defaults to ~/.config/kvarn/sessions.db." default:""`
+	PreviewsDB       string `help:"Path to the persistent previews SQLite database. Defaults to ~/.config/kvarn/previews.db." default:""`
 	NoAuth           bool   `help:"Disable API-key auth (local dev only)." env:"KVARN_NO_AUTH"`
 	LocalSocket      string `help:"Path to the host-local control socket. Empty = ~/.config/kvarn/orchestrator.sock." env:"KVARN_LOCAL_SOCKET" default:""`
 	NoLocalSocket    bool   `help:"Do not serve the host-local control socket." env:"KVARN_NO_LOCAL_SOCKET"`
@@ -397,6 +402,28 @@ func (c *Cmd) Run() error {
 	}
 	startSessionRetention(ctx, sessionStore, retention)
 
+	// Previews are opt-in: without a [preview] section the store is never
+	// opened, no ingress listener is bound, and every preview RPC reports the
+	// feature as unimplemented.
+	previewPolicy, err := resolvePreviewPolicy(orchFile.Preview)
+	if err != nil {
+		return fmt.Errorf("preview: %w", err)
+	}
+	var previewStore preview.Store
+	if previewPolicy.Enabled() {
+		dbPath := c.PreviewsDB
+		if dbPath == "" {
+			dbPath = previewsqlite.DefaultPath()
+		}
+		store, err := previewsqlite.New(dbPath)
+		if err != nil {
+			return fmt.Errorf("open previews database: %w", err)
+		}
+		defer store.Close()
+		previewStore = store
+		slog.Info("previews database", "path", dbPath, "domain", previewPolicy.Domain)
+	}
+
 	// Disk overcommit is only safe while something watches the real
 	// filesystem, so the guard runs for the orchestrator's whole life.
 	go sched.WatchHostDisk(ctx, 0)
@@ -441,7 +468,11 @@ func (c *Cmd) Run() error {
 	}
 	defer instruments.Close()
 
-	return run(ctx, serveOpts{Addr: c.Addr, LocalSocket: c.localSocketPath()}, ServiceOpts{
+	return run(ctx, serveOpts{
+		Addr:           c.Addr,
+		LocalSocket:    c.localSocketPath(),
+		PreviewIngress: orchFile.Preview.Listen,
+	}, ServiceOpts{
 		Provider:           p,
 		CreateOpts:         vm.CreateOpts{Image: image, MaxLifetime: maxLifetime, Network: imageCacheNet},
 		ProjectStore:       projtoml.New(projectsPath),
@@ -470,7 +501,85 @@ func (c *Cmd) Run() error {
 		RepoPolicy:          reposCfg.Policy,
 		Meter:               meter,
 		Instruments:         instruments,
+		PreviewStore:        previewStore,
+		PreviewPolicy:       previewPolicy,
 	})
+}
+
+// Preview defaults applied when [preview] leaves a field unset. They are sized
+// for a preview somebody is looking at rather than for a job: half an hour of
+// silence is a person who has closed the tab, and eight hours is a working day
+// after which the branch is worth re-deriving from scratch.
+const (
+	defaultPreviewIdleTimeout   = 30 * time.Minute
+	defaultPreviewMaxLifetime   = 8 * time.Hour
+	defaultPreviewMaxConcurrent = 3
+)
+
+// resolvePreviewPolicy turns the [preview] table into the resolved policy. An
+// absent section yields a zero policy, which disables previews.
+func resolvePreviewPolicy(cfg orchcfg.Preview) (PreviewPolicy, error) {
+	if cfg.Domain == "" {
+		if cfg.Listen != "" {
+			return PreviewPolicy{}, errors.New("listen is set but domain is not; a preview with no name is unaddressable")
+		}
+		return PreviewPolicy{}, nil
+	}
+	if cfg.Listen == "" {
+		return PreviewPolicy{}, errors.New("domain is set but listen is not; a preview with no listener is unreachable")
+	}
+
+	policy := PreviewPolicy{
+		Domain:        strings.Trim(cfg.Domain, "."),
+		IdleTimeout:   defaultPreviewIdleTimeout,
+		MaxLifetime:   defaultPreviewMaxLifetime,
+		MaxConcurrent: defaultPreviewMaxConcurrent,
+	}
+
+	var err error
+	if policy.IdleTimeout, err = resolvePreviewDuration(cfg.IdleTimeout, "idle_timeout", defaultPreviewIdleTimeout); err != nil {
+		return PreviewPolicy{}, err
+	}
+	if policy.MaxLifetime, err = resolvePreviewDuration(cfg.MaxLifetime, "max_lifetime", defaultPreviewMaxLifetime); err != nil {
+		return PreviewPolicy{}, err
+	}
+	if cfg.MaxConcurrent != nil {
+		if *cfg.MaxConcurrent < 0 {
+			return PreviewPolicy{}, errors.New("max_concurrent must not be negative")
+		}
+		policy.MaxConcurrent = *cfg.MaxConcurrent
+	}
+	if cfg.MaxMemory != "" {
+		size, err := projconfig.ParseSize(cfg.MaxMemory)
+		if err != nil {
+			return PreviewPolicy{}, fmt.Errorf("max_memory: %w", err)
+		}
+		policy.MaxMemoryBytes = uint64(size)
+	}
+	if cfg.MaxDisk != "" {
+		size, err := projconfig.ParseSize(cfg.MaxDisk)
+		if err != nil {
+			return PreviewPolicy{}, fmt.Errorf("max_disk: %w", err)
+		}
+		policy.MaxDiskBytes = size
+	}
+	return policy, nil
+}
+
+// resolvePreviewDuration parses one of the preview timeouts. Empty takes the
+// default; an explicit "0" disables that cap.
+func resolvePreviewDuration(value, field string, fallback time.Duration) (time.Duration, error) {
+	if value == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", field, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%s: must be non-negative", field)
+	}
+	return d, nil
 }
 
 // defaultCachePerProjectBytes / defaultCacheGlobalBytes are the built-in tool

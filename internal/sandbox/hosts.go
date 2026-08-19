@@ -22,6 +22,43 @@ const (
 	hostsTimeoutSeconds uint32 = 30
 )
 
+// hostAliases merges the project's declared aliases with the ones the caller
+// supplied. The caller's win on a name they both map: kvarn.yml describes the
+// repository's usual development names, while an alias passed in names
+// something this particular run has just created.
+func (o Opts) hostAliases() map[string]string {
+	var merged map[string]string
+	add := func(aliases map[string]string) {
+		if len(aliases) == 0 {
+			return
+		}
+		if merged == nil {
+			merged = make(map[string]string, len(aliases))
+		}
+		for name, addr := range aliases {
+			merged[name] = addr
+		}
+	}
+	if o.Config != nil {
+		add(o.Config.Network.HostAliases)
+	}
+	add(o.HostAliases)
+	return merged
+}
+
+// exactHostAliases keeps the entries naming one literal host, which are the
+// only ones expressible as /etc/hosts lines. Wildcards are answered by the VM's
+// DNS forwarder instead; see project.Network.ExactHostAliases.
+func exactHostAliases(aliases map[string]string) map[string]string {
+	exact := make(map[string]string, len(aliases))
+	for name, addr := range aliases {
+		if !strings.HasPrefix(name, "*.") {
+			exact[name] = addr
+		}
+	}
+	return exact
+}
+
 // hostEntry is one name→address mapping bound for the guest's name tables.
 type hostEntry struct {
 	Name    string
@@ -53,10 +90,10 @@ func renderHostsBlock(entries []hostEntry) []byte {
 	return []byte(b.String())
 }
 
-// ConfigureHostAliases adds the project's exact `network.host_aliases` entries
-// to the guest's /etc/hosts. Wildcard entries have no representation in that
-// file and are answered by the VM's DNS forwarder; see
-// project.Network.ExactHostAliases.
+// ConfigureHostAliases adds the run's exact host aliases — the project's
+// `network.host_aliases` plus whatever the caller supplied — to the guest's
+// /etc/hosts. Wildcard entries have no representation in that file and are
+// answered by the VM's DNS forwarder instead.
 //
 // The entries are appended rather than written over the file: the boot-time
 // content maps localhost and the VM's own hostname, and a program that cannot

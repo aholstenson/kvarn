@@ -41,6 +41,45 @@ type projectEntry struct {
 	MaxDisk              string              `toml:"max_disk,omitempty"`
 	Priority             *int                `toml:"priority,omitempty"`
 	PullRequest          *prEntry            `toml:"pull_request,omitempty"`
+	Preview              *previewEntry       `toml:"preview,omitempty"`
+}
+
+// previewEntry mirrors the `[projects.<name>.preview]` block. Like prEntry it
+// is a pointer so a config without the block round-trips through Put without
+// gaining an empty table.
+type previewEntry struct {
+	Enabled    *bool    `toml:"enabled,omitempty"`
+	Domain     string   `toml:"domain,omitempty"`
+	AllowForks *bool    `toml:"allow_forks,omitempty"`
+	AutoStart  []string `toml:"auto_start,omitempty"`
+}
+
+// toPreview converts a parsed block to the domain type. A nil receiver is the
+// absent block and yields a zero Preview, which inherits everything.
+func (e *previewEntry) toPreview() project.Preview {
+	if e == nil {
+		return project.Preview{}
+	}
+	return project.Preview{
+		Enabled:    e.Enabled,
+		Domain:     e.Domain,
+		AllowForks: e.AllowForks,
+		AutoStart:  e.AutoStart,
+	}
+}
+
+// previewEntryFrom converts the domain type back to a parsed block, returning
+// nil when nothing is set.
+func previewEntryFrom(p project.Preview) *previewEntry {
+	if p.Enabled == nil && p.Domain == "" && p.AllowForks == nil && len(p.AutoStart) == 0 {
+		return nil
+	}
+	return &previewEntry{
+		Enabled:    p.Enabled,
+		Domain:     p.Domain,
+		AllowForks: p.AllowForks,
+		AutoStart:  p.AutoStart,
+	}
 }
 
 // prEntry mirrors the `[projects.<name>.pull_request]` block. It is a pointer
@@ -243,6 +282,7 @@ func entryToProject(name string, entry *projectEntry) (*project.Project, error) 
 		MaxDisk:              entry.MaxDisk,
 		Priority:             entry.Priority,
 		PullRequest:          entry.PullRequest.toContent(),
+		Preview:              entry.Preview.toPreview(),
 	}, nil
 }
 
@@ -279,6 +319,7 @@ func projectToEntry(p *project.Project) (string, *projectEntry) {
 		MaxDisk:              p.MaxDisk,
 		Priority:             p.Priority,
 		PullRequest:          prEntryFrom(p.PullRequest),
+		Preview:              previewEntryFrom(p.Preview),
 	}
 }
 

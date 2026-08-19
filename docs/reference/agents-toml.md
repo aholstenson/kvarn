@@ -52,7 +52,7 @@ Each key you set replaces the built-in value for that class; keys you leave out
 keep theirs. A `[models.<alias>]` block naming something other than the three
 classes above is an error, so a typo is reported rather than ignored.
 
-`--model` on `kvarn run` and `kvarn orchestrator` selects which model the
+`--model` on `kvarn local job` and `kvarn orchestrator` selects which model the
 `coding-agent` class resolves to for that invocation.
 
 ## Per-agent overrides

@@ -19,6 +19,7 @@ Goal-oriented recipes for an operator running the orchestrator.
 - [Speed up job startup](how-to/speed-up-job-startup.md) — repository mirrors, tool caches, the OCI image cache.
 - [Take a host out of service](how-to/take-a-host-out-of-service.md) — drain it, let running jobs finish, then stop it.
 - [Follow up on a pull request](how-to/follow-up-on-a-pull-request.md) — feedback runs, watching and cancelling.
+- [Preview environments](how-to/preview-environments.md) — look at what a branch does, at a stable URL.
 
 ## Reference
 
@@ -31,6 +32,6 @@ Descriptions of every configuration surface, organized by the file it lives in.
 - [`forges.toml`](reference/forges-toml.md) — forge instances and pull-request behavior.
 - [`credentials.toml`](reference/credentials-toml.md) — forge credentials.
 - [`agents.toml`](reference/agents-toml.md) — model aliases and user-level job defaults.
-- [`orchestrator.toml`](reference/orchestrator-toml.md) — scheduler pool, caches, mirrors, session retention.
+- [`orchestrator.toml`](reference/orchestrator-toml.md) — scheduler pool, caches, mirrors, session retention, preview environments.
 - [`apikeys.toml`](reference/apikeys-toml.md) — API keys and their scopes and caps.
 - [CLI](reference/cli.md) — every command and flag.

@@ -72,7 +72,7 @@ jobs:
 
   # macOS CLI binaries. CGO + Virtualization.framework can't be cross-compiled
   # from Linux, so this runs on macOS; ad-hoc codesigning grants the
-  # virtualization entitlement (without it `kvarn run`/`test` fail).
+  # virtualization entitlement (without it `kvarn local` fails).
   cli-darwin:
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v') }}
     name: cli-darwin (${{ matrix.arch }})

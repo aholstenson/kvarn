@@ -159,6 +159,11 @@ func (m *memStore) ListSessions(_ context.Context, filter SessionFilter) ([]*Ses
 		} else if !match {
 			continue
 		}
+		if excluded, err := metadataHasAnyKey(r.MetadataJSON, filter.WithoutMetadataKeys); err != nil {
+			return nil, err
+		} else if excluded {
+			continue
+		}
 		if hasCursor {
 			// Strictly after the cursor in DESC order: (created, id) < cursor.
 			if r.CreatedAt > cursorMicros || (r.CreatedAt == cursorMicros && r.ID >= filter.AfterID) {
@@ -196,6 +201,27 @@ func metadataMatches(metadataJSON string, want map[string]string) (bool, error) 
 		}
 	}
 	return true, nil
+}
+
+// metadataHasAnyKey reports whether a row's stored annotations carry any of the
+// given keys, whatever value they hold — the Go statement of the NOT EXISTS
+// predicate the SQLite store builds for WithoutMetadataKeys.
+func metadataHasAnyKey(metadataJSON string, keys []string) (bool, error) {
+	if len(keys) == 0 {
+		return false, nil
+	}
+	var have map[string]string
+	if metadataJSON != "" && metadataJSON != "{}" {
+		if err := json.Unmarshal([]byte(metadataJSON), &have); err != nil {
+			return false, fmt.Errorf("unmarshal metadata: %w", err)
+		}
+	}
+	for _, k := range keys {
+		if _, ok := have[k]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *memStore) AppendEvent(_ context.Context, sessionID, kind string, payload []byte) (PersistedEvent, error) {

@@ -21,8 +21,9 @@ overrides its path.
 | [`secrets.toml`](../how-to/manage-secrets.md) | `--secrets-file` | Per-project runtime secrets. Edit with `kvarn secrets`. |
 | [`agents.toml`](agents-toml.md) | `--agents-file` | Model aliases and user-level job defaults. |
 | [`apikeys.toml`](apikeys-toml.md) | `--api-keys-file` | API keys that authenticate orchestrator clients. Mode `0600`; edit with `kvarn key`. |
-| [`orchestrator.toml`](orchestrator-toml.md) | `--orchestrator-file` | Host-level settings: scheduler pool, caches, mirrors, session retention. |
+| [`orchestrator.toml`](orchestrator-toml.md) | `--orchestrator-file` | Host-level settings: scheduler pool, caches, mirrors, session retention, preview environments. |
 | `sessions.db` | `--sessions-db` | SQLite database of sessions and their event logs. Owned by the orchestrator. |
+| `previews.db` | `--previews-db` | SQLite database of preview environments and their hostnames. Only opened when `[preview]` is configured. |
 
 Every file is optional. A missing file behaves the same as an empty one.
 
@@ -51,6 +52,7 @@ half-written nor lose the other's edit.
 | `~/.cache/kvarn/image-cache/` | Pull-through OCI image cache. | `kvarn image-cache` |
 | `~/.cache/kvarn/` (tool layers) | Per-project tool caches restored into each VM. | `kvarn cache` |
 | `~/.config/kvarn/sessions.db` | Session history and event logs. | Pruned by `[sessions].retention` |
+| `~/.config/kvarn/previews.db` | Preview environments and the hostnames that route to them. | `kvarn preview` |
 
 ## Environment variables
 

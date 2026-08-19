@@ -397,6 +397,39 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(idsOf(got)).To(Equal([]string{"running"}))
 			})
+
+			It("excludes sessions carrying a disqualifying key, whatever its value", func() {
+				marked := makeSession("marked", "proj", session.StateRunning, base.Add(1*time.Minute))
+				marked.Metadata = map[string]string{"kvarn.preview": "pv-1"}
+				blank := makeSession("blank", "proj", session.StateRunning, base.Add(2*time.Minute))
+				blank.Metadata = map[string]string{"kvarn.preview": ""}
+				job := makeSession("job", "proj", session.StateRunning, base.Add(3*time.Minute))
+				job.Metadata = map[string]string{"source": "slack"}
+				bare := makeSession("bare", "proj", session.StateRunning, base.Add(4*time.Minute))
+				for _, s := range []*session.Session{marked, blank, job, bare} {
+					Expect(store.CreateSession(ctx, s)).To(Succeed())
+				}
+
+				got, err := store.ListSessions(ctx, session.SessionFilter{
+					WithoutMetadataKeys: []string{"kvarn.preview"},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(idsOf(got)).To(Equal([]string{"bare", "job"})) // newest first
+
+				// Keys are ORed: carrying any one of them disqualifies a session.
+				either, err := store.ListSessions(ctx, session.SessionFilter{
+					WithoutMetadataKeys: []string{"kvarn.preview", "source"},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(idsOf(either)).To(Equal([]string{"bare"}))
+
+				// An empty exclusion list constrains nothing.
+				all, err := store.ListSessions(ctx, session.SessionFilter{
+					WithoutMetadataKeys: []string{},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(all).To(HaveLen(4))
+			})
 		})
 
 		It("returns not-found for an unknown session", func() {

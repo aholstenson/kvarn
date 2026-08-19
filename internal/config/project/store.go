@@ -50,6 +50,9 @@ type Project struct {
 	Labels            []string
 	CommitAuthorName  string
 	CommitAuthorEmail string
+	// Preview is the `[projects.<name>.preview]` block: whether this project may
+	// have preview environments, and under which domain.
+	Preview Preview
 	// PullRequest is the `[projects.<name>.pull_request]` block: what the pull
 	// requests and comments this project's jobs produce should say. It is the
 	// most specific operator layer, above the forge and the global defaults.
@@ -80,6 +83,38 @@ type Project struct {
 	// high-priority project cannot starve a low-priority one. Per-job-mode
 	// overrides live in Jobs.
 	Priority *int
+}
+
+// Preview is the per-project preview policy. It sits between the operator's
+// [preview] section and the repository's kvarn.yml: the operator decides
+// whether the feature exists at all, this decides whether this project may use
+// it, and the repository decides what it looks like.
+type Preview struct {
+	// Enabled turns previews on for this project. Nil inherits the operator's
+	// stance, which is on whenever the [preview] section is configured.
+	Enabled *bool
+	// Domain overrides the operator's base domain for this project, for giving
+	// one repository its own zone. Empty inherits.
+	Domain string
+	// AllowForks permits previews for refs that came from a fork. It is off by
+	// default: a preview runs the branch's own code with the project's
+	// resolved secrets, and a fork's branch is written by someone who does not
+	// have push access to this repository.
+	AllowForks *bool
+	// AutoStart are the hostname patterns that start a preview by being asked
+	// for. Each must use `{pr}` exactly once and end in `.{domain}`, so a
+	// request for `pr-12.preview.example.com` names the pull request to preview
+	// without anything having registered it first.
+	//
+	// It is configured here rather than in kvarn.yml because the mapping has to
+	// be known before the repository is cloned — there is no checkout to read
+	// when the first request for an unclaimed hostname arrives. The repository
+	// still decides what the preview looks like, and its sites must resolve to
+	// the same names for the hostname to route once the boot finishes.
+	//
+	// Empty means previews for this project start only when something asks for
+	// them by name, through `kvarn preview up` or the API.
+	AutoStart []string
 }
 
 // Store provides CRUD operations for projects. Get and Delete return

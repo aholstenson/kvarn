@@ -174,3 +174,53 @@ what bounds that. Manage the store with `kvarn repo`.
 Pruning runs at startup and hourly; events cascade with their session. The
 database path itself is set with `--sessions-db` (default
 `~/.config/kvarn/sessions.db`), not in this file.
+
+## `[preview]`
+
+Preview environments: a long-lived VM pinned to a branch, reachable over HTTP
+at a stable hostname, booted on demand and stopped when it goes idle. See
+[Preview environments](../how-to/preview-environments.md) for setup, and read
+the security section there before exposing one.
+
+The section is opt-in. Without it no ingress listener is bound, the previews
+database is never opened, and the preview RPCs report the feature as
+unimplemented.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `domain` | hostname | unset | Base domain preview hostnames are formed under. Required to enable previews. |
+| `listen` | `host:port` | unset | Address the plain-HTTP ingress listener binds. Required to enable previews. |
+| `idle_timeout` | duration | `30m` | Stop a preview that has served no request for this long. `"0"` never reaps on idle. |
+| `max_lifetime` | duration | `8h` | Stop a preview this long after it booted, whatever its traffic. `"0"` disables the cap. |
+| `max_concurrent` | int | `3` | How many previews may run at once. `0` is unbounded. |
+| `max_memory` | size | unset | Ceiling on one preview VM's memory, below what its `kvarn.yml` asks for. |
+| `max_disk` | size | unset | Ceiling on one preview VM's disk. |
+
+`domain` and `listen` are required together: a preview with no name is
+unaddressable and one with no listener is unreachable, so setting one without
+the other is refused at startup rather than silently half-enabling the feature.
+
+**TLS terminates outside kvarn.** `listen` is plain HTTP with no
+authentication, so bind it to an address only your fronting layer can reach — a
+tailnet IP, or loopback behind Caddy — and let that layer handle certificates
+and access control. There is no ACME client in kvarn.
+
+Reaching `max_concurrent` does not refuse the next preview outright: the
+least-recently-requested idle preview is stopped to make room, and only a host
+where everything running is in active use answers with a holding page. The same
+happens when the scheduler's capacity pool has no room for another VM.
+
+Stopping a preview — by idle timeout, lifetime cap or eviction — leaves its
+record and hostnames in place, so the next request boots it again. The database
+path is set with `--previews-db` (default `~/.config/kvarn/previews.db`), not in
+this file.
+
+```toml
+[preview]
+domain = "preview.example.com"
+listen = "100.64.0.1:8080"
+idle_timeout = "30m"
+max_lifetime = "8h"
+max_concurrent = 3
+max_memory = "8G"
+```

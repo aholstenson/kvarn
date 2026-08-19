@@ -93,7 +93,7 @@ headers = { x-title = "kvarn" }
 | `headers` | Extra headers set on every request to that provider, applied after `api_key`. For a gateway token, a tenant ID, or provider-specific attribution. |
 
 A provider absent from this block falls back to the environment, so an
-env-only setup keeps working and a one-off `ANTHROPIC_API_KEY=... kvarn run`
+env-only setup keeps working and a one-off `ANTHROPIC_API_KEY=... kvarn local job`
 still overrides nothing else:
 
 | Provider | Variable |

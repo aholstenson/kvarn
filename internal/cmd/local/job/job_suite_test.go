@@ -1,4 +1,4 @@
-package run
+package job
 
 import (
 	"testing"
@@ -7,7 +7,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-func TestRun(t *testing.T) {
+func TestJob(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Run Suite")
+	RunSpecs(t, "Job Suite")
 }

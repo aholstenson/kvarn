@@ -28,6 +28,9 @@ type ListCmd struct {
 	Since   time.Duration     `help:"Only jobs created within this window (e.g. 24h)."`
 	Meta    map[string]string `help:"Only jobs annotated with this key=value (repeatable; all must match)." placeholder:"KEY=VALUE"`
 	Limit   int               `help:"Maximum jobs to return." default:"50"`
+
+	IncludePreviews bool `help:"Also list the boot sessions of preview environments."`
+
 	All     bool              `help:"Follow pagination until every matching job has been listed."`
 	JSON    bool              `help:"Emit JSON instead of a table." name:"json"`
 }
@@ -44,6 +47,8 @@ func (c *ListCmd) Run() error {
 		PrRef:      c.PRRef,
 		Metadata:   c.Meta,
 		Limit:      int32(c.Limit),
+
+		IncludePreviews: c.IncludePreviews,
 	}
 	if c.Since > 0 {
 		req.CreatedAfter = timestamppb.New(time.Now().Add(-c.Since))

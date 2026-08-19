@@ -42,6 +42,12 @@ type Handler struct {
 	sessions   map[string]*shellSession
 	sessionMu  sync.Mutex
 	nextSessID atomic.Int64
+
+	// processes are the long-lived processes started through StartProcess.
+	// They are separate from sessions because they outlive the call that
+	// started them and are stopped by name rather than by returning.
+	processes map[string]*managedProcess
+	processMu sync.Mutex
 }
 
 // NewHandler creates a new handler that can be used to execute runner commands directly.
@@ -67,8 +73,12 @@ func NewUnprivilegedHandler() *Handler {
 	}
 }
 
-// Close terminates all active sessions. Should be called on disconnect.
+// Close terminates all active sessions and long-lived processes. Should be
+// called on disconnect: a process started over a bridge that has gone away has
+// nobody left to stop it.
 func (h *Handler) Close() {
+	h.closeProcesses()
+
 	h.sessionMu.Lock()
 	defer h.sessionMu.Unlock()
 	for id, sess := range h.sessions {

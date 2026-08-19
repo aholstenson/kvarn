@@ -203,6 +203,12 @@ func (d *dispatcher) pass(ctx context.Context) {
 		if free <= 0 {
 			return
 		}
+		// A preview borrows a session to narrate its boot and moves it out of
+		// pending itself. Claiming one here would run a preview as if it were a
+		// job — same project, no prompt, nothing to deliver.
+		if isSessionMarkedPreview(sess) {
+			continue
+		}
 		if perProject > 0 && held[sess.ProjectName] >= perProject {
 			continue
 		}

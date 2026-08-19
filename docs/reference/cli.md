@@ -1,13 +1,15 @@
 # CLI
 
-Every command is a subcommand of the single `kvarn` binary. They fall into three
+Every command is a subcommand of the single `kvarn` binary. They fall into four
 groups:
 
 - **Server** — `orchestrator`, run on the host with virtualization.
-- **Client** — `jobs`, `queue`, which talk to a running orchestrator over HTTP
-  and can run from anywhere that can reach it.
-- **Local** — everything else, which reads and writes files on the host
-  (config stores, caches, mirrors, the VM image) with no orchestrator involved.
+- **Client** — `jobs`, `queue`, `preview`, which talk to a running orchestrator
+  over HTTP and can run from anywhere that can reach it.
+- **Local** — `local`, which boots a VM on this machine against the working
+  directory. Same VM, same `kvarn.yml`, no orchestrator and no forge.
+- **Host** — everything else, which reads and writes files on the host (config
+  stores, caches, mirrors, the VM image).
 
 Run `kvarn <command> --help` for the authoritative flag list of any command.
 
@@ -31,6 +33,7 @@ Runs the orchestrator service.
 | `--disk-image-path` | auto | VM disk image, when auto-discovery is not enough. |
 | `--projects-file`, `--forges-file`, `--credentials-file`, `--secrets-file`, `--agents-file`, `--api-keys-file`, `--orchestrator-file` | `~/.config/kvarn/…` | Override individual config file paths. |
 | `--sessions-db` | `~/.config/kvarn/sessions.db` | Session database path. |
+| `--previews-db` | `~/.config/kvarn/previews.db` | Preview database path. Only opened when `[preview]` is configured. |
 | `--otel-metrics-enabled`, `--otel-exporter-endpoint`, `--otel-service-name` | off, —, `kvarn-orchestrator` | OpenTelemetry metrics export. |
 
 Scheduler flags (`--sched-*`) mirror the `[scheduler]` table and are documented
@@ -123,7 +126,7 @@ down. Either way the session ends `cancelled`, not `failed`.
 | Subcommand | Purpose |
 | --- | --- |
 | `start <project> <prompt>` | Start a job, from a branch or from a pull request; flags are listed above. |
-| `list` | Jobs newest first. Filters: `--project`, `--state` (repeatable/comma-separated), `--active`, `--mode`, `--pr-ref`, `--since 24h`, `--limit`, `--all` to follow pagination. |
+| `list` | Jobs newest first. Filters: `--project`, `--state` (repeatable/comma-separated), `--active`, `--mode`, `--pr-ref`, `--since 24h`, `--limit`, `--all` to follow pagination. Preview environments boot through a session of their own; `--include-previews` lists those too. |
 | `show <session-id>` | One job in full, including its priority, attempt count and cost. |
 | `result <session-id>` | What the job produced in writing, on stdout. `--json` for the session id and state alongside it. |
 | `watch <session-id>` | Stream events until the job finishes. `--from` resumes after an event sequence. |
@@ -180,36 +183,90 @@ script. See [Take a host out of service](../how-to/take-a-host-out-of-service.md
 
 Both take `--addr`, `--api-key` and `--json`.
 
-## `kvarn run <prompt>`
+## `kvarn preview`
 
-Runs the coding agent against the local working directory, with no
-orchestrator, project, or forge. Write-capable modes require exactly one of
-`--diff` or `--apply`.
+Brings [preview environments](../how-to/preview-environments.md) up and down: a
+long-lived VM pinned to a branch, reachable at a stable hostname.
+
+| Subcommand | Purpose |
+| --- | --- |
+| `up <project> <ref>` | Register a preview of a branch and boot it. Prints each boot phase to stderr and the URLs to stdout. `--no-wait` returns as soon as the boot starts. `--pr <n>` gives the pull request that a repository whose site hostnames use `{pr}` needs. |
+| `down <project> <ref>` | Stop the VM, keeping the record and hostname so the next request boots it again. `--remove` forgets the preview entirely and releases its hostnames. |
+| `ls` | Preview environments with their state, URL, and how long since each booted and was last requested. `--project`. |
+| `logs <project> <ref>` | The retained tail of what the preview's services printed. |
+
+All take `--addr`, `--api-key` and `--json`.
+
+Output is split so `up` pipes: phases and summaries go to stderr, URLs to
+stdout, so `open "$(kvarn preview up proj my-branch)"` works.
+
+Previews are only available when the host has a
+[`[preview]` section](orchestrator-toml.md#preview); without one every
+subcommand reports the feature as unimplemented.
+
+## `kvarn local`
+
+Runs the same work the orchestrator does, in a VM on this machine, against the
+working directory. There is no clone, no project registration and no forge: the
+tree you are sitting in is the source. This is where a `kvarn.yml` gets written
+and debugged before anything is pushed.
+
+Every subcommand takes `--dir`, `--no-cache`, `-v`/`--verbose`, `--logs`,
+`-p`/`--project`, `--secrets-file` and `--disk-image-path`. Secrets are resolved
+from the same store the orchestrator uses; `--project` names which project's
+secrets to use, and is inferred from the checkout's `origin` remote when the
+project is registered.
+
+### `kvarn local test`
+
+Runs dependencies, setup, health checks and validation **without invoking the
+agent** — the fastest way to check a `kvarn.yml`.
+
+### `kvarn local job <prompt>`
+
+Runs the coding agent against the working directory. Write-capable modes require
+exactly one of `--diff` or `--apply`.
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--diff` | — | Write a unified diff of all changes to stdout. |
 | `--apply` | — | Copy changed files from the VM back onto the working directory. |
-| `--dir` | `.` | Project directory. |
-| `--mode` | `auto` | Built-in agent mode. Modes a repository defines are for orchestrator jobs; a local run has no forge to deliver to. |
-| `--model` | `coding-agent` | Model the `coding-agent` class resolves to for this run. |
+| `--mode` | `auto` | Built-in agent mode. Modes a repository defines are for orchestrator jobs; a local job has no forge to deliver to. |
+| `--model` | `coding-agent` | Model the `coding-agent` class resolves to for this job. |
 | `--max-validation-retries` | `0` | Additional agent passes after a required validation failure. |
-| `--no-cache` | off | Disable cache persistence for this run. |
 | `--cache-quota` | `5G` | Per-project tool-cache limit for the LRU sweep. |
-| `-p`, `--project` | git remote → project store | Project name used for secret lookup. |
-| `--secrets-file`, `--agents-file` | `~/.config/kvarn/…` | Config overrides. |
-| `--disk-image-path` | auto | VM disk image. |
-| `-v`, `--verbose` | off | Show output from passing steps too. |
-| `--logs` | off | Show log output. |
+| `--agents-file`, `--credentials-file` | `~/.config/kvarn/…` | Config overrides. |
 
-## `kvarn test`
+### `kvarn local preview`
 
-Boots a VM against the working tree and runs dependencies, setup, health checks
-and validation **without invoking the agent** — the fastest way to check a
-`kvarn.yml`.
+Brings the repository's [`preview:` block](kvarn-yml.md#preview) up against the
+working tree: setup runs, the serve steps start, the ready checks have to pass,
+and then each site is forwarded to a loopback port until Ctrl-C. Output from the
+servers streams to the terminal once the preview is up.
 
-Flags: `--dir`, `--no-cache`, `-v`/`--verbose`, `--logs`, `-p`/`--project`,
-`--secrets-file`, `--disk-image-path`, as for `kvarn run`.
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--port site=N` | the site's own port | Bind a site on a specific host port. Repeatable. Fails if the port is taken. |
+| `--base-domain` | — | Serve the sites on hostnames under this domain instead of loopback ports. |
+| `--ref` | `local` | Ref label the `{ref}` part of a site's host pattern expands to. |
+| `--pr` | `local` | What the `{pr}` part of a site's host pattern expands to, for a repository whose sites are named by pull request. |
+| `--ingress-port` | the shared guest port, else `8080` | Host port every site is served on with `--base-domain`. |
+
+A site is served on the port it listens on inside the VM whenever that port is
+free on the host, so its own absolute URLs keep working; if it is taken, the
+kernel picks another and the printed URL is the one to use. Sites that share a
+guest port get a host port each, since locally the port is what tells them apart.
+Each site's URL is in the environment as `KVARN_PREVIEW_URL_<SITE>` before the
+serve steps run, exactly as it is on the orchestrator — the difference is that
+it is a `localhost` URL rather than a hostname in the operator's domain.
+
+With `--base-domain sws.local` the sites get hostnames instead, expanded from the
+same `host` patterns by the same resolver the orchestrator uses, and one
+Host-routed listener serves all of them. `--port` does not apply then; use
+`--ingress-port` to choose the port that listener binds. The names have to
+resolve to `127.0.0.1` on this machine, and the command prints the `/etc/hosts`
+line to add for any that do not. See
+[preview environments](../how-to/preview-environments.md#serve-them-under-real-hostnames).
 
 ## `kvarn key`
 

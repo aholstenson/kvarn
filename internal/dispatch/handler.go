@@ -14,6 +14,12 @@ import (
 
 const streamChunkSize = 512 * 1024 // 512KB
 
+// connChunkSize bounds one message of a proxied connection. It is far smaller
+// than a file chunk on purpose: this carries a browser's traffic, where a
+// message is whatever has arrived so far, and a large buffer only costs memory
+// per open connection.
+const connChunkSize = 32 * 1024
+
 // Handler implements kvarnv1connect.BridgeServiceHandler by dispatching
 // Register and ReportResult calls through a Registry.
 type Handler struct {
@@ -138,6 +144,31 @@ func (h *Handler) ReportOutput(ctx context.Context, req *connect.Request[v1.Outp
 	return connect.NewResponse(&v1.ReportOutputResponse{}), nil
 }
 
+// ReportProcessEvent implements BridgeServiceHandler. The runner calls this
+// when a long-lived process exits.
+//
+// Unlike an output chunk, an exit cannot be dropped under load: it is the only
+// notice the orchestrator gets that a service is gone, and a preview whose
+// server died silently would keep answering requests with connection refused.
+// The channel is buffered and a blocked send is bounded by the request context.
+func (h *Handler) ReportProcessEvent(ctx context.Context, req *connect.Request[v1.ProcessEvent]) (*connect.Response[v1.ReportProcessEventResponse], error) {
+	pr, ok := h.registry.Lookup(req.Msg.Token)
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+	}
+	if err := checkPeerBinding(ctx, pr); err != nil {
+		return nil, err
+	}
+
+	select {
+	case pr.ProcessEventCh <- req.Msg:
+	case <-ctx.Done():
+		return nil, connect.NewError(connect.CodeDeadlineExceeded, ctx.Err())
+	}
+
+	return connect.NewResponse(&v1.ReportProcessEventResponse{}), nil
+}
+
 // DownloadFile implements BridgeServiceHandler. The runner calls this to
 // download a file from the orchestrator as a server-streamed sequence of chunks.
 func (h *Handler) DownloadFile(ctx context.Context, req *connect.Request[v1.DownloadFileRequest], stream *connect.ServerStream[v1.FileStreamChunk]) error {
@@ -190,6 +221,100 @@ func (h *Handler) DownloadFile(ctx context.Context, req *connect.Request[v1.Down
 	}
 
 	return nil
+}
+
+// ReadConnection implements BridgeServiceHandler. The runner calls this once
+// per proxied connection to receive what the client outside the VM sent. The
+// stream ends when the client half-closes, which the runner turns into a
+// half-close on the guest socket so a request/response protocol completes.
+func (h *Handler) ReadConnection(ctx context.Context, req *connect.Request[v1.ReadConnectionRequest], stream *connect.ServerStream[v1.ConnectionChunk]) error {
+	pr, ok := h.registry.Lookup(req.Msg.Token)
+	if !ok {
+		return connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+	}
+	if err := checkPeerBinding(ctx, pr); err != nil {
+		return err
+	}
+
+	c, ok := pr.LookupConn(req.Msg.ConnectionId)
+	if !ok {
+		return connect.NewError(connect.CodeNotFound, errors.New("unknown connection"))
+	}
+	defer c.Reader.Close()
+
+	// Reads are forwarded as they arrive rather than filled to a buffer: this
+	// carries interactive traffic, and holding a partial request back until
+	// more of it turns up would stall every protocol that waits for an answer.
+	buf := make([]byte, connChunkSize)
+	for {
+		n, readErr := c.Reader.Read(buf)
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			if err := stream.Send(&v1.ConnectionChunk{
+				Payload: &v1.ConnectionChunk_Data{Data: chunk},
+			}); err != nil {
+				return err
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			// The client going away is how a connection normally ends, not a
+			// failure worth reporting to the runner.
+			return nil
+		}
+	}
+}
+
+// WriteConnection implements BridgeServiceHandler. The runner calls this once
+// per proxied connection to send back what the guest server answered.
+func (h *Handler) WriteConnection(ctx context.Context, clientStream *connect.ClientStream[v1.ConnectionChunk]) (*connect.Response[v1.WriteConnectionResult], error) {
+	if !clientStream.Receive() {
+		if err := clientStream.Err(); err != nil {
+			return nil, err
+		}
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("empty stream"))
+	}
+
+	start := clientStream.Msg().GetStart()
+	if start == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("first chunk must be start metadata"))
+	}
+
+	pr, ok := h.registry.Lookup(start.Token)
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+	}
+	if err := checkPeerBinding(ctx, pr); err != nil {
+		return nil, err
+	}
+
+	c, ok := pr.LookupConn(start.ConnectionId)
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown connection"))
+	}
+	// Closing the writer is what tells the client the guest is done answering.
+	defer c.Writer.Close()
+
+	var total int64
+	for clientStream.Receive() {
+		data := clientStream.Msg().GetData()
+		if data == nil {
+			continue
+		}
+		n, err := c.Writer.Write(data)
+		if err != nil {
+			return nil, fmt.Errorf("write connection data: %w", err)
+		}
+		total += int64(n)
+	}
+	if err := clientStream.Err(); err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&v1.WriteConnectionResult{BytesWritten: total}), nil
 }
 
 // UploadFile implements BridgeServiceHandler. The runner calls this to

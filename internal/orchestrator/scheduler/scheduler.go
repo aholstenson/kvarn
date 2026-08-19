@@ -206,6 +206,67 @@ func (s *Scheduler) Acquire(ctx context.Context, req Request) (Lease, error) {
 	}
 }
 
+// ErrWouldBlock is returned by TryAcquire when the request cannot be admitted
+// immediately. It is not a failure of the request: the same request will be
+// admitted once the pool frees up.
+var ErrWouldBlock = errors.New("scheduler: request cannot be admitted immediately")
+
+// TryAcquire admits the request only if it fits right now, returning
+// ErrWouldBlock instead of waiting.
+//
+// Acquire queues everything by design, which is right for a job: nobody is
+// holding a connection open while it waits. A preview boot is the other case —
+// an HTTP request is waiting on the answer — and there queueing behind an hour
+// of jobs is worse than saying "at capacity" and letting the caller evict
+// something or show a holding page.
+//
+// The request still goes through the policy, so a tenant cap or a reservation
+// held for the head of the queue applies here exactly as it does to Acquire;
+// what changes is only what happens when the answer is no.
+func (s *Scheduler) TryAcquire(req Request) (Lease, error) {
+	if s.unbounded {
+		return &noopLease{granted: Capacity{
+			CPUMillis: req.CPUMillis,
+			MemBytes:  req.MemBytes,
+			DiskBytes: req.DiskBytes,
+		}}, nil
+	}
+
+	if p, ok := s.policy.(Precheck); ok {
+		if err := p.Precheck(req); err != nil {
+			return nil, err
+		}
+	}
+
+	s.mu.Lock()
+	if req.CPUMillis > s.total.CPUMillis ||
+		req.MemBytes > s.total.MemBytes ||
+		req.DiskBytes > s.total.DiskBytes {
+		s.mu.Unlock()
+		return nil, ErrTooLarge
+	}
+
+	// Join the queue for one admission pass and leave again if it does not
+	// carry us. Going through the queue rather than checking free capacity
+	// directly is what keeps the policy authoritative: it may well decline a
+	// request that fits, because something ahead of it has a claim.
+	w := &waiter{req: req, done: make(chan struct{}), enqueuedAt: s.now()}
+	s.queue = append(s.queue, w)
+	notes := s.tryAdmitLocked()
+	if w.granted {
+		s.mu.Unlock()
+		fireNotifications(notes)
+		return s.newLease(req), nil
+	}
+	// Our waiter is still the last entry: it was appended above, and any
+	// admission since then removed only entries ahead of it.
+	s.queue = s.queue[:len(s.queue)-1]
+	s.mu.Unlock()
+
+	fireNotifications(notes)
+	return nil, ErrWouldBlock
+}
+
 // Snapshot returns a point-in-time view of pool usage. Useful for /debug
 // surfaces and tests.
 func (s *Scheduler) Snapshot() (used, free Capacity, queueLen int) {

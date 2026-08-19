@@ -426,6 +426,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 			ID:         id,
 			Token:      opts.Token,
 			ProxyCAPEM: ca.CertPEM(),
+			DialGuest:  network.DialGuest,
 		}, &vm.RunnerConn{
 			Listener:        listener,
 			ExpectedPeerCID: cid,

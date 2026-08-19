@@ -1,4 +1,6 @@
-package run
+// Package job implements `kvarn local job`: running the coding agent against
+// the working directory in a local VM, without a forge or an orchestrator.
+package job
 
 import (
 	"context"
@@ -22,6 +24,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 	"github.com/aholstenson/kvarn/internal/cmd/imageutil"
+	"github.com/aholstenson/kvarn/internal/cmd/local/bootui"
 	credtoml "github.com/aholstenson/kvarn/internal/config/credential/tomlstore"
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 	modeltoml "github.com/aholstenson/kvarn/internal/config/model/tomlstore"
@@ -30,7 +33,6 @@ import (
 	"github.com/aholstenson/kvarn/internal/config/secret"
 	secrettoml "github.com/aholstenson/kvarn/internal/config/secret/tomlstore"
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
-	"github.com/aholstenson/kvarn/internal/linebuf"
 	"github.com/aholstenson/kvarn/internal/llmauth"
 	"github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
@@ -218,15 +220,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		createOpts.Network.SecretInjector = egressproxy.NewPlaceholderInjector(managedSecrets(managed), slog.Default())
 	}
 
-	var lastProvisionItem *taskui.Item
-	var dependenciesItem *taskui.Item
-	var toolProvisionItem *taskui.Item
-	markLastProvisionDone := func() {
-		if lastProvisionItem != nil {
-			renderer.SetStatus(lastProvisionItem, taskui.StatusPassed, "")
-			lastProvisionItem = nil
-		}
-	}
+	boot := bootui.New(renderer)
 
 	sess, err := sandbox.Start(ctx, sandbox.Opts{
 		Provider:      deps.Provider,
@@ -238,87 +232,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		CacheProvider: cacheProvider,
 		ProjectID:     projectID,
 		Secrets:       secretEnv,
-		OnEvent: func(e sandbox.Event) {
-			switch ev := e.(type) {
-			case sandbox.ProvisioningEvent:
-				markLastProvisionDone()
-				lastProvisionItem = renderer.AddItem("Provisioning VM")
-				renderer.SetStatus(lastProvisionItem, taskui.StatusRunning, "")
-			case sandbox.TransferringEvent:
-				markLastProvisionDone()
-				lastProvisionItem = renderer.AddItem("Transferring files")
-				renderer.SetStatus(lastProvisionItem, taskui.StatusRunning, "")
-			case sandbox.TransferProgressEvent:
-				if lastProvisionItem != nil {
-					lastProvisionItem.Suffix = fmt.Sprintf("%.1f MB / %.1f MB",
-						float64(ev.BytesSent)/(1024*1024),
-						float64(ev.TotalBytes)/(1024*1024))
-				}
-			case sandbox.DependenciesInstallingEvent:
-				markLastProvisionDone()
-				dependenciesItem = renderer.AddItem("Installing dependencies")
-				renderer.SetStatus(dependenciesItem, taskui.StatusRunning, "")
-				lastProvisionItem = dependenciesItem
-			case sandbox.DependencyOutputEvent:
-				if dependenciesItem != nil {
-					renderer.AppendStreams(dependenciesItem, ev.Stdout, ev.Stderr)
-				}
-			case sandbox.DependenciesInstalledEvent:
-				if dependenciesItem != nil {
-					renderer.SetStatus(dependenciesItem, taskui.StatusPassed, "")
-					if lastProvisionItem == dependenciesItem {
-						lastProvisionItem = nil
-					}
-					dependenciesItem = nil
-				}
-			case sandbox.ToolProvisioningEvent:
-				markLastProvisionDone()
-				toolProvisionItem = renderer.AddItem(fmt.Sprintf("Provisioning %s", ev.Tool))
-				renderer.SetStatus(toolProvisionItem, taskui.StatusRunning, "")
-				lastProvisionItem = toolProvisionItem
-			case sandbox.ToolProvisionOutputEvent:
-				if toolProvisionItem != nil {
-					renderer.AppendStreams(toolProvisionItem, ev.Stdout, ev.Stderr)
-				}
-			case sandbox.EgressDeniedEvent:
-				// Shown against whatever provisioning step is running, which is
-				// where a blocked download usually surfaces. Denials outside one
-				// still reach the failure message via the session's host list.
-				if lastProvisionItem != nil {
-					renderer.AppendOutput(lastProvisionItem, fmt.Sprintf("egress denied: %s", ev.Host))
-				}
-			case sandbox.ToolProvisionedEvent:
-				if toolProvisionItem != nil {
-					renderer.SetStatus(toolProvisionItem, taskui.StatusPassed, "")
-					if lastProvisionItem == toolProvisionItem {
-						lastProvisionItem = nil
-					}
-					toolProvisionItem = nil
-				}
-			case sandbox.CacheRestoringEvent:
-				markLastProvisionDone()
-				lastProvisionItem = renderer.AddItem("Restoring cache")
-				renderer.SetStatus(lastProvisionItem, taskui.StatusRunning, "")
-			case sandbox.CacheProgressEvent:
-				if lastProvisionItem != nil {
-					lastProvisionItem.Suffix = fmt.Sprintf("%s (%d/%d)", ev.Path, ev.Index, ev.Total)
-				}
-			case sandbox.CacheRestoredEvent:
-				markLastProvisionDone()
-			case sandbox.CacheSavingEvent:
-				markLastProvisionDone()
-				lastProvisionItem = renderer.AddItem("Saving cache")
-				renderer.SetStatus(lastProvisionItem, taskui.StatusRunning, "")
-			case sandbox.CacheSavedEvent:
-				markLastProvisionDone()
-			case sandbox.SessionCreatingEvent:
-				markLastProvisionDone()
-				lastProvisionItem = renderer.AddItem("Creating shell session")
-				renderer.SetStatus(lastProvisionItem, taskui.StatusRunning, "")
-			case sandbox.SessionCreatedEvent:
-				markLastProvisionDone()
-			}
-		},
+		OnEvent:       boot.OnEvent,
 	})
 	if err != nil {
 		renderer.Stop()
@@ -329,101 +243,12 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 	// shown as a TUI step.
 	defer sess.Close()
 
-	markLastProvisionDone()
+	boot.Done()
 
 	var summary summaryState
 
-	makeCallbacks := func(parent *taskui.Item, steps []project.Step) (
-		func(sandbox.StepResult, string),
-		func(string, string, string, string),
-	) {
-		childItems := make(map[string]*taskui.Item, len(steps))
-		stdoutBufs := make(map[string]*linebuf.Buffer, len(steps))
-		stderrBufs := make(map[string]*linebuf.Buffer, len(steps))
-		for _, step := range steps {
-			child := renderer.AddChild(parent, step.Name)
-			child.Status = taskui.StatusPending
-			childItems[step.Name] = child
-			stdoutBufs[step.Name] = &linebuf.Buffer{}
-			stderrBufs[step.Name] = &linebuf.Buffer{}
-		}
-
-		bufFor := func(m map[string]*linebuf.Buffer, name string) *linebuf.Buffer {
-			buf, ok := m[name]
-			if !ok {
-				buf = &linebuf.Buffer{}
-				m[name] = buf
-			}
-			return buf
-		}
-
-		outputCb := func(stepName string, _ string, stdout string, stderr string) {
-			item, ok := childItems[stepName]
-			if !ok {
-				item = renderer.AddChild(parent, stepName)
-				childItems[stepName] = item
-			}
-			if item.Status == taskui.StatusPending {
-				renderer.SetStatus(item, taskui.StatusRunning, "")
-			}
-			for _, line := range bufFor(stdoutBufs, stepName).Append(stdout) {
-				renderer.AppendOutput(item, line)
-			}
-			for _, line := range bufFor(stderrBufs, stepName).Append(stderr) {
-				renderer.AppendOutput(item, line)
-			}
-		}
-
-		stepDone := func(result sandbox.StepResult, _ string) {
-			item, ok := childItems[result.Name]
-			if !ok {
-				item = renderer.AddChild(parent, result.Name)
-				childItems[result.Name] = item
-			}
-
-			if tail := bufFor(stdoutBufs, result.Name).Flush(); tail != "" {
-				renderer.AppendOutput(item, tail)
-			}
-			if tail := bufFor(stderrBufs, result.Name).Flush(); tail != "" {
-				renderer.AppendOutput(item, tail)
-			}
-
-			if result.Skipped {
-				summary.skipped++
-				renderer.SetStatus(item, taskui.StatusSkipped, "(no matching files)")
-			} else if result.ExitCode != 0 || result.Err != nil {
-				summary.failed++
-				renderer.SetStatus(item, taskui.StatusFailed, "")
-
-				// StepResult carries the complete output from the final RPC
-				// response, so the post-run dump always replays the full body
-				// regardless of what the live tail was capped to.
-				summary.failedDetails = append(summary.failedDetails, stepOutput{
-					name:   result.Name,
-					stdout: result.Stdout,
-					stderr: result.Stderr,
-					err:    result.Err,
-				})
-			} else {
-				summary.passed++
-				renderer.SetStatus(item, taskui.StatusPassed, "")
-			}
-
-			delete(childItems, result.Name)
-			delete(stdoutBufs, result.Name)
-			delete(stderrBufs, result.Name)
-		}
-
-		return stepDone, outputCb
-	}
-
-	parentStatus := func(parent *taskui.Item) taskui.Status {
-		for _, child := range parent.Children {
-			if child.Status == taskui.StatusFailed {
-				return taskui.StatusFailed
-			}
-		}
-		return taskui.StatusPassed
+	makeCallbacks := func(parent *taskui.Item, steps []project.Step) (sandbox.OnStepDone, sandbox.OnOutput) {
+		return bootui.StepCallbacks(renderer, parent, steps, summary.record)
 	}
 
 	// Setup.
@@ -435,7 +260,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 			renderer.Stop()
 			return summary.finish(deps.Stdout, err, "", 0, 0)
 		}
-		renderer.SetStatus(setupItem, parentStatus(setupItem), "")
+		renderer.SetStatus(setupItem, bootui.ParentStatus(setupItem), "")
 	}
 
 	// Health checks.
@@ -449,7 +274,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 			renderer.Stop()
 			return summary.finish(deps.Stdout, err, "", 0, 0)
 		}
-		renderer.SetStatus(healthItem, parentStatus(healthItem), "")
+		renderer.SetStatus(healthItem, bootui.ParentStatus(healthItem), "")
 	}
 
 	// Agent. Each tool call becomes its own item that freezes with its result
@@ -479,7 +304,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		Cost:        tracker,
 		// A local run has no forge and no operator config, so the repository's
 		// own `pull_request:` block is the only layer there is. It still
-		// applies: `kvarn run` produces the same summary the orchestrator would
+		// applies: `kvarn local job` produces the same summary the orchestrator would
 		// commit, and seeing it obey the block is how the block gets tested.
 		PullRequest: (*forgeconfig.ForgeConfig)(nil).ResolveBehavior(
 			forgeconfig.Defaults{}, forgeconfig.Overrides{},
@@ -544,7 +369,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 			renderer.Stop()
 			return summary.finish(deps.Stdout, err, "", 0, 0)
 		}
-		renderer.SetStatus(reqItem, parentStatus(reqItem), "")
+		renderer.SetStatus(reqItem, bootui.ParentStatus(reqItem), "")
 		lastValResult = valResult
 
 		if valResult.RequiredPassed {
@@ -576,7 +401,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 			renderer.Stop()
 			return summary.finish(deps.Stdout, err, "", 0, 0)
 		}
-		renderer.SetStatus(advItem, parentStatus(advItem), "")
+		renderer.SetStatus(advItem, bootui.ParentStatus(advItem), "")
 	}
 
 	// Summarize once the agent + validation cycle is done so the cheap
@@ -858,7 +683,7 @@ func currentBranch(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// resolveProjectName mirrors `kvarn test`'s lookup: explicit flag, then a
+// resolveProjectName mirrors `kvarn local test`'s lookup: explicit flag, then a
 // best-effort match against the project store via git origin URL.
 func (c *Cmd) resolveProjectName(ctx context.Context) (string, error) {
 	if c.Project != "" {
@@ -936,7 +761,7 @@ func openSecretStore(path string) (secret.Store, error) {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf(
 				"no secret store at %s. Declare secrets with "+
-					"`kvarn secrets set <project> <NAME>` before running `kvarn run`.",
+					"`kvarn secrets set <project> <NAME>` before running `kvarn local job`.",
 				resolved)
 		}
 		return nil, fmt.Errorf("stat %s: %w", resolved, err)
@@ -983,6 +808,29 @@ type stepOutput struct {
 	stdout string
 	stderr string
 	err    error
+}
+
+// record accounts for one finished step. The task UI has already given the item
+// its status; what is collected here is what the closing summary and the exit
+// code are built from.
+func (s *summaryState) record(result sandbox.StepResult) {
+	switch {
+	case result.Skipped:
+		s.skipped++
+	case result.ExitCode != 0 || result.Err != nil:
+		s.failed++
+		// StepResult carries the complete output from the final RPC response,
+		// so the post-run dump always replays the full body regardless of what
+		// the live tail was capped to.
+		s.failedDetails = append(s.failedDetails, stepOutput{
+			name:   result.Name,
+			stdout: result.Stdout,
+			stderr: result.Stderr,
+			err:    result.Err,
+		})
+	default:
+		s.passed++
+	}
 }
 
 func (s *summaryState) finish(out io.Writer, err error, mode string, diffLines int, appliedFiles int) error {

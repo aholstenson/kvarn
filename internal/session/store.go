@@ -39,7 +39,12 @@ type SessionFilter struct {
 	// An empty map matches every session; a key present with an empty value
 	// matches only a session that stored that key with an empty value.
 	Metadata map[string]string
-	Limit    int // 0 = no limit
+	// WithoutMetadataKeys excludes any session carrying one of these keys,
+	// whatever value it holds. Presence alone is the signal, which is what a
+	// marker key is: the caller asking to be shown everything except the
+	// sessions some other subsystem stamped as its own.
+	WithoutMetadataKeys []string
+	Limit               int // 0 = no limit
 	// AfterCreatedAt / AfterID form a cursor for keyset pagination, ordered by
 	// (created_at DESC, id DESC). A zero AfterCreatedAt starts from the top.
 	AfterCreatedAt time.Time

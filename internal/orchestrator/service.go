@@ -39,6 +39,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/observability/reqid"
 	"github.com/aholstenson/kvarn/internal/orchestrator/auth"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
+	"github.com/aholstenson/kvarn/internal/preview"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
@@ -432,6 +433,14 @@ type Service struct {
 	// work out of the backlog. See drain.go.
 	drainMu sync.Mutex
 	drain   drainStatus
+
+	// previews owns preview environments: the durable records, the VMs they
+	// boot into, and the policy around both. Never nil; a service without a
+	// preview store reports previews as disabled. See preview.go.
+	previews *previewManager
+	// previewSandboxFactory creates the sandbox a preview runs in; nil uses
+	// defaultPreviewSandboxFactory.
+	previewSandboxFactory PreviewSandboxFactory
 }
 
 type ServiceOpts struct {
@@ -463,6 +472,15 @@ type ServiceOpts struct {
 	Meter               metric.Meter           // optional; nil uses an otel no-op meter
 	Instruments         *metrics.Instruments   // optional; nil disables job/auth/scheduler instrumentation
 	Dispatch            DispatchPolicy         // backlog dispatch bounds; zero value dispatches everything immediately
+
+	// PreviewStore persists preview environments; nil disables previews.
+	PreviewStore preview.Store
+	// PreviewPolicy is the resolved [preview] configuration; a zero Domain
+	// disables previews.
+	PreviewPolicy PreviewPolicy
+	// PreviewSandboxFactory creates the sandbox a preview runs in; nil boots a
+	// real one.
+	PreviewSandboxFactory PreviewSandboxFactory
 }
 
 func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
@@ -479,6 +497,9 @@ func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
 		shutdownCancel: shutdownCancel,
 		running:        make(map[string]runningJob),
 	}
+	s.previews = newPreviewManager(nil, PreviewPolicy{}, s.bootPreview)
+	s.previews.auto = newAutoStarter(s.resolvePreviewHost, s.previews.now)
+	s.previews.prState = s.previewPRState
 	s.startDispatcher(DispatchPolicy{})
 	return s
 }
@@ -499,39 +520,43 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 	reg := dispatch.NewRegistry()
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	s := &Service{
-		provider:         opts.Provider,
-		registry:         reg,
-		bridgeHandler:    dispatch.NewHandler(reg),
-		createOpts:       opts.CreateOpts,
-		projectStore:     opts.ProjectStore,
-		credentialStore:  opts.CredentialStore,
-		secretStore:      opts.SecretStore,
-		forgeConfigStore: opts.ForgeConfigStore,
-		forgeDefaults:    opts.ForgeDefaultsStore,
-		forgeTypes:       opts.ForgeTypes,
-		sessionMgr:       opts.SessionMgr,
-		agent:            opts.Agent,
-		transferer:       opts.Transferer,
-		workspaceDir:     wsDir,
-		cacheProvider:    opts.CacheProvider,
-		cacheQuota:       opts.CacheQuota,
-		cacheNamespace:   opts.Namespace,
-		repoMirror:       opts.RepoMirror,
-		repoPolicy:       opts.RepoPolicy,
-		sandboxFactory:   opts.SandboxFactory,
-		defaultsStore:    opts.DefaultsStore,
-		pricingManager:   opts.PricingManager,
-		apiKeyStore:      opts.APIKeyStore,
-		authEnabled:      opts.AuthEnabled,
-		scheduler:        sched,
-		staging:          newStaging(opts.MaxConcurrentClones),
-		tenantLimits:     opts.TenantLimits,
-		meter:            meter,
-		instruments:      opts.Instruments,
-		shutdownCtx:      shutdownCtx,
-		shutdownCancel:   shutdownCancel,
-		running:          make(map[string]runningJob),
+		provider:              opts.Provider,
+		registry:              reg,
+		bridgeHandler:         dispatch.NewHandler(reg),
+		createOpts:            opts.CreateOpts,
+		projectStore:          opts.ProjectStore,
+		credentialStore:       opts.CredentialStore,
+		secretStore:           opts.SecretStore,
+		forgeConfigStore:      opts.ForgeConfigStore,
+		forgeDefaults:         opts.ForgeDefaultsStore,
+		forgeTypes:            opts.ForgeTypes,
+		sessionMgr:            opts.SessionMgr,
+		agent:                 opts.Agent,
+		transferer:            opts.Transferer,
+		workspaceDir:          wsDir,
+		cacheProvider:         opts.CacheProvider,
+		cacheQuota:            opts.CacheQuota,
+		cacheNamespace:        opts.Namespace,
+		repoMirror:            opts.RepoMirror,
+		repoPolicy:            opts.RepoPolicy,
+		sandboxFactory:        opts.SandboxFactory,
+		defaultsStore:         opts.DefaultsStore,
+		pricingManager:        opts.PricingManager,
+		apiKeyStore:           opts.APIKeyStore,
+		authEnabled:           opts.AuthEnabled,
+		scheduler:             sched,
+		staging:               newStaging(opts.MaxConcurrentClones),
+		tenantLimits:          opts.TenantLimits,
+		meter:                 meter,
+		instruments:           opts.Instruments,
+		shutdownCtx:           shutdownCtx,
+		shutdownCancel:        shutdownCancel,
+		running:               make(map[string]runningJob),
+		previewSandboxFactory: opts.PreviewSandboxFactory,
 	}
+	s.previews = newPreviewManager(opts.PreviewStore, opts.PreviewPolicy, s.bootPreview)
+	s.previews.auto = newAutoStarter(s.resolvePreviewHost, s.previews.now)
+	s.previews.prState = s.previewPRState
 	s.startDispatcher(opts.Dispatch)
 	return s
 }
@@ -574,6 +599,12 @@ func (s *Service) Shutdown(ctx context.Context) {
 	// spent an attempt. An operator who wants running jobs to *finish* drains
 	// ahead of the signal and waits; this only stops the bleeding.
 	s.setDrain(true, "orchestrator shutting down")
+
+	// Previews hold VMs that nothing is waiting on, and their networks live in
+	// this process. Stopping them before cancelling is what keeps them from
+	// outliving the netstack they are reachable through.
+	s.previews.Shutdown(ctx)
+
 	s.shutdownCancel()
 
 	done := make(chan struct{})
@@ -2285,18 +2316,27 @@ func (s *Service) ListSessions(ctx context.Context, req *connect.Request[v1.List
 		included []*session.Session
 		lastRow  *session.Session
 	)
+	// A preview borrows a session to report its boot through, but nobody
+	// submitted it as work: listing it next to the jobs makes the queue read as
+	// if the previews were somebody's requests. Excluded unless asked for.
+	var withoutKeys []string
+	if !req.Msg.IncludePreviews {
+		withoutKeys = []string{previewSessionMarker}
+	}
+
 	for len(included) < limit {
 		batch, err := s.sessionMgr.List(ctx, session.SessionFilter{
-			Project:        req.Msg.Project,
-			PRRef:          req.Msg.PrRef,
-			Mode:           req.Msg.Mode,
-			States:         states,
-			ActiveOnly:     req.Msg.ActiveOnly,
-			CreatedAfter:   createdAfter,
-			Metadata:       req.Msg.GetMetadata(),
-			Limit:          limit,
-			AfterCreatedAt: cursorTime,
-			AfterID:        cursorID,
+			Project:             req.Msg.Project,
+			PRRef:               req.Msg.PrRef,
+			Mode:                req.Msg.Mode,
+			States:              states,
+			ActiveOnly:          req.Msg.ActiveOnly,
+			CreatedAfter:        createdAfter,
+			Metadata:            req.Msg.GetMetadata(),
+			WithoutMetadataKeys: withoutKeys,
+			Limit:               limit,
+			AfterCreatedAt:      cursorTime,
+			AfterID:             cursorID,
 		})
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInternal, err)

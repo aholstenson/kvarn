@@ -364,6 +364,7 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 			ID:         id,
 			Token:      token,
 			ProxyCAPEM: ca.CertPEM(),
+			DialGuest:  network.DialGuest,
 		}, &vm.RunnerConn{
 			Listener: listener,
 			// vz does not surface the guest CID on accepted connections, so

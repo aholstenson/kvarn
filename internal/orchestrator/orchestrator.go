@@ -30,11 +30,24 @@ type serveOpts struct {
 	// LocalSocket is the path of the host-local control socket; empty disables
 	// it, leaving the network listener as the only way in.
 	LocalSocket string
+	// PreviewIngress is the address the preview HTTP listener binds; empty
+	// disables it. It is a separate listener from Addr on purpose: that one
+	// serves authenticated ConnectRPC, this one serves unauthenticated browser
+	// traffic bound for a VM, and the two should not share a port or an
+	// interface. TLS terminates in front of it.
+	PreviewIngress string
 }
 
 func run(ctx context.Context, listen serveOpts, svcOpts ServiceOpts) error {
 	svc := NewServiceWithOpts(svcOpts)
 	svc.StartRepoMaintenance(ctx)
+
+	// Previews left running by a dead process refer to VMs that died with it,
+	// so the records are corrected before anything can route into one.
+	if err := svc.previews.Reconcile(ctx); err != nil {
+		slog.Warn("preview reconciliation failed", "error", err)
+	}
+	svc.previews.StartReaper(ctx)
 
 	srv := &http.Server{
 		Addr:    listen.Addr,
@@ -62,12 +75,33 @@ func run(ctx context.Context, listen serveOpts, svcOpts ServiceOpts) error {
 		}
 	}
 
-	errCh := make(chan error, 2)
+	// Preview ingress: plain HTTP, no interceptors, no authentication. Its
+	// protection is the address it is bound to and whatever terminates TLS in
+	// front of it.
+	var previewSrv *http.Server
+	if listen.PreviewIngress != "" && svc.previews.enabled() {
+		previewSrv = &http.Server{
+			Addr:    listen.PreviewIngress,
+			Handler: PreviewIngressHandler(svc),
+			// A preview serves long-lived responses — SSE, WebSocket upgrades,
+			// a slow first render — so there is no write deadline. Reads are
+			// bounded because a client that never finishes its headers is not
+			// a preview user.
+			ReadHeaderTimeout: 20 * time.Second,
+		}
+	}
+
+	errCh := make(chan error, 3)
 	go func() { errCh <- srv.ListenAndServe() }()
 	slog.Info("orchestrator listening", "addr", listen.Addr)
 	if localSrv != nil {
 		go func() { errCh <- localSrv.Serve(localListener) }()
 		slog.Info("host-local control socket listening", "path", listen.LocalSocket)
+	}
+	if previewSrv != nil {
+		go func() { errCh <- previewSrv.ListenAndServe() }()
+		slog.Info("preview ingress listening",
+			"addr", listen.PreviewIngress, "domain", svcOpts.PreviewPolicy.Domain)
 	}
 
 	select {
@@ -87,6 +121,11 @@ func run(ctx context.Context, listen serveOpts, svcOpts ServiceOpts) error {
 		// stale path to reason about.
 		if err := localSrv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			slog.Warn("local socket shutdown returned error", "error", err)
+		}
+	}
+	if previewSrv != nil {
+		if err := previewSrv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			slog.Warn("preview ingress shutdown returned error", "error", err)
 		}
 	}
 	svc.Shutdown(shutdownCtx)

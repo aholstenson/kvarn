@@ -149,3 +149,57 @@ its project's cap waits without blocking other projects.
 effective priority the longer it waits, so a high-priority project cannot starve
 a low-priority one. Override it per mode with
 `[projects.<name>.jobs.<mode>].priority`.
+
+## `[projects.<name>.preview]`
+
+Whether this project may have [preview
+environments](../how-to/preview-environments.md), and under which domain. It is
+the middle of three layers: the operator's [`[preview]`
+section](orchestrator-toml.md#preview) decides whether the feature exists at
+all, this decides whether the project may use it, and the repository's
+`kvarn.yml` decides what a preview looks like.
+
+```toml
+[projects.my-project.preview]
+enabled = true
+domain = "preview.my-project.example.com"
+allow_forks = false
+auto_start = ["pr-{pr}.{domain}"]
+```
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | inherit | `false` refuses previews for this project even on a host that has them. Unset means previews are available whenever the host has them configured. |
+| `domain` | hostname | inherit | Base domain for this project's preview hostnames, instead of the operator's. Useful for giving one repository its own zone. |
+| `allow_forks` | bool | `false` | Permit previews of pull requests whose head branch lives in a fork. |
+| `auto_start` | list of hostname patterns | none | Hostnames that start a preview by being asked for. See below. |
+
+### `auto_start`
+
+Each pattern must use `{pr}` exactly once and end in `.{domain}`. A request for
+a hostname it matches reads the pull request number out of the name, asks the
+forge which branch that pull request is, and starts a preview of it — so
+`pr-12.preview.my-project.example.com` works without anybody having run `kvarn
+preview up`. See [Start previews on
+demand](../how-to/preview-environments.md#start-previews-on-demand) for what the
+repository has to declare for the name to route.
+
+`{pr}` needs a literal prefix in its own label: `pr-{pr}.{domain}` is fine,
+`{pr}.{domain}` is refused, because a pattern that is a whole label on its own
+would claim every name in the zone.
+
+The mapping lives here rather than in `kvarn.yml` because it has to be known
+before the repository is cloned — when the first request for an unclaimed
+hostname arrives there is no checkout to read.
+
+Only open pull requests start anything. A preview started this way is removed,
+with its hostname, once its pull request is closed or merged; one an operator
+started by hand is never removed on its own.
+
+### `allow_forks`
+
+It defaults to off because a preview runs the branch's own code with the
+project's resolved secrets behind its egress proxy, and a fork's branch is
+written by somebody without push access to this repository. Turning it on is
+reasonable only where the network already restricts who can reach a preview at
+all.

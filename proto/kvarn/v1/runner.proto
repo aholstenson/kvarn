@@ -179,6 +179,59 @@ message CloseSessionRequest {
 
 message CloseSessionResponse {}
 
+// StartProcessRequest launches a process that outlives the call that started
+// it. Unlike Exec and SessionExec, which return when the command is done, this
+// returns as soon as the process is running and leaves it to be stopped
+// explicitly (or reaped when the runner's handler closes).
+message StartProcessRequest {
+  // ProcessId is assigned by the caller rather than the runner. Output chunks
+  // are keyed on it and can start arriving the instant the process is spawned,
+  // so the caller has to know the key before it asks for the process — a
+  // runner-assigned ID would race its own first line of output.
+  string process_id = 1;
+  // Name is a human-readable label carried on events and log lines.
+  string name = 2;
+  // Command is run through `sh -c`, so shell syntax is available.
+  string command = 3;
+  string working_dir = 4;
+  // Env adds to the environment the login shell already sets up; it does not
+  // replace it.
+  map<string, string> env = 5;
+}
+
+message StartProcessResponse {
+  string process_id = 1;
+  int32 pid = 2;
+}
+
+message StopProcessRequest {
+  string process_id = 1;
+  // GraceSeconds is how long the process group is given after SIGTERM before
+  // it is SIGKILLed. 0 takes the runner's default.
+  uint32 grace_seconds = 2;
+}
+
+message StopProcessResponse {
+  // ExitCode is the status the process finally reported; -1 when it had
+  // already gone before the stop was asked for.
+  int32 exit_code = 1;
+}
+
+message ListProcessesRequest {}
+
+message ProcessInfo {
+  string process_id = 1;
+  string name = 2;
+  int32 pid = 3;
+  bool running = 4;
+  // ExitCode is meaningful only once running is false.
+  int32 exit_code = 5;
+}
+
+message ListProcessesResponse {
+  repeated ProcessInfo processes = 1;
+}
+
 service RunnerService {
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
@@ -188,4 +241,7 @@ service RunnerService {
   rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
   rpc EditFile(EditFileRequest) returns (EditFileResponse);
   rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+  rpc StartProcess(StartProcessRequest) returns (StartProcessResponse);
+  rpc StopProcess(StopProcessRequest) returns (StopProcessResponse);
+  rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);
 }
