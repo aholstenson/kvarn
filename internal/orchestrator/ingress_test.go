@@ -252,11 +252,71 @@ var _ = Describe("Preview ingress", func() {
 		It("says why a claimed hostname is not going to start anything", func() {
 			// "No preview here" in front of a hostname the forge just handed
 			// somebody is baffling; the reason is the whole answer.
-			resolvesTo(previewTarget{}, errors.New("pull request 12 is closed"))
+			resolvesTo(previewTarget{}, &previewRefusal{reason: "pull request 12 is closed"})
 
 			resp := getAuto(autoHost)
 			Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
 			Expect(bodyOf(resp)).To(ContainSubstring("pull request 12 is closed"))
+		})
+
+		It("keeps a resolution failure's detail off an unauthenticated page", func() {
+			// This answers anybody who can reach the listener, and the reason a
+			// resolution failed names the project, the repository and whatever
+			// the forge said about the credentials.
+			resolvesTo(previewTarget{}, errors.New(`load project "acme": forge token rejected`))
+
+			resp := getAuto(autoHost)
+			Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
+			body := bodyOf(resp)
+			Expect(body).To(ContainSubstring("could not be started"))
+			Expect(body).NotTo(ContainSubstring("acme"))
+			Expect(body).NotTo(ContainSubstring("token"))
+		})
+
+		It("marks the errors it writes, so a failed poll is not read as readiness", func() {
+			// Every answer the ingress writes itself carries the mark, errors
+			// included. The holding page reads an unmarked reply as "the app is
+			// serving now"; without the mark here, one 404 during a long boot
+			// would navigate the person waiting straight into it.
+			resolvesTo(previewTarget{}, preview.ErrNoRoute)
+
+			req, err := http.NewRequest(http.MethodGet, ingress.URL+previewStatusPath, nil)
+			Expect(err).NotTo(HaveOccurred())
+			req.Host = "www.preview.example.com"
+			req.Header.Set("Accept", "application/json")
+			resp, err := ingress.Client().Do(req)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { resp.Body.Close() })
+
+			Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
+			Expect(resp.Header.Get(previewStatusHeader)).To(Equal("1"))
+		})
+
+		It("stops starting a preview whose boot just failed", func() {
+			// Nothing claims this hostname until a boot claims it, so without a
+			// backoff every page load would be another clone and another VM.
+			bootErr = errors.New("no preview: block in kvarn.yml")
+			resolvesTo(previewTarget{Project: "proj", Ref: "feature/login", PR: "12"}, nil)
+
+			Eventually(func() int {
+				getAuto(autoHost)
+				bootMu.Lock()
+				defer bootMu.Unlock()
+				return booted
+			}).Should(Equal(1))
+
+			for range 5 {
+				resp := getAuto(autoHost)
+				Expect(resp.StatusCode).To(Equal(http.StatusServiceUnavailable))
+				body := bodyOf(resp)
+				Expect(body).To(ContainSubstring("did not start"))
+				// The reason names the project and its kvarn.yml, and this page
+				// has no authentication in front of it.
+				Expect(body).NotTo(ContainSubstring("kvarn.yml"))
+			}
+			bootMu.Lock()
+			defer bootMu.Unlock()
+			Expect(booted).To(Equal(1))
 		})
 
 		It("answers a hostname no project claims with the ordinary 404", func() {
@@ -610,17 +670,22 @@ var _ = Describe("Preview ingress", func() {
 			}).Should(Equal(string(preview.StateBooting)))
 		})
 
-		It("reports a failure with its reason", func() {
+		It("reports a failure without repeating what it said", func() {
+			// A boot error carries clone URLs, project names and setup output,
+			// and this endpoint has no authentication in front of it. That the
+			// boot failed is the part a waiting browser needs.
 			bootErr = fmt.Errorf("setup step \"build\" failed")
 			registerStopped()
 
 			browserGet("/")
+			var status previewStatus
 			Eventually(func() string {
 				resp := xhrGet(previewStatusPath)
-				var status previewStatus
 				Expect(json.NewDecoder(resp.Body).Decode(&status)).To(Succeed())
-				return status.Error
-			}).Should(ContainSubstring("build"))
+				return status.State
+			}).Should(Equal(string(preview.StateFailed)))
+			Expect(status.Error).NotTo(BeEmpty())
+			Expect(status.Error).NotTo(ContainSubstring("build"))
 		})
 
 		It("belongs to the app once the preview is serving", func() {
@@ -660,6 +725,7 @@ var _ = Describe("Preview ingress", func() {
 			Expect(resp.StatusCode).To(Equal(http.StatusNotFound))
 			Expect(resp.Header.Get(previewStatusHeader)).To(BeEmpty())
 		})
+
 	})
 
 	Describe("idle tracking", func() {

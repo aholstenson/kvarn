@@ -183,12 +183,14 @@ func connectToOrchestrator(ctx context.Context, httpClient *http.Client, addr st
 				result.Result = &v1.CommandResult_DownloadFileResult{DownloadFileResult: &v1.FileStreamResult{BytesWritten: written}}
 			}
 		case *v1.RunnerCommand_DialConnection:
-			resp, execErr := handleDialConnection(ctx, client, token, c.DialConnection)
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_DialConnection{DialConnection: resp}
-			}
+			// This loop runs one command at a time, and a dial to a port nothing
+			// is listening on blocks for the dial timeout on each candidate
+			// address. Doing that inline would stall every other command for this
+			// VM — an exec, a process stop — behind a browser opening a
+			// connection, so the dial reports its own result and the loop moves
+			// on to the next command immediately.
+			go reportDialConnection(ctx, client, token, cmd.CommandId, c.DialConnection)
+			continue
 		case *v1.RunnerCommand_UploadFile:
 			written, execErr := handleUploadFile(ctx, client, token, c.UploadFile)
 			if execErr != nil {
@@ -210,6 +212,29 @@ func connectToOrchestrator(ctx context.Context, httpClient *http.Client, addr st
 	}
 
 	return nil
+}
+
+// reportDialConnection dials a guest port and reports the outcome under the
+// command it came from. It exists so the dial can happen off the command loop
+// while the orchestrator still learns the result the same way it learns every
+// other command's.
+func reportDialConnection(
+	ctx context.Context,
+	client kvarnv1connect.BridgeServiceClient,
+	token string,
+	commandID string,
+	cmd *v1.DialConnectionCommand,
+) {
+	result := &v1.CommandResult{CommandId: commandID, Token: token}
+	resp, err := handleDialConnection(ctx, client, token, cmd)
+	if err != nil {
+		result.Error = err.Error()
+	} else {
+		result.Result = &v1.CommandResult_DialConnection{DialConnection: resp}
+	}
+	if _, err := client.ReportResult(ctx, connect.NewRequest(result)); err != nil {
+		slog.Warn("failed to report dial result", "command_id", commandID, "error", err)
+	}
 }
 
 // handleDownloadFile calls DownloadFile on the orchestrator and writes the

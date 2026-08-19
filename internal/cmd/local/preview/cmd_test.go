@@ -222,6 +222,48 @@ var _ = Describe("forwarder", func() {
 		Consistently(reports).ShouldNot(Receive())
 	})
 
+	It("closes while a connection is still open", func() {
+		// A browser keeps its connections open between requests, and a dev
+		// server's reload stream stays open for as long as the page is. Waiting
+		// for those to drain would mean Ctrl-C never returns.
+		guest, err := net.Listen("tcp", "127.0.0.1:0")
+		Expect(err).NotTo(HaveOccurred())
+		defer guest.Close()
+		go func() {
+			for {
+				conn, err := guest.Accept()
+				if err != nil {
+					return
+				}
+				// Accept and say nothing, like a server holding a stream open.
+				defer conn.Close()
+			}
+		}()
+
+		dial := func(ctx context.Context, _ uint16) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", guest.Addr().String())
+		}
+
+		host, err := bindHostPort(0)
+		Expect(err).NotTo(HaveOccurred())
+		fw := startForward(host, 3000, dial, discardLogger(), nil)
+
+		conn, err := net.Dial("tcp", host.Addr().String())
+		Expect(err).NotTo(HaveOccurred())
+		defer conn.Close()
+		_, err = conn.Write([]byte("GET / HTTP/1.1\r\n"))
+		Expect(err).NotTo(HaveOccurred())
+
+		done := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			defer close(done)
+			Expect(fw.Close()).To(Succeed())
+		}()
+		Eventually(done).Should(BeClosed())
+	})
+
 	It("says nothing when the dial is cancelled rather than refused", func() {
 		dial := func(context.Context, uint16) (net.Conn, error) {
 			return nil, context.Canceled

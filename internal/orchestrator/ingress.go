@@ -35,15 +35,18 @@ import (
 // once it is, the path belongs to the app like everything else.
 const previewStatusPath = "/_kvarn/preview/status"
 
-// previewStatusHeader marks a status answer as the ingress's own. The holding
-// page needs to tell "the preview is still booting" from "the preview is
-// serving and the app is answering this path now", and the body cannot say so:
-// once the path belongs to the app, the reply is whatever that app makes of an
-// unknown route, which is usually a 404 in some shape the page cannot read.
+// previewStatusHeader marks a reply as the ingress's own. The holding page
+// needs to tell "the preview is still booting" from "the preview is serving and
+// the app is answering this path now", and the body cannot say so: once the
+// path belongs to the app, the reply is whatever that app makes of an unknown
+// route, which is usually a 404 in some shape the page cannot read.
 //
 // The absence of this header is therefore the readiness signal, and it is a
 // header rather than a status code because an app is free to answer the path
-// with a 200.
+// with a 200. Every reply the ingress writes itself carries it — the holding
+// page, the 404s, the lookup failure — because the alternative reading is that
+// a single transient error means the preview came up, which navigates the
+// person waiting off the holding page and into that error.
 const previewStatusHeader = "X-Kvarn-Preview-Status"
 
 // previewRetryAfter is what a non-browser client is told to wait before trying
@@ -69,6 +72,7 @@ type previewIngress struct {
 func (h *previewIngress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mgr := h.svc.previews
 	if !mgr.enabled() {
+		w.Header().Set(previewStatusHeader, "1")
 		http.Error(w, "preview environments are not configured on this host", http.StatusNotFound)
 		return
 	}
@@ -92,6 +96,7 @@ func (h *previewIngress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		h.log.Error("could not resolve preview host", "host", host, "error", err)
+		w.Header().Set(previewStatusHeader, "1")
 		http.Error(w, "preview lookup failed", http.StatusInternalServerError)
 		return
 	}
@@ -152,22 +157,56 @@ func (h *previewIngress) autoStart(w http.ResponseWriter, r *http.Request, host 
 	return nil
 }
 
-// refused answers a hostname that is claimed but cannot be started, saying why.
+// refused answers a hostname that is claimed but cannot be started.
+//
+// Only a reason the resolver marked as safe to show is shown. The rest name the
+// project, the repository or whatever the forge said about the credentials, and
+// this reply goes to anybody who can reach the listener; the detail is in the
+// log the caller already wrote.
 func (h *previewIngress) refused(w http.ResponseWriter, r *http.Request, host string, cause error) {
+	detail := "it could not be started"
+	if reason, ok := refusalReason(cause); ok {
+		detail = reason
+	}
+
 	w.Header().Set("X-Robots-Tag", "noindex")
+	w.Header().Set(previewStatusHeader, "1")
 	if !wantsHTML(r) {
-		http.Error(w, fmt.Sprintf("no preview environment for %s: %v", host, cause), http.StatusNotFound)
+		http.Error(w, fmt.Sprintf("no preview environment for %s: %s", host, detail), http.StatusNotFound)
 		return
 	}
 	writeHTML(w, http.StatusNotFound, previewErrorPage(
 		"No preview here",
-		fmt.Sprintf("%s should have started a preview, but %v.", host, cause),
+		fmt.Sprintf("%s should have started a preview, but %s.", host, detail),
 		"Start one with kvarn preview up <project> <ref>."))
+}
+
+// bootFailed answers a request for a preview whose last boot did not come up.
+//
+// Why it failed is not repeated here for the same reason refused withholds it:
+// a boot error carries clone URLs, project names and setup output. It is on the
+// preview's record and in `kvarn preview logs`, where somebody with an API key
+// can read it.
+func (h *previewIngress) bootFailed(w http.ResponseWriter, r *http.Request, p *preview.Preview) {
+	h.log.Warn("serving a preview whose boot failed", "preview", p.ID, "error", p.Error)
+
+	w.Header().Set("X-Robots-Tag", "noindex")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(previewStatusHeader, "1")
+	if !wantsHTML(r) {
+		http.Error(w, "the preview environment failed to start", http.StatusServiceUnavailable)
+		return
+	}
+	writeHTML(w, http.StatusServiceUnavailable, previewErrorPage(
+		"The preview did not start",
+		fmt.Sprintf("The last attempt to start a preview of %s failed.", p.Ref),
+		"Run kvarn preview logs to see why."))
 }
 
 // notFound answers a hostname no preview claims.
 func (h *previewIngress) notFound(w http.ResponseWriter, r *http.Request, host string) {
 	w.Header().Set("X-Robots-Tag", "noindex")
+	w.Header().Set(previewStatusHeader, "1")
 	if !wantsHTML(r) {
 		http.Error(w, fmt.Sprintf("no preview environment is registered for %s", host), http.StatusNotFound)
 		return
@@ -186,13 +225,21 @@ func (h *previewIngress) notFound(w http.ResponseWriter, r *http.Request, host s
 // that asked for JSON produces a baffling error inside the app rather than a
 // clear one in front of it.
 func (h *previewIngress) startAndHold(w http.ResponseWriter, r *http.Request, p *preview.Preview) {
-	if _, err := h.svc.previews.Ensure(r.Context(), p.ID); err != nil {
+	updated, err := h.svc.previews.Ensure(r.Context(), p.ID)
+	if err != nil {
 		if errors.Is(err, ErrPreviewDraining) {
 			h.unavailable(w, r, "This host is being taken out of service",
 				"The preview cannot start here. Try again shortly.")
 			return
 		}
 		h.log.Warn("could not start preview", "preview", p.ID, "error", err)
+	}
+	if updated != nil && updated.State == preview.StateFailed {
+		// Ensure declined to repeat a boot that just failed. Saying so is the
+		// honest answer; the holding page would poll a preview that is not
+		// coming up until somebody closed the tab.
+		h.bootFailed(w, r, updated)
+		return
 	}
 
 	h.unavailable(w, r, "Preparing environment",
@@ -209,6 +256,7 @@ func (h *previewIngress) unavailable(w http.ResponseWriter, r *http.Request, tit
 	w.Header().Set("X-Robots-Tag", "noindex")
 	w.Header().Set("Retry-After", fmt.Sprintf("%d", previewRetryAfter))
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(previewStatusHeader, "1")
 
 	if !wantsHTML(r) {
 		http.Error(w, title+": "+detail, http.StatusServiceUnavailable)
@@ -225,6 +273,9 @@ type previewStatus struct {
 	// itself through. A minute-long first boot is fine; it just has to be
 	// legible while it happens.
 	Phase string `json:"phase"`
+	// Error says that the boot failed, not why. The reason names clone URLs,
+	// project names and setup output, and this endpoint answers anybody who can
+	// reach the listener; `kvarn preview logs` is where the reason is read.
 	Error string `json:"error,omitempty"`
 	Ready bool   `json:"ready"`
 }
@@ -233,8 +284,11 @@ type previewStatus struct {
 func (h *previewIngress) writeStatus(w http.ResponseWriter, r *http.Request, p *preview.Preview) {
 	status := previewStatus{
 		State: string(p.State),
-		Error: p.Error,
 		Ready: h.svc.previews.IsLive(p.ID),
+	}
+	if p.State == preview.StateFailed {
+		h.log.Warn("reporting a failed preview boot", "preview", p.ID, "error", p.Error)
+		status.Error = "check kvarn preview logs for what went wrong"
 	}
 	status.Phase = h.bootPhase(r.Context(), p)
 
@@ -459,8 +513,20 @@ func previewHoldingPage(title, detail string) string {
       .then(function (r) {
         // Once the preview serves, this path belongs to the app and our marker
         // header is gone. Whatever answered — a 404, an SPA's index, anything —
-        // is proof the preview is up, so the body is not worth reading.
+        // is proof the preview is up, so the body is not worth reading. Every
+        // reply we write ourselves carries the header, including the errors, so
+        // one failed poll during a long boot is not read as readiness.
         if (r.headers.get(%[4]q) !== "1") { go(); return null; }
+        // Our own 404 is the end of the road: nothing routes here and polling
+        // will not change that.
+        if (r.status === 404) {
+          return r.text().then(function (t) {
+            return { state: "failed", error: t.trim() || "no preview environment for this address" };
+          });
+        }
+        // Any other answer of ours that is not the status document — a lookup
+        // failure, a host being drained — is temporary. Keep waiting.
+        if (r.status !== 200) { return {}; }
         return r.json();
       })
       .then(function (s) {

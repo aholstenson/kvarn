@@ -89,8 +89,8 @@ func (c *ListCmd) Run() error {
 			p.Ref,
 			p.State,
 			dash(p.Url),
-			formatAge(p.StartedAt.AsTime()),
-			formatAge(p.LastRequestAt.AsTime()),
+			formatAge(p.StartedAt),
+			formatAge(p.LastRequestAt),
 		)
 	}
 	return w.Flush()

@@ -36,7 +36,7 @@ func (s *Service) StartPreview(ctx context.Context, req *connect.Request[v1.Star
 		return nil, previewConnectError(err)
 	}
 
-	if _, err := s.previews.Ensure(ctx, p.ID); err != nil {
+	if _, err := s.previews.EnsureNow(ctx, p.ID); err != nil {
 		return nil, previewConnectError(err)
 	}
 

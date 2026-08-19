@@ -105,7 +105,10 @@ var _ = Describe("Preview auto-start", func() {
 			Expect(second.ID).To(Equal(first.ID))
 			// The hostname taught the existing record which pull request it is.
 			Expect(second.PR).To(Equal("12"))
-			Expect(second.AutoStartHost).To(Equal(host))
+			// It did not take the record over. An operator registered this one,
+			// so merging the pull request must not delete it.
+			Expect(second.AutoStartHost).To(BeEmpty())
+			Expect(second.AutoStarted()).To(BeFalse())
 		})
 
 		It("reports a hostname the resolver claims nothing for", func() {
@@ -143,6 +146,30 @@ var _ = Describe("Preview auto-start", func() {
 			close(resolver.block)
 			wg.Wait()
 			Expect(resolver.count()).To(Equal(1))
+		})
+
+		It("remembers what a hostname resolved to", func() {
+			// The hostname keeps arriving here until the boot claims it, and a
+			// first boot is minutes while the holding page polls every couple of
+			// seconds. Re-asking the forge each time spends a rate-limit budget
+			// the whole host shares.
+			for range 5 {
+				p, err := mgr.AutoStart(ctx, host)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(p.PR).To(Equal("12"))
+			}
+			Expect(resolver.count()).To(Equal(1))
+		})
+
+		It("asks again once the remembered answer has gone stale", func() {
+			_, err := mgr.AutoStart(ctx, host)
+			Expect(err).NotTo(HaveOccurred())
+
+			clock.advance(previewResolvedTTL + time.Second)
+
+			_, err = mgr.AutoStart(ctx, host)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resolver.count()).To(Equal(2))
 		})
 
 		It("remembers that a hostname resolved to nothing", func() {
@@ -257,6 +284,23 @@ var _ = Describe("Preview auto-start", func() {
 			Expect(err).NotTo(HaveOccurred())
 			states["12"] = "closed"
 
+			mgr.ReapClosedPullRequests(ctx)
+
+			_, err = store.Get(ctx, p.ID)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("never removes a preview an operator started by hand and a request then found", func() {
+			// The pull request's hostname resolves to the same branch, so the
+			// request joins the operator's preview. Joining must not hand that
+			// preview's lifetime to whoever merges the pull request.
+			p, err := mgr.Register(ctx, "acme", "feature/login", previewOrigin{})
+			Expect(err).NotTo(HaveOccurred())
+			joined, err := mgr.AutoStart(ctx, host)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(joined.ID).To(Equal(p.ID))
+
+			states["12"] = "merged"
 			mgr.ReapClosedPullRequests(ctx)
 
 			_, err = store.Get(ctx, p.ID)

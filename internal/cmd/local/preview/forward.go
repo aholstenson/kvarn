@@ -32,6 +32,12 @@ type forwarder struct {
 	wg     sync.WaitGroup
 	closed chan struct{}
 	once   sync.Once
+	// live are the connections currently being spliced, so Close can tear them
+	// down. A browser holds keep-alive connections open, and a hot-reload
+	// stream never ends on its own, so waiting for them to drain is waiting
+	// forever.
+	mu   sync.Mutex
+	live map[net.Conn]struct{}
 	// reported keeps the unreachable notice to one line: a browser opens many
 	// connections, and repeating the same diagnosis for each buries everything
 	// else.
@@ -54,6 +60,7 @@ func startForward(
 		log:           log,
 		onUnreachable: onUnreachable,
 		closed:        make(chan struct{}),
+		live:          make(map[net.Conn]struct{}),
 	}
 	f.wg.Add(1)
 	go f.serve()
@@ -100,6 +107,12 @@ func (f *forwarder) handle(client net.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if !f.track(client) {
+		// Closed between Accept and here.
+		return
+	}
+	defer f.untrack(client)
+
 	guest, err := f.dial(ctx, f.guestPort)
 	if err != nil {
 		f.log.Debug("preview forward dial failed", "port", f.guestPort, "error", err)
@@ -109,6 +122,14 @@ func (f *forwarder) handle(client net.Conn) {
 		return
 	}
 	defer guest.Close()
+
+	// The guest side is tracked too: closing only the client leaves the copy
+	// that reads from the guest blocked until the guest sends something, which
+	// an idle keep-alive connection never does.
+	if !f.track(guest) {
+		return
+	}
+	defer f.untrack(guest)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -132,12 +153,44 @@ func (f *forwarder) handle(client net.Conn) {
 	wg.Wait()
 }
 
-// Close stops accepting and waits for in-flight connections to finish.
+// track registers a connection for teardown, reporting false once the forwarder
+// is closing and the caller should give up instead.
+func (f *forwarder) track(conn net.Conn) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.live == nil {
+		return false
+	}
+	f.live[conn] = struct{}{}
+	return true
+}
+
+func (f *forwarder) untrack(conn net.Conn) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.live, conn)
+}
+
+// Close stops accepting and tears down whatever is still connected.
+//
+// It does not wait for connections to end on their own: a browser keeps its
+// connections open between requests and a dev server's reload stream is open
+// for as long as the page is, so draining them is not something Ctrl-C can wait
+// for. Closing both ends is what makes the copies return.
 func (f *forwarder) Close() error {
 	f.once.Do(func() {
 		close(f.closed)
 		f.listener.Close()
 	})
+
+	f.mu.Lock()
+	live := f.live
+	f.live = nil
+	f.mu.Unlock()
+	for conn := range live {
+		conn.Close()
+	}
+
 	f.wg.Wait()
 	return nil
 }

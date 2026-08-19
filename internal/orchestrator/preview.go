@@ -48,6 +48,17 @@ var ErrPreviewDraining = errors.New("host is draining; not starting preview envi
 // idle host quiet.
 const previewReapInterval = 30 * time.Second
 
+// previewBootRetryDelay is how long a failed boot is left alone before an
+// unauthenticated request may start another one.
+//
+// A preview whose boot fails before it claims its hostnames never enters the
+// host index, so every following request for that name resolves it afresh and
+// would start the same doomed boot again — a clone and a VM per page load, each
+// of which can evict a healthy preview to make room. The record is where the
+// failure is remembered, and this is how long it is trusted. An explicit start
+// ignores it: somebody who just fixed the kvarn.yml should not have to wait.
+const previewBootRetryDelay = 2 * time.Minute
+
 // PreviewPolicy is the resolved [preview] configuration. A zero Domain disables
 // previews entirely.
 type PreviewPolicy struct {
@@ -283,6 +294,12 @@ type previewOrigin struct {
 // caller knows that it does not: a branch registered by hand and then reached
 // through its pull request's hostname is one preview, not two, and the second
 // route is what teaches the first which pull request it belongs to.
+//
+// What it never gains is a different provenance. AutoStartHost says "nobody
+// registered this, so nobody has to unregister it", which is what the closed
+// pull request sweep acts on. Letting a request stamp it onto a preview an
+// operator started by hand would hand that preview's lifetime to whoever merges
+// the pull request that happens to share its branch.
 func (m *previewManager) Register(ctx context.Context, project, ref string, origin previewOrigin) (*preview.Preview, error) {
 	if !m.enabled() {
 		return nil, ErrPreviewsDisabled
@@ -301,7 +318,8 @@ func (m *previewManager) Register(ctx context.Context, project, ref string, orig
 			existing.PR = origin.PR
 			changed = true
 		}
-		if origin.AutoStartHost != "" && existing.AutoStartHost != origin.AutoStartHost {
+		if origin.AutoStartHost != "" && existing.AutoStarted() &&
+			existing.AutoStartHost != origin.AutoStartHost {
 			existing.AutoStartHost = origin.AutoStartHost
 			changed = true
 		}
@@ -337,7 +355,23 @@ func (m *previewManager) Register(ctx context.Context, project, ref string, orig
 // boot to finish: a first boot takes a minute or more, and the caller — ingress
 // or the CLI — has a better answer for the person waiting than a held
 // connection. Callers that want to wait watch the boot's session instead.
+//
+// A boot that failed a moment ago is not repeated. Ingress reaches this on
+// every request for an unclaimed hostname, and a preview that cannot come up at
+// all — no `preview:` block, a clone that fails — would otherwise cost a fresh
+// clone and VM per page load.
 func (m *previewManager) Ensure(ctx context.Context, id string) (*preview.Preview, error) {
+	return m.ensure(ctx, id, false)
+}
+
+// EnsureNow is Ensure for an explicit start, which retries a failed boot
+// immediately. Somebody who just corrected the thing that broke it is the whole
+// reason the backoff has an exception.
+func (m *previewManager) EnsureNow(ctx context.Context, id string) (*preview.Preview, error) {
+	return m.ensure(ctx, id, true)
+}
+
+func (m *previewManager) ensure(ctx context.Context, id string, force bool) (*preview.Preview, error) {
 	if !m.enabled() {
 		return nil, ErrPreviewsDisabled
 	}
@@ -360,6 +394,10 @@ func (m *previewManager) Ensure(ctx context.Context, id string) (*preview.Previe
 		return p, nil
 	}
 	if isBooting {
+		return p, nil
+	}
+	if !force && p.State == preview.StateFailed &&
+		m.now().UTC().Sub(p.UpdatedAt) < previewBootRetryDelay {
 		return p, nil
 	}
 

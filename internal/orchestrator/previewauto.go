@@ -49,10 +49,44 @@ const (
 // effect while somebody is still looking at the tab.
 const previewDenialTTL = time.Minute
 
+// previewResolvedTTL is how long a hostname that resolved to a pull request is
+// remembered.
+//
+// A hostname stops reaching the resolver once its boot claims it, but the boot
+// is minutes long and the holding page polls every two seconds. Without this,
+// one slow first boot with a couple of tabs open spends the whole rate-limit
+// burst on re-asking the forge a question whose answer has not changed — and
+// the burst is shared by every project on the host.
+const previewResolvedTTL = time.Minute
+
 // previewDenialCacheMax bounds the negative cache. It is dropped wholesale when
 // full rather than evicted one by one: the entries are equal in value and
 // short-lived, and the cache exists to absorb bursts, not to be complete.
 const previewDenialCacheMax = 4096
+
+// previewRefusal is a resolution failure whose reason may be shown to whoever
+// asked for the hostname.
+//
+// Everything on this path answers an unauthenticated request, and most of what
+// can go wrong names things a stranger has no business learning: the project,
+// the repository a fork lives in, whatever the forge said about the
+// credentials. Only the two decisions a developer needs in order to act — the
+// pull request is not open, previews of forks are off here — are wrapped in
+// this; everything else reaches the browser as a fixed sentence and stays in
+// the log in full.
+type previewRefusal struct{ reason string }
+
+func (e *previewRefusal) Error() string { return e.reason }
+
+// refusalReason returns the part of an error that may be shown, and whether
+// there is one.
+func refusalReason(err error) (string, bool) {
+	var refusal *previewRefusal
+	if errors.As(err, &refusal) {
+		return refusal.reason, true
+	}
+	return "", false
+}
 
 // previewTarget is what a hostname resolved to.
 type previewTarget struct {
@@ -82,6 +116,9 @@ type autoStarter struct {
 	// denied remembers hostnames that resolved to nothing, with the reason, so
 	// the answer can be repeated without asking the forge again.
 	denied map[string]autoStartDenial
+	// resolved remembers hostnames that named an open pull request, for the same
+	// reason and over a shorter horizon.
+	resolved map[string]autoStartResolution
 	// windowStart and count are the rate limit over first-time resolutions.
 	windowStart time.Time
 	count       int
@@ -100,6 +137,12 @@ type autoStartDenial struct {
 	until time.Time
 }
 
+// autoStartResolution is a remembered answer.
+type autoStartResolution struct {
+	target previewTarget
+	until  time.Time
+}
+
 func newAutoStarter(resolve previewHostResolver, now func() time.Time) *autoStarter {
 	return &autoStarter{
 		resolve:  resolve,
@@ -107,6 +150,7 @@ func newAutoStarter(resolve previewHostResolver, now func() time.Time) *autoStar
 		log:      slog.With("component", "preview-auto-start"),
 		inflight: make(map[string]*autoStartCall),
 		denied:   make(map[string]autoStartDenial),
+		resolved: make(map[string]autoStartResolution),
 	}
 }
 
@@ -120,6 +164,13 @@ func (a *autoStarter) Resolve(ctx context.Context, host string) (previewTarget, 
 			return previewTarget{}, denial.err
 		}
 		delete(a.denied, host)
+	}
+	if hit, ok := a.resolved[host]; ok {
+		if a.now().Before(hit.until) {
+			a.mu.Unlock()
+			return hit.target, nil
+		}
+		delete(a.resolved, host)
 	}
 	if call, ok := a.inflight[host]; ok {
 		a.mu.Unlock()
@@ -147,6 +198,8 @@ func (a *autoStarter) Resolve(ctx context.Context, host string) (previewTarget, 
 	delete(a.inflight, host)
 	if call.err != nil {
 		a.denyLocked(host, call.err)
+	} else {
+		a.rememberLocked(host, call.target)
 	}
 	a.mu.Unlock()
 	close(call.done)
@@ -179,11 +232,22 @@ func (a *autoStarter) denyLocked(host string, err error) {
 	a.denied[host] = autoStartDenial{err: err, until: a.now().Add(previewDenialTTL)}
 }
 
-// Forget drops a hostname's remembered refusal, so an explicit start does not
-// have to wait out a stale "nothing here".
+// rememberLocked keeps an answer for the burst of requests that follows it. The
+// cache is bounded and dropped wholesale for the same reason the denials are.
+func (a *autoStarter) rememberLocked(host string, target previewTarget) {
+	if len(a.resolved) >= previewDenialCacheMax {
+		a.resolved = make(map[string]autoStartResolution, previewDenialCacheMax)
+	}
+	a.resolved[host] = autoStartResolution{target: target, until: a.now().Add(previewResolvedTTL)}
+}
+
+// Forget drops what a hostname resolved to, refusal or answer, so an explicit
+// start does not have to wait out a stale "nothing here" and a pull request
+// that just closed is not started again from a cached answer.
 func (a *autoStarter) Forget(host string) {
 	a.mu.Lock()
 	delete(a.denied, host)
+	delete(a.resolved, host)
 	a.mu.Unlock()
 }
 
@@ -339,15 +403,22 @@ func (s *Service) resolvePreviewHost(ctx context.Context, host string) (previewT
 		return previewTarget{}, fmt.Errorf("read pull request %s: %w", match.PR, err)
 	}
 	if pr.State != "open" {
-		return previewTarget{}, fmt.Errorf("pull request %s is %s", match.PR, pr.State)
+		return previewTarget{}, &previewRefusal{
+			reason: fmt.Sprintf("pull request %s is %s", match.PR, pr.State),
+		}
 	}
 	if isForkPR(pr) && !previewAllowsForks(proj) {
 		// A fork's head is written by somebody without push access, and a
 		// preview would run it with this project's resolved secrets. Off unless
-		// the operator has said otherwise for this project.
-		return previewTarget{}, fmt.Errorf(
-			"pull request %s comes from a fork (%s), and previews of forks are not enabled for this project",
-			match.PR, pr.HeadRepo)
+		// the operator has said otherwise for this project. Which fork it is
+		// goes to the log rather than to the browser.
+		slog.Info("refusing to preview a fork's pull request",
+			"project", proj.Name, "pr", match.PR, "head_repo", pr.HeadRepo)
+		return previewTarget{}, &previewRefusal{
+			reason: fmt.Sprintf(
+				"pull request %s comes from a fork, and previews of forks are not enabled for this project",
+				match.PR),
+		}
 	}
 	if pr.HeadBranch == "" {
 		return previewTarget{}, fmt.Errorf("pull request %s does not name a head branch", match.PR)

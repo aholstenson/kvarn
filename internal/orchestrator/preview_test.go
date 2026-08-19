@@ -290,20 +290,61 @@ var _ = Describe("Preview manager", func() {
 			Expect(mgr.IsLive(p.ID)).To(BeFalse())
 		})
 
-		It("retries a failed preview on the next request", func() {
+		// failOnce boots a preview whose boot fails, and returns its record.
+		failOnce := func() *preview.Preview {
+			GinkgoHelper()
 			booter.setErr(errors.New("transient"))
 			p, err := mgr.Register(ctx, "proj", "main", previewOrigin{})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = mgr.Ensure(ctx, p.ID)
 			Expect(err).NotTo(HaveOccurred())
 			Eventually(func() int { return booter.bootCount(p.ID) }).Should(Equal(1))
-
+			Eventually(func() preview.State {
+				got, err := store.Get(ctx, p.ID)
+				if err != nil {
+					return ""
+				}
+				return got.State
+			}).Should(Equal(preview.StateFailed))
 			booter.setErr(nil)
-			Eventually(func() error {
+			return p
+		}
+
+		It("does not repeat a boot that just failed", func() {
+			// Ingress reaches Ensure on every request for the hostname, and a
+			// preview that cannot come up would otherwise cost a clone and a VM
+			// per page load.
+			p := failOnce()
+
+			for range 5 {
 				_, err := mgr.Ensure(ctx, p.ID)
-				return err
-			}).Should(Succeed())
-			Eventually(func() bool { return mgr.IsLive(p.ID) }).Should(BeTrue())
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Consistently(func() int { return booter.bootCount(p.ID) }).Should(Equal(1))
+		})
+
+		It("retries a failed preview once the backoff has passed", func() {
+			p := failOnce()
+
+			clock.advance(previewBootRetryDelay)
+			// Asked repeatedly because the failed boot releases its single-flight
+			// entry just after it records the failure, and a request landing in
+			// that gap joins the boot that is already ending.
+			Eventually(func() bool {
+				_, err := mgr.Ensure(ctx, p.ID)
+				Expect(err).NotTo(HaveOccurred())
+				return mgr.IsLive(p.ID)
+			}).Should(BeTrue())
+		})
+
+		It("retries a failed preview immediately when it is started explicitly", func() {
+			p := failOnce()
+
+			Eventually(func() bool {
+				_, err := mgr.EnsureNow(ctx, p.ID)
+				Expect(err).NotTo(HaveOccurred())
+				return mgr.IsLive(p.ID)
+			}).Should(BeTrue())
 		})
 
 		It("keeps a preview's log tail available", func() {

@@ -17,13 +17,14 @@ import (
 	"github.com/aholstenson/kvarn/internal/cmd/client"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Cmd is the parent command for `kvarn preview <subcommand>`.
 type Cmd struct {
 	Up   UpCmd   `cmd:"" help:"Start a preview environment for a branch."`
 	Down DownCmd `cmd:"" help:"Stop a preview environment."`
-	Ls   ListCmd `cmd:"" help:"List preview environments."`
+	List ListCmd `cmd:"" help:"List preview environments."`
 	Logs LogsCmd `cmd:"" help:"Print the recent output of a preview's services."`
 }
 
@@ -56,10 +57,15 @@ func printJSON(m proto.Message) error {
 	return nil
 }
 
-// formatAge renders a duration as a compact age ("4m", "3h12m", "2d"). An unset
-// timestamp reads as "-" rather than as 56 years.
-func formatAge(t time.Time) string {
-	if t.IsZero() {
+// formatAge renders a timestamp as a compact age ("4m", "3h12m", "2d"). A
+// preview that is stopped or failed carries no start time at all, so an unset
+// timestamp reads as "-" rather than as the age of the unix epoch.
+func formatAge(ts *timestamppb.Timestamp) string {
+	if ts == nil || !ts.IsValid() {
+		return "-"
+	}
+	t := ts.AsTime()
+	if t.IsZero() || t.Unix() == 0 {
 		return "-"
 	}
 	d := time.Since(t)

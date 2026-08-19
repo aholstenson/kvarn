@@ -297,15 +297,27 @@ opened.
 
 The two patterns have to agree. `auto_start` is what turns a hostname into a
 pull request, and `kvarn.yml` is what the preview actually answers on; if they
-resolve to different names, the boot fails and says so on the holding page
-rather than coming up under a name nobody asked for.
+resolve to different names the boot fails rather than coming up under a name
+nobody asked for. The page then says the preview did not start, and
+`kvarn preview list` says why.
 
 **What it refuses.** Only open pull requests start anything. A pull request
 whose head branch lives in a fork needs `allow_forks` for that project, because
 a preview runs that branch's code with the project's real secrets. Hostnames
-that resolve to nothing are remembered as such for a minute, and first-time
-resolutions are rate limited, so walking pull request numbers at the ingress
-does not turn into a walk of your forge's API.
+that resolve to nothing are remembered as such for a minute, resolutions that
+succeed are remembered for a minute too, and first-time resolutions are rate
+limited, so walking pull request numbers at the ingress does not turn into a
+walk of your forge's API.
+
+A boot that fails is not repeated for two minutes, so a branch that cannot come
+up at all costs one attempt rather than one per page load. `kvarn preview up`
+retries immediately, which is what to run after fixing the cause.
+
+Why a hostname was refused stays in the orchestrator's log except for the two
+answers a developer can act on — the pull request is not open, and previews of
+forks are off for this project. The ingress has no authentication in front of
+it, so it does not repeat project names, repository names or anything the forge
+said about the credentials.
 
 **What tidies up.** A preview started this way is removed — record, hostname and
 all — once its pull request closes or merges. Until then it stops and restarts
@@ -315,7 +327,7 @@ up` is never removed on its own, whoever else asks for it.
 ## Live with it
 
 ```sh
-kvarn preview ls                                   # what exists, and its state
+kvarn preview list                                   # what exists, and its state
 kvarn preview logs my-project feat/new-checkout    # what the servers printed
 kvarn preview down my-project feat/new-checkout    # stop the VM
 kvarn preview down my-project feat/new-checkout --remove   # and forget it
@@ -425,12 +437,12 @@ avoid.
 
 **The hostname 404s.** Nothing is registered for it. Previews are not created
 automatically from branches; run `kvarn preview up` first, and check
-`kvarn preview ls` for the name it actually claimed — `{ref}` is slugged, so
+`kvarn preview list` for the name it actually claimed — `{ref}` is slugged, so
 `feat/login` is not `feat/login.preview.example.com`.
 
-**The holding page never becomes the app.** The boot failed. The page reports
-the reason; `kvarn preview ls` shows the state, and the boot's session has the
-full output:
+**The holding page never becomes the app.** The boot failed. The page says so
+but not why — it answers anybody who can reach the ingress. `kvarn preview list`
+shows the state and the reason, and the boot's session has the full output:
 
 ```sh
 kvarn jobs list --project my-project --include-previews --limit 5
