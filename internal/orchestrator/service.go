@@ -35,6 +35,7 @@ import (
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 	"github.com/aholstenson/kvarn/internal/forge"
 	"github.com/aholstenson/kvarn/internal/logging"
+	"github.com/aholstenson/kvarn/internal/nixpkgs"
 	"github.com/aholstenson/kvarn/internal/observability/metrics"
 	"github.com/aholstenson/kvarn/internal/observability/reqid"
 	"github.com/aholstenson/kvarn/internal/orchestrator/auth"
@@ -1478,6 +1479,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	sess, err := create(ctx, sandbox.Opts{
 		Provider:   s.provider,
 		CreateOpts: createOpts,
+		NixpkgsRev: nixpkgs.Shared().Rev,
 		Config:     cfg,
 		Transferer: s.transferer,
 		SourceDir:  cloneDir,

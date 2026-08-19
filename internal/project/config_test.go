@@ -522,7 +522,7 @@ setup:
 		resolved, err := cfg.Dependencies.Resolve()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(resolved).To(HaveLen(1))
-		Expect(resolved[0].FlakeURI).To(Equal("github:NixOS/nixpkgs/" + project.DefaultNixpkgsChannel))
+		Expect(resolved[0].FlakeURI).To(Equal("github:NixOS/nixpkgs/" + project.DefaultNixpkgsRev))
 		Expect(resolved[0].Attr).To(Equal("hello"))
 		Expect(resolved[0].Host).To(Equal("github.com"))
 	})

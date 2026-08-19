@@ -180,8 +180,20 @@ type Opts struct {
 	// inside the guest still have to resolve them.
 	HostAliases map[string]string
 
+	// NixpkgsRev turns a nixpkgs channel name into the commit to install from,
+	// so the guest is handed a commit rather than a branch Nix has to resolve
+	// over the network before it can download anything. Nil leaves every flake
+	// reference as the config resolved it.
+	NixpkgsRev NixpkgsRevFunc
+
 	OnEvent func(Event)
 }
+
+// NixpkgsRevFunc resolves a nixpkgs channel name to a commit, or returns "" to
+// leave the channel name in place. It does not return an error: a channel that
+// cannot be resolved is not a reason to fail a job, only a reason to fall back
+// to what Nix would have done anyway.
+type NixpkgsRevFunc func(ctx context.Context, channel string) string
 
 // Session represents a running sandbox with a booted VM, transferred files,
 // configured firewall/tools/container, and a persistent shell session.
@@ -447,6 +459,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve dependencies: %w", err)
 		}
+		deps = pinNixpkgsRevs(ctx, deps, opts.NixpkgsRev)
 	}
 
 	aug := computeAugmentations(deps)

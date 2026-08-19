@@ -37,6 +37,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/config/secret"
 	secrettoml "github.com/aholstenson/kvarn/internal/config/secret/tomlstore"
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
+	"github.com/aholstenson/kvarn/internal/nixpkgs"
 	"github.com/aholstenson/kvarn/internal/preview"
 	"github.com/aholstenson/kvarn/internal/preview/snapshot"
 	"github.com/aholstenson/kvarn/internal/project"
@@ -225,6 +226,7 @@ func (c *Cmd) Run() error {
 	sess, err := sandbox.Start(ctx, sandbox.Opts{
 		Provider:      provider,
 		CreateOpts:    createOpts,
+		NixpkgsRev:    nixpkgs.Shared().Rev,
 		Config:        cfg,
 		Transferer:    &transfer.StreamingTransferer{},
 		SourceDir:     c.Dir,

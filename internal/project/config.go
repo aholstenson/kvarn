@@ -52,16 +52,30 @@ const (
 	// instead of repeating the literal.
 	NixpkgsFlakePrefix = "github:NixOS/nixpkgs/"
 
-	// DefaultNixpkgsChannel is the nixpkgs channel resolved when the user
-	// writes `nixpkgs` (no channel suffix). Bumping it to a newer stable
-	// release is the only edit a channel upgrade needs in code: everything
-	// else — resolution, tests, the reference docs check — derives from it.
-	// A test in this package fails if docs/reference/kvarn-yml.md still
-	// names the previous channel.
+	// DefaultNixpkgsChannel is the nixpkgs release a bare `nixpkgs` source
+	// tracks. It is the name the reference docs promise users, and a test in
+	// this package fails if docs/reference/kvarn-yml.md still names the
+	// previous one.
 	DefaultNixpkgsChannel = "nixos-26.05"
 
-	// DefaultNixpkgsFlake is the flake URI a bare `nixpkgs` source resolves to.
-	DefaultNixpkgsFlake = NixpkgsFlakePrefix + DefaultNixpkgsChannel
+	// DefaultNixpkgsRev is a known-good commit on DefaultNixpkgsChannel, and
+	// the floor under every other way of arriving at one.
+	//
+	// A dependency install has to start from a commit: handed a branch name,
+	// Nix resolves it from inside the VM with a call to api.github.com that no
+	// Nix cache stands in for and nothing catches when it fails. kvarn
+	// therefore resolves the channel on the host (internal/nixpkgs), which is
+	// what a job normally installs from — this constant is what that resolution
+	// falls back to, and what a build with no network at boot uses.
+	//
+	// Refresh it when moving the channel, so the fallback is not years old:
+	//
+	//	git ls-remote https://github.com/NixOS/nixpkgs refs/heads/<channel>
+	DefaultNixpkgsRev = "b18a4b905f8d028dc4476412e6d6891728695379"
+
+	// DefaultNixpkgsFlake is the flake URI a bare `nixpkgs` source resolves to
+	// before the host resolves its channel to a current commit.
+	DefaultNixpkgsFlake = NixpkgsFlakePrefix + DefaultNixpkgsRev
 )
 
 // Config represents a project-level configuration file (kvarn.yml).
@@ -228,7 +242,7 @@ var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 //
 // Source resolution:
 //
-//	"nixpkgs"           → github:NixOS/nixpkgs/<DefaultNixpkgsChannel>
+//	"nixpkgs"           → github:NixOS/nixpkgs/<DefaultNixpkgsRev>
 //	"nixpkgs/<channel>" → github:NixOS/nixpkgs/<channel>
 //	anything else       → flake URI verbatim
 type Dependencies map[string][]string
@@ -238,6 +252,31 @@ type ResolvedDep struct {
 	FlakeURI string // canonical flake reference
 	Attr     string // attribute path to install
 	Host     string // hostname for firewall allowlist (may be empty)
+
+	// Channel is the nixpkgs channel this dependency tracks, and is empty for
+	// every other kind of source. It exists because FlakeURI may name the
+	// commit the channel currently points at, and that commit moves: the
+	// channel name is the part of a dependency's identity that does not.
+	Channel string
+}
+
+// StableURI is the flake reference to key caches by: the channel a nixpkgs
+// dependency tracks rather than whichever commit it resolves to today. Two
+// runs on either side of a channel advance name the same thing here, which is
+// what keeps a project's tool caches warm across a nixpkgs that has merely
+// moved.
+func (d ResolvedDep) StableURI() string {
+	if d.Channel != "" {
+		return NixpkgsFlakePrefix + d.Channel
+	}
+	return d.FlakeURI
+}
+
+// flakeRef is one resolved dependency source, before attributes are attached.
+type flakeRef struct {
+	URI     string // canonical flake reference
+	Host    string // hostname needing firewall egress
+	Channel string // nixpkgs channel, empty for other sources
 }
 
 // Resolve expands the source map into a flat slice of ResolvedDep entries.
@@ -246,7 +285,7 @@ type ResolvedDep struct {
 func (d Dependencies) Resolve() ([]ResolvedDep, error) {
 	var out []ResolvedDep
 	for source, attrs := range d {
-		flakeURI, host, err := resolveFlakeRef(source)
+		ref, err := resolveFlakeRef(source)
 		if err != nil {
 			return nil, err
 		}
@@ -259,9 +298,10 @@ func (d Dependencies) Resolve() ([]ResolvedDep, error) {
 					attr, source, nixAttrRe.String())
 			}
 			out = append(out, ResolvedDep{
-				FlakeURI: flakeURI,
+				FlakeURI: ref.URI,
 				Attr:     attr,
-				Host:     host,
+				Host:     ref.Host,
+				Channel:  ref.Channel,
 			})
 		}
 	}
@@ -271,32 +311,32 @@ func (d Dependencies) Resolve() ([]ResolvedDep, error) {
 // resolveFlakeRef converts a user-facing source string into a canonical flake
 // URI plus the hostname that needs firewall egress. Unknown forms are
 // rejected with a friendly error.
-func resolveFlakeRef(source string) (flakeURI, host string, err error) {
+func resolveFlakeRef(source string) (flakeRef, error) {
 	s := strings.TrimSpace(source)
 	if s == "" {
-		return "", "", errors.New("dependency source must not be empty")
+		return flakeRef{}, errors.New("dependency source must not be empty")
 	}
 
 	switch {
 	case s == "nixpkgs":
-		return DefaultNixpkgsFlake, "github.com", nil
+		return flakeRef{URI: DefaultNixpkgsFlake, Host: "github.com", Channel: DefaultNixpkgsChannel}, nil
 
 	case strings.HasPrefix(s, "nixpkgs/"):
 		channel := strings.TrimPrefix(s, "nixpkgs/")
 		if channel == "" {
-			return "", "", fmt.Errorf("invalid nixpkgs source %q: channel must not be empty", source)
+			return flakeRef{}, fmt.Errorf("invalid nixpkgs source %q: channel must not be empty", source)
 		}
 		if !nixpkgsChannelRe.MatchString(channel) {
-			return "", "", fmt.Errorf("invalid nixpkgs channel %q: must match %s",
+			return flakeRef{}, fmt.Errorf("invalid nixpkgs channel %q: must match %s",
 				channel, nixpkgsChannelRe.String())
 		}
-		return NixpkgsFlakePrefix + channel, "github.com", nil
+		return flakeRef{URI: NixpkgsFlakePrefix + channel, Host: "github.com", Channel: channel}, nil
 
 	case strings.HasPrefix(s, "github:"):
-		return s, "github.com", nil
+		return flakeRef{URI: s, Host: "github.com"}, nil
 
 	case strings.HasPrefix(s, "gitlab:"):
-		return s, "gitlab.com", nil
+		return flakeRef{URI: s, Host: "gitlab.com"}, nil
 
 	case strings.HasPrefix(s, "git+https://"),
 		strings.HasPrefix(s, "git+ssh://"),
@@ -310,12 +350,12 @@ func resolveFlakeRef(source string) (flakeURI, host string, err error) {
 		raw = strings.TrimPrefix(raw, "tarball+")
 		u, err := url.Parse(raw)
 		if err != nil || u.Hostname() == "" {
-			return "", "", fmt.Errorf("invalid dependency source %q: %v", source, err)
+			return flakeRef{}, fmt.Errorf("invalid dependency source %q: %v", source, err)
 		}
-		return s, u.Hostname(), nil
+		return flakeRef{URI: s, Host: u.Hostname()}, nil
 	}
 
-	return "", "", fmt.Errorf("unsupported dependency source %q: expected `nixpkgs`, "+
+	return flakeRef{}, fmt.Errorf("unsupported dependency source %q: expected `nixpkgs`, "+
 		"`nixpkgs/<channel>`, `github:owner/repo[/ref]`, `gitlab:owner/repo[/ref]`, "+
 		"`git+https://...`, `git+ssh://...`, `https://...`, or `tarball+https://...`", source)
 }

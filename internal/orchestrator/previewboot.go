@@ -13,6 +13,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/config/secret"
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 	"github.com/aholstenson/kvarn/internal/logging"
+	"github.com/aholstenson/kvarn/internal/nixpkgs"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	"github.com/aholstenson/kvarn/internal/preview"
 	"github.com/aholstenson/kvarn/internal/preview/snapshot"
@@ -229,6 +230,7 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 	sandboxSession, err := create(ctx, sandbox.Opts{
 		Provider:      s.provider,
 		CreateOpts:    createOpts,
+		NixpkgsRev:    nixpkgs.Shared().Rev,
 		Config:        cfg,
 		Transferer:    s.transferer,
 		SourceDir:     cloneDir,

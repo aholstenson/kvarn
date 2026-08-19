@@ -89,7 +89,7 @@ func DeriveLayers(
 		if !ok || len(entry.CachePaths) == 0 {
 			continue
 		}
-		channel := strings.TrimPrefix(d.FlakeURI, project.NixpkgsFlakePrefix)
+		channel := strings.TrimPrefix(d.StableURI(), project.NixpkgsFlakePrefix)
 		inputKey, err := deriveToolInputKey(sourceDir, entry.Bucket, entry.Lockfiles, channel)
 		if err != nil {
 			return nil, err
@@ -158,6 +158,12 @@ func manualInputKey(key string) string {
 
 // deriveNixEvalInputKey keys the nix eval/fetch cache by the sorted nixpkgs
 // dependency set and the set of channels they resolve from.
+//
+// The channel and not the commit it points at, because Nix fingerprints its
+// own eval-cache entries by the locked commit: an entry for a commit the
+// channel has since moved past is simply never hit, while the downloaded
+// tarballs beside it in ~/.cache/nix are still worth having. Keying on the
+// commit would throw that away on every channel advance and gain nothing.
 func deriveNixEvalInputKey(deps []project.ResolvedDep) (string, bool) {
 	var refs []string
 	channels := map[string]bool{}
@@ -165,8 +171,8 @@ func deriveNixEvalInputKey(deps []project.ResolvedDep) (string, bool) {
 		if !strings.HasPrefix(d.FlakeURI, project.NixpkgsFlakePrefix) {
 			continue
 		}
-		refs = append(refs, d.FlakeURI+"#"+d.Attr)
-		channels[strings.TrimPrefix(d.FlakeURI, project.NixpkgsFlakePrefix)] = true
+		refs = append(refs, d.StableURI()+"#"+d.Attr)
+		channels[strings.TrimPrefix(d.StableURI(), project.NixpkgsFlakePrefix)] = true
 	}
 	if len(refs) == 0 {
 		return "", false
