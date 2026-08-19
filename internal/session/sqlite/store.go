@@ -228,6 +228,14 @@ func (s *Store) ListSessions(ctx context.Context, filter session.SessionFilter) 
 			`EXISTS (SELECT 1 FROM json_each(sessions.metadata_json) WHERE key = ? AND value = ?)`)
 		args = append(args, key, filter.Metadata[key])
 	}
+	// The mirror of the above for keys that disqualify a row: presence alone
+	// excludes it, so the value is not bound at all. Sorted for the same
+	// prepared-statement reuse.
+	for _, key := range slices.Sorted(slices.Values(filter.WithoutMetadataKeys)) {
+		where = append(where,
+			`NOT EXISTS (SELECT 1 FROM json_each(sessions.metadata_json) WHERE key = ?)`)
+		args = append(args, key)
+	}
 	if filter.ActiveOnly {
 		placeholders, stateArgs := terminalStates()
 		where = append(where, "state NOT IN ("+placeholders+")")

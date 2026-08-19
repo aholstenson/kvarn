@@ -433,9 +433,13 @@ the reason; `kvarn preview ls` shows the state, and the boot's session has the
 full output:
 
 ```sh
-kvarn jobs list --project my-project --limit 5
+kvarn jobs list --project my-project --include-previews --limit 5
 kvarn jobs events <session-id>
 ```
+
+A preview's boot session is left out of `kvarn jobs list` unless you ask for it
+with `--include-previews`: nobody submitted it as work, so it does not belong in
+a listing of jobs.
 
 **502 from the app.** The VM is up but the server is not answering on the port
 the site declares. `kvarn preview logs` shows what it printed — usually a crash

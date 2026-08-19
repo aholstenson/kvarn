@@ -239,6 +239,11 @@ message ListSessionsRequest {
   // record keeping rather than decoration — the system that stamped a job with
   // its own identifier can find it again by that identifier.
   map<string, string> metadata = 9;
+  // Include the sessions preview environments borrow while they boot. They are
+  // sessions in every mechanical sense, but nobody submitted them as work, so
+  // by default they are left out of a listing of jobs. Set this to see a
+  // preview's boot alongside the jobs.
+  bool include_previews = 10;
 }
 
 message ListSessionsResponse {

@@ -2316,18 +2316,27 @@ func (s *Service) ListSessions(ctx context.Context, req *connect.Request[v1.List
 		included []*session.Session
 		lastRow  *session.Session
 	)
+	// A preview borrows a session to report its boot through, but nobody
+	// submitted it as work: listing it next to the jobs makes the queue read as
+	// if the previews were somebody's requests. Excluded unless asked for.
+	var withoutKeys []string
+	if !req.Msg.IncludePreviews {
+		withoutKeys = []string{previewSessionMarker}
+	}
+
 	for len(included) < limit {
 		batch, err := s.sessionMgr.List(ctx, session.SessionFilter{
-			Project:        req.Msg.Project,
-			PRRef:          req.Msg.PrRef,
-			Mode:           req.Msg.Mode,
-			States:         states,
-			ActiveOnly:     req.Msg.ActiveOnly,
-			CreatedAfter:   createdAfter,
-			Metadata:       req.Msg.GetMetadata(),
-			Limit:          limit,
-			AfterCreatedAt: cursorTime,
-			AfterID:        cursorID,
+			Project:             req.Msg.Project,
+			PRRef:               req.Msg.PrRef,
+			Mode:                req.Msg.Mode,
+			States:              states,
+			ActiveOnly:          req.Msg.ActiveOnly,
+			CreatedAfter:        createdAfter,
+			Metadata:            req.Msg.GetMetadata(),
+			WithoutMetadataKeys: withoutKeys,
+			Limit:               limit,
+			AfterCreatedAt:      cursorTime,
+			AfterID:             cursorID,
 		})
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInternal, err)

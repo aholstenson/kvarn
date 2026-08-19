@@ -126,7 +126,7 @@ down. Either way the session ends `cancelled`, not `failed`.
 | Subcommand | Purpose |
 | --- | --- |
 | `start <project> <prompt>` | Start a job, from a branch or from a pull request; flags are listed above. |
-| `list` | Jobs newest first. Filters: `--project`, `--state` (repeatable/comma-separated), `--active`, `--mode`, `--pr-ref`, `--since 24h`, `--limit`, `--all` to follow pagination. |
+| `list` | Jobs newest first. Filters: `--project`, `--state` (repeatable/comma-separated), `--active`, `--mode`, `--pr-ref`, `--since 24h`, `--limit`, `--all` to follow pagination. Preview environments boot through a session of their own; `--include-previews` lists those too. |
 | `show <session-id>` | One job in full, including its priority, attempt count and cost. |
 | `result <session-id>` | What the job produced in writing, on stdout. `--json` for the session id and state alongside it. |
 | `watch <session-id>` | Stream events until the job finishes. `--from` resumes after an event sequence. |
