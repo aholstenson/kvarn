@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/aholstenson/kvarn/compare/image-v0.5.0...image-v0.5.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **image:** Dependency installs survive a slow or stalled download ([6179724](https://github.com/aholstenson/kvarn/commit/6179724f630b33fec13c4ad127a6f3c2b49e11ba))
+
 ## [0.5.0](https://github.com/aholstenson/kvarn/compare/image-v0.4.0...image-v0.5.0) (2026-08-11)
 
 
