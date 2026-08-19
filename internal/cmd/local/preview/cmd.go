@@ -3,14 +3,18 @@
 // this machine, reachable on loopback.
 //
 // It is the same preview the orchestrator serves — same sandbox, same serve
-// steps, same ready checks — with the two things a developer's machine does not
-// have taken out. There is no clone, because the working tree is the source,
-// and there are no hostnames, because there is no domain: each site is
-// forwarded to a loopback port instead, and a server that virtual-hosts several
-// sites tells them apart by that port rather than by name, since it reads both
-// from KVARN_PREVIEW_URL_<SITE> either way. Everything the repository can get
-// wrong about its
-// preview is therefore wrong here too, which is the point of running it.
+// steps, same ready checks — with the one thing a developer's machine does not
+// have taken out: there is no clone, because the working tree is the source.
+// Everything the repository can get wrong about its preview is therefore wrong
+// here too, which is the point of running it.
+//
+// How the sites are addressed is the developer's choice. By default each site
+// is forwarded to a loopback port, and a server that virtual-hosts several
+// sites tells them apart by that port rather than by name. Given
+// --base-domain, the sites get the hostnames they would have when hosted, and
+// one Host-routed listener serves all of them — which is the only way to
+// exercise a repository whose behaviour depends on its own domain. Either way
+// a site reads its address from KVARN_PREVIEW_URL_<SITE>.
 package preview
 
 import (
@@ -19,12 +23,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/aholstenson/kvarn/internal/cmd/imageutil"
@@ -55,7 +57,17 @@ type Cmd struct {
 	SecretsFile   string `help:"Override path to secrets store (default: ~/.config/kvarn/secrets.toml)." name:"secrets-file"`
 
 	Port map[string]uint16 `help:"Bind a site on a specific host port, as site=port. Repeatable." name:"port"`
+
+	BaseDomain  string `help:"Serve the sites on hostnames under this domain, e.g. sws.local, instead of loopback ports. The names have to resolve to 127.0.0.1 on this machine." name:"base-domain"`
+	Ref         string `help:"Ref label the site hostnames are formed with, for the {ref} part of a site's host pattern." default:"local" name:"ref"`
+	IngressPort uint16 `help:"Host port the sites are served on with --base-domain. Defaults to the port the sites share inside the VM, else 8080." name:"ingress-port"`
 }
+
+// DefaultRefLabel is the {ref} a local preview's hostnames are formed with. It
+// is a fixed word rather than the checked-out branch so the names — and
+// therefore /etc/hosts entries and anything registered against them, such as
+// OAuth redirect URLs — survive switching branches.
+const DefaultRefLabel = "local"
 
 func (c *Cmd) Run() error {
 	// Redirect slog to discard unless --logs is passed.
@@ -90,11 +102,11 @@ func (c *Cmd) Run() error {
 		return errors.New("kvarn.yml declares no preview: add a `preview:` block with at least one site")
 	}
 
-	// Bind every site's host port before booting anything. A port collision is a
-	// configuration problem, and discovering it after a VM has come up wastes a
-	// boot; binding also fixes the URLs, which the serve commands need in their
-	// environment before they start.
-	sites, err := c.bindSites(cfg)
+	// Settle how the sites are reached before booting anything. A port
+	// collision is a configuration problem, and discovering it after a VM has
+	// come up wastes a boot; binding also fixes the URLs, which the serve
+	// commands need in their environment before they start.
+	sites, err := c.planSites(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -184,6 +196,7 @@ func (c *Cmd) Run() error {
 		CacheProvider: cacheProvider,
 		ProjectID:     projectID,
 		Secrets:       secretEnv,
+		HostAliases:   sites.guestAliases(),
 		OnEvent:       boot.OnEvent,
 	})
 	if err != nil {
@@ -344,8 +357,16 @@ func (c *Cmd) Run() error {
 	// Only start forwarding once the preview says it is ready: a browser opened
 	// on a URL that is not serving yet shows a connection error, and the URLs are
 	// printed at the same moment they start working.
-	forwards := sites.startForwards(sess.DialGuest)
-	defer forwards.close()
+	serving := sites.serve(sess.DialGuest, func(name string, guestPort uint16, err error) {
+		// Everything else looks healthy in this case — the boot passed and the
+		// host port is bound — so without a word here the only symptom is a
+		// connection reset, which reads as kvarn never having bound anything.
+		logs.note(fmt.Sprintf(
+			"%s: nothing is listening on port %d inside the VM. "+
+				"Check that the preview's server binds that port (%v).",
+			name, guestPort, err))
+	})
+	defer serving.close()
 
 	stopRenderer()
 	sites.report(os.Stdout)
@@ -354,129 +375,6 @@ func (c *Cmd) Run() error {
 	<-ctx.Done()
 	fmt.Fprintln(os.Stdout, "\nStopping preview…")
 	return nil
-}
-
-// boundSite is one site of the preview with its loopback listener already
-// bound.
-type boundSite struct {
-	Name      string
-	GuestPort uint16
-	Listener  net.Listener
-	URL       string
-}
-
-// boundSites is the preview's sites in stable name order.
-type boundSites struct {
-	sites []boundSite
-}
-
-// bindSites claims a loopback port for every declared site. Sites that share a
-// guest port still get one host port each: locally the port is what tells them
-// apart, since there are no hostnames to route on.
-func (c *Cmd) bindSites(cfg *project.Config) (*boundSites, error) {
-	names := make([]string, 0, len(cfg.Preview.Sites))
-	for name := range cfg.Preview.Sites {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	for name := range c.Port {
-		if _, ok := cfg.Preview.Sites[name]; !ok {
-			return nil, fmt.Errorf("--port names site %q, which kvarn.yml does not declare", name)
-		}
-	}
-
-	bound := &boundSites{}
-	for _, name := range names {
-		want := cfg.Preview.Sites[name].Port
-		explicit := false
-		if p, ok := c.Port[name]; ok {
-			want = p
-			explicit = true
-		}
-
-		ln, err := bindHostPort(want)
-		if err != nil {
-			bound.closeListeners()
-			return nil, fmt.Errorf("bind a port for site %q: %w", name, err)
-		}
-		port := uint16(ln.Addr().(*net.TCPAddr).Port)
-		// An explicit --port is a request, not a preference: silently serving
-		// somewhere else would break whatever the caller pinned the port for.
-		if explicit && port != want {
-			ln.Close()
-			bound.closeListeners()
-			return nil, fmt.Errorf("port %d for site %q is already in use", want, name)
-		}
-
-		bound.sites = append(bound.sites, boundSite{
-			Name:      name,
-			GuestPort: cfg.Preview.Sites[name].Port,
-			Listener:  ln,
-			URL:       fmt.Sprintf("http://localhost:%d", port),
-		})
-	}
-	return bound, nil
-}
-
-// urls maps site name to the address it answers on, for the serve environment.
-func (b *boundSites) urls() map[string]string {
-	out := make(map[string]string, len(b.sites))
-	for _, site := range b.sites {
-		out[site.Name] = site.URL
-	}
-	return out
-}
-
-// closeListeners releases the bound ports. It is the cleanup path for a preview
-// that never started forwarding; once forwarders own the listeners, closing
-// them is their job.
-func (b *boundSites) closeListeners() {
-	for _, site := range b.sites {
-		if site.Listener != nil {
-			site.Listener.Close()
-		}
-	}
-	b.sites = nil
-}
-
-// startForwards hands every bound listener to a forwarder into the guest.
-func (b *boundSites) startForwards(dial func(context.Context, uint16) (net.Conn, error)) *forwards {
-	log := slog.With("component", "local-preview")
-	f := &forwards{}
-	for _, site := range b.sites {
-		f.list = append(f.list, startForward(site.Listener, site.GuestPort, dial, log))
-	}
-	// The forwarders own the listeners now, so the deferred bind cleanup must
-	// not close them a second time.
-	b.sites = nil
-	return f
-}
-
-// report prints the addresses the preview is serving on.
-func (b *boundSites) report(w io.Writer) {
-	fmt.Fprintln(w)
-	width := 0
-	for _, site := range b.sites {
-		if len(site.Name) > width {
-			width = len(site.Name)
-		}
-	}
-	for _, site := range b.sites {
-		fmt.Fprintf(w, "  %-*s  %s\n", width, site.Name, site.URL)
-	}
-	fmt.Fprintln(w, "\nPress Ctrl-C to stop.")
-}
-
-// forwards is every running port forward, closed together.
-type forwards struct {
-	list []*forwarder
-}
-
-func (f *forwards) close() {
-	for _, fw := range f.list {
-		fw.Close()
-	}
 }
 
 // resolveProjectName figures out which project name to use when looking up

@@ -34,8 +34,28 @@ message RunnerCommand {
     StartProcessRequest start_process = 13;
     StopProcessRequest stop_process = 14;
     ListProcessesRequest list_processes = 15;
+    DialConnectionCommand dial_connection = 16;
   }
   reserved 6;
+}
+
+// DialConnectionCommand asks the runner to open a TCP connection inside the
+// guest and carry it over the bridge. It exists because the guest's own
+// loopback is where a great many servers listen — a container published on
+// 127.0.0.1, a dev server bound to localhost — and nothing outside the VM can
+// reach that address. The runner is inside, so it can.
+//
+// The two directions travel as separate streams the runner opens once the
+// connection is up: ReadConnection carries what the client sent, and
+// WriteConnection carries what the server answered.
+message DialConnectionCommand {
+  string connection_id = 1;
+  uint32 port = 2;
+}
+
+message DialConnectionResult {
+  // Address the runner reached inside the guest, for diagnostics.
+  string address = 1;
 }
 
 message DownloadFileCommand {
@@ -65,6 +85,7 @@ message CommandResult {
     StartProcessResponse start_process = 15;
     StopProcessResponse stop_process = 16;
     ListProcessesResponse list_processes = 17;
+    DialConnectionResult dial_connection = 18;
   }
   reserved 8;
   string error = 7;
@@ -126,6 +147,30 @@ enum ProcessEventKind {
 
 message ReportProcessEventResponse {}
 
+// ConnectionChunk is one message of a proxied connection. The first message of
+// a WriteConnection stream is the start metadata that says which connection it
+// belongs to; every message after it is data.
+message ConnectionChunk {
+  oneof payload {
+    ConnectionStreamStart start = 1;
+    bytes data = 2;
+  }
+}
+
+message ConnectionStreamStart {
+  string connection_id = 1;
+  string token = 2;
+}
+
+message ReadConnectionRequest {
+  string connection_id = 1;
+  string token = 2;
+}
+
+message WriteConnectionResult {
+  int64 bytes_written = 1;
+}
+
 service BridgeService {
   rpc Register(RegisterRequest) returns (stream RunnerCommand);
   rpc ReportResult(CommandResult) returns (ReportResultResponse);
@@ -133,4 +178,10 @@ service BridgeService {
   rpc ReportProcessEvent(ProcessEvent) returns (ReportProcessEventResponse);
   rpc DownloadFile(DownloadFileRequest) returns (stream FileStreamChunk);
   rpc UploadFile(stream FileStreamChunk) returns (FileStreamResult);
+  // ReadConnection streams what the client outside the VM sent, so the runner
+  // can write it into the guest socket. It ends when the client half-closes.
+  rpc ReadConnection(ReadConnectionRequest) returns (stream ConnectionChunk);
+  // WriteConnection streams what the guest server answered back out to the
+  // client. It ends when the guest closes its side.
+  rpc WriteConnection(stream ConnectionChunk) returns (WriteConnectionResult);
 }

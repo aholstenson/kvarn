@@ -33,10 +33,10 @@ func takePort() (uint16, net.Listener) {
 	return uint16(ln.Addr().(*net.TCPAddr).Port), ln
 }
 
-var _ = Describe("bindSites", func() {
+var _ = Describe("planSites", func() {
 	It("gives every site a loopback URL, in name order", func() {
 		cmd := &Cmd{}
-		bound, err := cmd.bindSites(twoSites())
+		bound, err := cmd.planSites(context.Background(), twoSites())
 		Expect(err).NotTo(HaveOccurred())
 		defer bound.closeListeners()
 
@@ -55,7 +55,7 @@ var _ = Describe("bindSites", func() {
 		cfg := &project.Config{Preview: project.Preview{
 			Sites: map[string]project.PreviewSite{"web": {Port: port}},
 		}}
-		bound, err := (&Cmd{}).bindSites(cfg)
+		bound, err := (&Cmd{}).planSites(context.Background(), cfg)
 		Expect(err).NotTo(HaveOccurred())
 		defer bound.closeListeners()
 
@@ -70,7 +70,7 @@ var _ = Describe("bindSites", func() {
 		cfg := &project.Config{Preview: project.Preview{
 			Sites: map[string]project.PreviewSite{"web": {Port: port}},
 		}}
-		bound, err := (&Cmd{}).bindSites(cfg)
+		bound, err := (&Cmd{}).planSites(context.Background(), cfg)
 		Expect(err).NotTo(HaveOccurred())
 		defer bound.closeListeners()
 
@@ -86,7 +86,7 @@ var _ = Describe("bindSites", func() {
 				"assets": {Port: 80, Host: "assets-{ref}.{domain}"},
 			},
 		}}
-		bound, err := (&Cmd{}).bindSites(cfg)
+		bound, err := (&Cmd{}).planSites(context.Background(), cfg)
 		Expect(err).NotTo(HaveOccurred())
 		defer bound.closeListeners()
 
@@ -102,7 +102,7 @@ var _ = Describe("bindSites", func() {
 		Expect(ln.Close()).To(Succeed())
 
 		cmd := &Cmd{Port: map[string]uint16{"web": port}}
-		bound, err := cmd.bindSites(twoSites())
+		bound, err := cmd.planSites(context.Background(), twoSites())
 		Expect(err).NotTo(HaveOccurred())
 		defer bound.closeListeners()
 
@@ -116,7 +116,7 @@ var _ = Describe("bindSites", func() {
 
 	It("refuses --port for a site the repository does not declare", func() {
 		cmd := &Cmd{Port: map[string]uint16{"worker": 9000}}
-		_, err := cmd.bindSites(twoSites())
+		_, err := cmd.planSites(context.Background(), twoSites())
 		Expect(err).To(MatchError(ContainSubstring(`--port names site "worker"`)))
 	})
 
@@ -125,7 +125,7 @@ var _ = Describe("bindSites", func() {
 		defer ln.Close()
 
 		cmd := &Cmd{Port: map[string]uint16{"web": port}}
-		_, err := cmd.bindSites(twoSites())
+		_, err := cmd.planSites(context.Background(), twoSites())
 		Expect(err).To(MatchError(ContainSubstring(fmt.Sprintf("port %d for site %q is already in use", port, "web"))))
 	})
 })
@@ -164,7 +164,7 @@ var _ = Describe("forwarder", func() {
 
 		host, err := bindHostPort(0)
 		Expect(err).NotTo(HaveOccurred())
-		fw := startForward(host, 3000, dial, discardLogger())
+		fw := startForward(host, 3000, dial, discardLogger(), nil)
 		defer fw.Close()
 
 		conn, err := net.Dial("tcp", host.Addr().String())
@@ -187,7 +187,7 @@ var _ = Describe("forwarder", func() {
 
 		host, err := bindHostPort(0)
 		Expect(err).NotTo(HaveOccurred())
-		fw := startForward(host, 3000, dial, discardLogger())
+		fw := startForward(host, 3000, dial, discardLogger(), nil)
 		defer fw.Close()
 
 		conn, err := net.Dial("tcp", host.Addr().String())
@@ -197,6 +197,80 @@ var _ = Describe("forwarder", func() {
 		buf := make([]byte, 1)
 		_, err = conn.Read(buf)
 		Expect(err).To(HaveOccurred())
+	})
+
+	It("reports an unreachable guest once, however many clients connect", func() {
+		dial := func(context.Context, uint16) (net.Conn, error) {
+			return nil, fmt.Errorf("connection refused")
+		}
+
+		reports := make(chan error, 8)
+		host, err := bindHostPort(0)
+		Expect(err).NotTo(HaveOccurred())
+		fw := startForward(host, 3000, dial, discardLogger(), func(err error) { reports <- err })
+		defer fw.Close()
+
+		for range 3 {
+			conn, err := net.Dial("tcp", host.Addr().String())
+			Expect(err).NotTo(HaveOccurred())
+			buf := make([]byte, 1)
+			_, _ = conn.Read(buf)
+			conn.Close()
+		}
+
+		Eventually(reports).Should(Receive(MatchError(ContainSubstring("connection refused"))))
+		Consistently(reports).ShouldNot(Receive())
+	})
+
+	It("says nothing when the dial is cancelled rather than refused", func() {
+		dial := func(context.Context, uint16) (net.Conn, error) {
+			return nil, context.Canceled
+		}
+
+		reports := make(chan error, 8)
+		host, err := bindHostPort(0)
+		Expect(err).NotTo(HaveOccurred())
+		fw := startForward(host, 3000, dial, discardLogger(), func(err error) { reports <- err })
+		defer fw.Close()
+
+		conn, err := net.Dial("tcp", host.Addr().String())
+		Expect(err).NotTo(HaveOccurred())
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+		conn.Close()
+
+		Consistently(reports).ShouldNot(Receive())
+	})
+})
+
+var _ = Describe("report", func() {
+	It("names every site, its local URL and the guest port behind it", func() {
+		bound, err := (&Cmd{}).planSites(context.Background(), twoSites())
+		Expect(err).NotTo(HaveOccurred())
+		defer bound.closeListeners()
+
+		var out bytes.Buffer
+		bound.report(&out)
+		Expect(out.String()).To(ContainSubstring("api"))
+		Expect(out.String()).To(ContainSubstring("guest port 8080"))
+		Expect(out.String()).To(ContainSubstring("web"))
+		Expect(out.String()).To(ContainSubstring("guest port 3000"))
+	})
+
+	It("still has sites to report once forwarding has started", func() {
+		bound, err := (&Cmd{}).planSites(context.Background(), twoSites())
+		Expect(err).NotTo(HaveOccurred())
+		defer bound.closeListeners()
+
+		dial := func(context.Context, uint16) (net.Conn, error) {
+			return nil, fmt.Errorf("nothing listening")
+		}
+		fw := bound.serve(dial, nil)
+		defer fw.close()
+
+		var out bytes.Buffer
+		bound.report(&out)
+		Expect(out.String()).To(ContainSubstring("guest port 3000"))
 	})
 })
 

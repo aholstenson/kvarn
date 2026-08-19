@@ -18,6 +18,20 @@ type PendingTransfer struct {
 	Done   chan struct{}       // closed when the transfer completes
 }
 
+// PendingConn is one TCP connection the runner has been asked to open inside
+// the guest and carry over the bridge. The two directions are independent
+// streams, so both halves live here for as long as the connection does; the
+// side that owns the connection removes it when it is finished with it, not
+// whichever stream ends first.
+type PendingConn struct {
+	// Reader yields what the client outside the VM sent. The ReadConnection
+	// stream drains it into the guest socket.
+	Reader io.ReadCloser
+	// Writer receives what the guest server answered. The WriteConnection
+	// stream fills it.
+	Writer io.WriteCloser
+}
+
 // PendingRunner holds the channels used to communicate with a runner that has
 // registered with the bridge service.
 type PendingRunner struct {
@@ -50,6 +64,7 @@ type PendingRunner struct {
 
 	mu        sync.Mutex
 	transfers map[string]*PendingTransfer
+	conns     map[string]*PendingConn
 }
 
 // MarkReady signals that the runner is connected. Safe to call multiple times.
@@ -80,6 +95,33 @@ func (pr *PendingRunner) RemoveTransfer(id string) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 	delete(pr.transfers, id)
+}
+
+// RegisterConn registers a proxied connection by ID, before the command that
+// asks the runner to dial is sent: the runner opens its streams as soon as the
+// connection is up, which can be before the command's own result gets back.
+func (pr *PendingRunner) RegisterConn(id string, c *PendingConn) {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	if pr.conns == nil {
+		pr.conns = make(map[string]*PendingConn)
+	}
+	pr.conns[id] = c
+}
+
+// LookupConn returns the PendingConn for the given ID, if any.
+func (pr *PendingRunner) LookupConn(id string) (*PendingConn, bool) {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	c, ok := pr.conns[id]
+	return c, ok
+}
+
+// RemoveConn deletes a proxied connection by ID.
+func (pr *PendingRunner) RemoveConn(id string) {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	delete(pr.conns, id)
 }
 
 // Registry tracks pending runners by their bootstrap token.

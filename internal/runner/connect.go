@@ -182,6 +182,13 @@ func connectToOrchestrator(ctx context.Context, httpClient *http.Client, addr st
 			} else {
 				result.Result = &v1.CommandResult_DownloadFileResult{DownloadFileResult: &v1.FileStreamResult{BytesWritten: written}}
 			}
+		case *v1.RunnerCommand_DialConnection:
+			resp, execErr := handleDialConnection(ctx, client, token, c.DialConnection)
+			if execErr != nil {
+				result.Error = execErr.Error()
+			} else {
+				result.Result = &v1.CommandResult_DialConnection{DialConnection: resp}
+			}
 		case *v1.RunnerCommand_UploadFile:
 			written, execErr := handleUploadFile(ctx, client, token, c.UploadFile)
 			if execErr != nil {

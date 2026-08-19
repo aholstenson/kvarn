@@ -247,6 +247,9 @@ servers streams to the terminal once the preview is up.
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--port site=N` | the site's own port | Bind a site on a specific host port. Repeatable. Fails if the port is taken. |
+| `--base-domain` | — | Serve the sites on hostnames under this domain instead of loopback ports. |
+| `--ref` | `local` | Ref label the `{ref}` part of a site's host pattern expands to. |
+| `--ingress-port` | the shared guest port, else `8080` | Host port every site is served on with `--base-domain`. |
 
 A site is served on the port it listens on inside the VM whenever that port is
 free on the host, so its own absolute URLs keep working; if it is taken, the
@@ -255,6 +258,14 @@ guest port get a host port each, since locally the port is what tells them apart
 Each site's URL is in the environment as `KVARN_PREVIEW_URL_<SITE>` before the
 serve steps run, exactly as it is on the orchestrator — the difference is that
 it is a `localhost` URL rather than a hostname in the operator's domain.
+
+With `--base-domain sws.local` the sites get hostnames instead, expanded from the
+same `host` patterns by the same resolver the orchestrator uses, and one
+Host-routed listener serves all of them. `--port` does not apply then; use
+`--ingress-port` to choose the port that listener binds. The names have to
+resolve to `127.0.0.1` on this machine, and the command prints the `/etc/hosts`
+line to add for any that do not. See
+[preview environments](../how-to/preview-environments.md#serve-them-under-real-hostnames).
 
 ## `kvarn key`
 

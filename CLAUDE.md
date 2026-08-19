@@ -35,9 +35,9 @@ task --list         # see all available tasks
 - `internal/scm/mirror/` — Host-side bare mirror per project, so N concurrent jobs on one repository share a single fetch
 - `internal/session/` — Orchestrator-owned session store. `Store` (sessions + per-session monotonic event log) has two impls: `memstore` (tests) and `sqlite/` (production, pure-Go `modernc.org/sqlite`). `Manager` owns the in-memory pub/sub hub and layers replay + reconnect-from-cursor on top; `codec.go` encodes the durable event kinds (256 KiB payload cap) and the session↔row mapping
 - `internal/preview/` — Preview environments: the durable record and its `Store` (`memstore` for tests, `sqlite/` in production), plus `boot.go`, which starts the declared serve processes and waits on the ready checks. Both the orchestrator's hosted previews and `kvarn local preview` go through `boot.go`, so the two cannot drift on what bringing a preview up means
-- `internal/runner/` — Runner service (ConnectRPC handler)
+- `internal/runner/` — Runner service (ConnectRPC handler); `proxyconn.go` dials a port from inside the guest and carries the connection back over the bridge, which is how preview traffic reaches a server bound to the guest's own loopback
 - `internal/runnerbin/` — Embeds the linux runner binary into the CLI (build with `-tags embedrunner`; the artifact is gitignored and produced by `task build:runner`)
-- `internal/cmd/` — CLI command handlers (jobs, queue, preview, secrets, key, client, repo). `local/` is the group that boots a VM on this machine against the working directory — `local test`, `local job`, `local preview` — with `local/bootui/` holding the sandbox-boot rendering all three share
+- `internal/cmd/` — CLI command handlers (jobs, queue, preview, secrets, key, client, repo). `local/` is the group that boots a VM on this machine against the working directory — `local test`, `local job`, `local preview` — with `local/bootui/` holding the sandbox-boot rendering all three share. `local/preview/sites.go` decides how a preview's sites are addressed on this machine: a loopback port each (`forward.go`), or, given `--base-domain`, real hostnames behind one Host-routed listener (`ingress.go`)
 
 ## Test
 

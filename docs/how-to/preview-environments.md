@@ -120,8 +120,8 @@ preview:
 Kvarn passes the server the hostname the browser asked for, so its own
 virtual-host matching decides which name got the request. Configure that matching
 from `KVARN_PREVIEW_URL_<SITE>` rather than hardcoding the names — that is also
-what makes the shared-port case work under `kvarn local preview`, where there is
-no domain and each site is reached on its own loopback port instead.
+what makes the shared-port case work under `kvarn local preview`, where each site
+is reached on its own loopback port unless you give the run a base domain.
 
 See [`kvarn.yml`](../reference/kvarn-yml.md#preview) for the full reference.
 
@@ -205,6 +205,47 @@ fails here too — which is the point of running it locally.
 Once the preview is up, whatever the servers print streams to the terminal,
 prefixed with the service that wrote it. If the boot fails instead, that output
 is printed as the explanation.
+
+### Serve them under real hostnames
+
+Some things only happen under a domain: virtual-host matching, cookie scopes,
+absolute links between sites, an OAuth redirect the provider has on file. A
+loopback port cannot exercise any of them, so give the preview a domain of your
+own choosing:
+
+```sh
+kvarn local preview --base-domain sws.local
+```
+
+The site hostnames are expanded from the same `host` patterns by the same
+resolver the orchestrator uses, and one listener serves all of them, routing on
+the Host header:
+
+```
+  api  http://api-local.sws.local:3000  →  guest port 3000
+  web  http://local.sws.local:3000      →  guest port 3000
+
+Those names do not resolve here yet. Add to /etc/hosts:
+
+  127.0.0.1	api-local.sws.local local.sws.local
+
+Press Ctrl-C to stop.
+```
+
+Add that line once and the names keep working: `{ref}` expands to `local` rather
+than the checked-out branch, so switching branches does not change them (pass
+`--ref` to choose another label). Pick a domain that is yours to make up —
+`.local` reaches mDNS on some systems, and a real domain you do not control will
+resolve past your machine. Inside the VM the same names resolve to the guest
+itself, so a ready check or one site calling another reaches the preview rather
+than the internet.
+
+The listener takes the port the sites share inside the VM when it can, which is
+what makes one URL mean the same thing inside the VM and outside it. Sites on
+different guest ports cannot both have that, so the listener falls back to `8080`
+and the command says which sites are affected; `--ingress-port` chooses
+explicitly. It is plain HTTP — nothing here terminates TLS — so an application
+that insists on `https` still needs the hosted preview.
 
 ## Bring one up
 

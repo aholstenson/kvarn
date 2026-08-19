@@ -557,6 +557,11 @@ ask, and a step is free to start something that binds nothing at all. What the
 sites declare is where traffic is sent; `ready` is what decides whether anything
 is listening there.
 
+The bind address is the repository's business too. Traffic is carried into the
+VM from inside it, so a server on the guest's own loopback is reached as
+readily as one on all interfaces: a container published on `127.0.0.1:3000` and
+a dev server bound to `localhost` both work unchanged.
+
 One command may therefore serve every site, whether they share a port or not:
 
 ```yaml

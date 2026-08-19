@@ -173,6 +173,13 @@ type Opts struct {
 	// placeholder so the VM never sees the real value.
 	Secrets map[string]string
 
+	// HostAliases are name → IP mappings added to the guest's name tables on
+	// top of the project's own `network.host_aliases`. They are for names the
+	// caller knows and kvarn.yml cannot: a local preview's site hostnames are
+	// derived from a base domain given on the command line, and the servers
+	// inside the guest still have to resolve them.
+	HostAliases map[string]string
+
 	OnEvent func(Event)
 }
 
@@ -189,10 +196,12 @@ type Session struct {
 	// the workspace is not a git repository or has no commits.
 	BaseCommit string
 
-	// dialGuest is the provider's ingress path into the VM, carried here
+	// dialGuest is the provider's own ingress path into the VM, carried here
 	// because callers that want to reach a server inside the guest hold a
-	// Session rather than the *vm.VM it was booted from. Nil when the provider
-	// has no ingress path.
+	// Session rather than the *vm.VM it was booted from. It reaches the VM's
+	// network address, so it is the fallback: a session with a live runner goes
+	// through the runner instead, which can also reach the guest's loopback.
+	// Nil when the provider has no ingress path.
 	dialGuest func(ctx context.Context, port uint16) (net.Conn, error)
 
 	// bareProxy is the underlying BridgeProxy (not wrapped by container).
@@ -272,20 +281,28 @@ func (s *Session) ExtractChanges(ctx context.Context, destDir string) error {
 	return ExtractChanges(ctx, s.bareProxy, s.WorkingDir, destDir, s.BaseCommit)
 }
 
-// DialGuest opens a TCP connection to a port inside the sandbox's VM. It
-// returns errors.ErrUnsupported when the provider that booted this session has
-// no ingress path, matching the convention the non-darwin provider stubs use.
+// DialGuest opens a TCP connection to a port inside the sandbox's VM. It goes
+// through the runner, which is inside the guest and can therefore reach a
+// server on the guest's own loopback — where a published container port and a
+// dev server bound to localhost both listen, and where a server bound to all
+// interfaces answers as well. Only a session with no runner falls back to the
+// provider's network-level ingress; with neither it returns
+// errors.ErrUnsupported, matching the convention the non-darwin provider stubs
+// use.
 func (s *Session) DialGuest(ctx context.Context, port uint16) (net.Conn, error) {
+	if s.bareProxy != nil {
+		return s.bareProxy.DialGuest(ctx, port)
+	}
 	if s.dialGuest == nil {
 		return nil, fmt.Errorf("dial guest port %d: %w", port, errors.ErrUnsupported)
 	}
 	return s.dialGuest(ctx, port)
 }
 
-// CanDialGuest reports whether this session's provider supports ingress, so a
-// caller can refuse work up front rather than discovering it on the first
+// CanDialGuest reports whether this session can carry traffic into the guest,
+// so a caller can refuse work up front rather than discovering it on the first
 // request.
-func (s *Session) CanDialGuest() bool { return s.dialGuest != nil }
+func (s *Session) CanDialGuest() bool { return s.bareProxy != nil || s.dialGuest != nil }
 
 // Processes returns the session's manager for long-lived guest processes. It
 // is the bare proxy deliberately: a server has to run on the VM itself, not
@@ -470,12 +487,10 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	}
 	allowedHosts = append(allowedHosts, aug.Hosts...)
 	createOpts.Network.AllowedHosts = append(createOpts.Network.AllowedHosts, allowedHosts...)
-	if opts.Config != nil {
-		// Every alias goes to the VM's DNS forwarder, wildcard or not, so the
-		// two resolution paths in the guest agree on the names they both
-		// cover. Only the exact ones can also become /etc/hosts lines.
-		createOpts.Network.HostAliases = opts.Config.Network.HostAliases
-	}
+	// Every alias goes to the VM's DNS forwarder, wildcard or not, so the two
+	// resolution paths in the guest agree on the names they both cover. Only
+	// the exact ones can also become /etc/hosts lines.
+	createOpts.Network.HostAliases = opts.hostAliases()
 	createOpts.Network.OnEgressDenied = func(host string) {
 		sess.recordEgressDenied(host)
 		emit(opts, EgressDeniedEvent{Host: host})
@@ -541,10 +556,8 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	// this one when it is created, and every step runs after this point.
 	// Wildcards are not expressible here and are served by the DNS forwarder
 	// instead.
-	if opts.Config != nil {
-		if err := ConfigureHostAliases(ctx, proxy, opts.Config.Network.ExactHostAliases()); err != nil {
-			return nil, fmt.Errorf("configure host aliases: %w", err)
-		}
+	if err := ConfigureHostAliases(ctx, proxy, exactHostAliases(opts.hostAliases())); err != nil {
+		return nil, fmt.Errorf("configure host aliases: %w", err)
 	}
 
 	// Transfer files.
