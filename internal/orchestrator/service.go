@@ -40,6 +40,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/orchestrator/auth"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	"github.com/aholstenson/kvarn/internal/preview"
+	"github.com/aholstenson/kvarn/internal/preview/snapshot"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
@@ -441,6 +442,22 @@ type Service struct {
 	// previewSandboxFactory creates the sandbox a preview runs in; nil uses
 	// defaultPreviewSandboxFactory.
 	previewSandboxFactory PreviewSandboxFactory
+	// previewSnapshots keeps the state stopped previews left behind; nil means
+	// previews here hold nothing between boots.
+	previewSnapshots snapshot.Store
+}
+
+// previewSnapshotID resolves where a preview's state is kept, which needs the
+// project's repository URL and therefore the project store.
+func (s *Service) previewSnapshotID(ctx context.Context, p *preview.Preview) (snapshot.ID, error) {
+	if s.projectStore == nil {
+		return snapshot.ID{}, errors.New("no project store")
+	}
+	proj, err := s.projectStore.Get(ctx, p.Project)
+	if err != nil {
+		return snapshot.ID{}, fmt.Errorf("load project %q: %w", p.Project, err)
+	}
+	return previewSnapshotID(proj.RepoURL, p.Ref), nil
 }
 
 type ServiceOpts struct {
@@ -481,6 +498,9 @@ type ServiceOpts struct {
 	// PreviewSandboxFactory creates the sandbox a preview runs in; nil boots a
 	// real one.
 	PreviewSandboxFactory PreviewSandboxFactory
+	// PreviewSnapshots keeps the state stopped previews left behind; nil means
+	// previews here hold nothing between boots.
+	PreviewSnapshots snapshot.Store
 }
 
 func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
@@ -500,6 +520,7 @@ func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
 	s.previews = newPreviewManager(nil, PreviewPolicy{}, s.bootPreview)
 	s.previews.auto = newAutoStarter(s.resolvePreviewHost, s.previews.now)
 	s.previews.prState = s.previewPRState
+	s.previews.snapshotIDs = s.previewSnapshotID
 	s.startDispatcher(DispatchPolicy{})
 	return s
 }
@@ -553,10 +574,13 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 		shutdownCancel:        shutdownCancel,
 		running:               make(map[string]runningJob),
 		previewSandboxFactory: opts.PreviewSandboxFactory,
+		previewSnapshots:      opts.PreviewSnapshots,
 	}
 	s.previews = newPreviewManager(opts.PreviewStore, opts.PreviewPolicy, s.bootPreview)
 	s.previews.auto = newAutoStarter(s.resolvePreviewHost, s.previews.now)
 	s.previews.prState = s.previewPRState
+	s.previews.snapshots = opts.PreviewSnapshots
+	s.previews.snapshotIDs = s.previewSnapshotID
 	s.startDispatcher(opts.Dispatch)
 	return s
 }

@@ -42,12 +42,13 @@ type ServeOpts struct {
 	// WorkspaceDir is the guest directory the serve commands run in. A step's
 	// own relative working_dir is resolved under it.
 	WorkspaceDir string
-	// URLs maps site name to the address that site answers on. Every serve step
-	// gets all of them in its environment: a server that cannot emit correct
-	// absolute URLs — for its own assets, for OAuth redirects — is the most
-	// common way a preview ends up half-broken, and one serving several sites
-	// needs all of their names to tell its virtual hosts apart.
-	URLs map[string]string
+	// Env is the preview's own environment, as built by Env: a variable per site
+	// carrying its URL, plus the state directory. Every serve step gets all of
+	// it. A server that cannot emit correct absolute URLs — for its own assets,
+	// for OAuth redirects — is the most common way a preview ends up
+	// half-broken, and one serving several sites needs all of their names to
+	// tell its virtual hosts apart.
+	Env map[string]string
 	// IDPrefix namespaces the guest process IDs, so two previews sharing a
 	// runner cannot collide on the step's position alone.
 	IDPrefix string
@@ -61,24 +62,24 @@ type ServeOpts struct {
 	OnExit func(name string, exitCode int32, err error)
 }
 
-// ExportURLs makes the preview's site URLs visible to everything that runs in
-// the boot's shell session — the preview setup steps and the ready checks. The
-// serve steps get them through their own environment instead, since they are
-// spawned as processes rather than run in that shell.
-func ExportURLs(ctx context.Context, runner sandbox.RunnerProxy, shellSessionID string, urls map[string]string) error {
-	if len(urls) == 0 {
+// ExportEnv makes the preview's environment visible to everything that runs in
+// the boot's shell session — the state hooks, the preview setup steps and the
+// ready checks. The serve steps get the same map through their own environment
+// instead, since they are spawned as processes rather than run in that shell.
+func ExportEnv(ctx context.Context, runner sandbox.RunnerProxy, shellSessionID string, env map[string]string) error {
+	if len(env) == 0 {
 		return nil
 	}
 
-	names := make([]string, 0, len(urls))
-	for name := range urls {
+	names := make([]string, 0, len(env))
+	for name := range env {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
 	exports := make([]string, 0, len(names))
 	for _, name := range names {
-		exports = append(exports, fmt.Sprintf("export %s=%s", project.EnvVarName(name), ShellQuote(urls[name])))
+		exports = append(exports, fmt.Sprintf("export %s=%s", name, ShellQuote(env[name])))
 	}
 
 	execCtx, cancel := context.WithTimeout(ctx, GuestCallTimeout)
@@ -88,24 +89,40 @@ func ExportURLs(ctx context.Context, runner sandbox.RunnerProxy, shellSessionID 
 		Command:   strings.Join(exports, "\n"),
 	}, nil)
 	if err != nil {
-		return fmt.Errorf("export preview URLs: %w", err)
+		return fmt.Errorf("export preview environment: %w", err)
 	}
 	if resp.ExitCode != 0 {
-		return fmt.Errorf("export preview URLs: exit code %s: %s",
+		return fmt.Errorf("export preview environment: exit code %s: %s",
 			FormatExitCode(resp.ExitCode), strings.TrimSpace(resp.Stderr))
 	}
 	return nil
 }
 
 // RunSetup runs the preview's one-shot setup steps in order, each to
-// completion. They run in the same shell session the ready checks use, so the
-// site URLs ExportURLs published are in their environment. The first step that
-// fails, after its retries, fails the boot: a preview whose domains were never
-// configured is not one worth serving.
+// completion. They run in the same shell session the ready checks use, so what
+// ExportEnv published is in their environment. The first step that fails, after
+// its retries, fails the boot: a preview whose domains were never configured is
+// not one worth serving.
 func RunSetup(
 	ctx context.Context,
 	runner sandbox.RunnerProxy,
 	shellSessionID string,
+	steps []project.Step,
+	onStarting func(name string),
+	onOutput func(name, stdout, stderr string),
+	onDone func(name string),
+) error {
+	return runStepList(ctx, runner, shellSessionID, "preview setup step", steps, onStarting, onOutput, onDone)
+}
+
+// runStepList is the one-shot step runner the preview's setup steps and its
+// state hooks share. label completes a sentence naming the offending entry, so
+// a failed database dump does not report itself as a failed setup step.
+func runStepList(
+	ctx context.Context,
+	runner sandbox.RunnerProxy,
+	shellSessionID string,
+	label string,
 	steps []project.Step,
 	onStarting func(name string),
 	onOutput func(name, stdout, stderr string),
@@ -156,7 +173,7 @@ func RunSetup(
 			}
 		}
 		if lastErr != nil {
-			return fmt.Errorf("preview setup step %q failed: %w", step.Name, lastErr)
+			return fmt.Errorf("%s %q failed: %w", label, step.Name, lastErr)
 		}
 		if onDone != nil {
 			onDone(step.Name)
@@ -179,11 +196,6 @@ func StartServices(ctx context.Context, procs sandbox.ProcessRunner, cfg *projec
 		return errors.New("this sandbox cannot run long-lived processes")
 	}
 
-	env := make(map[string]string, len(opts.URLs))
-	for name, url := range opts.URLs {
-		env[project.EnvVarName(name)] = url
-	}
-
 	for i, proc := range cfg.Preview.Serve {
 		workingDir := opts.WorkspaceDir
 		if proc.WorkingDir != "" {
@@ -201,7 +213,7 @@ func StartServices(ctx context.Context, procs sandbox.ProcessRunner, cfg *projec
 			Name:       name,
 			Command:    proc.Run,
 			WorkingDir: workingDir,
-			Env:        env,
+			Env:        opts.Env,
 		}, func(stdout, stderr string) {
 			if opts.OnOutput != nil {
 				opts.OnOutput(name, stdout, stderr)

@@ -31,6 +31,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/observability/metrics"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	"github.com/aholstenson/kvarn/internal/preview"
+	"github.com/aholstenson/kvarn/internal/preview/snapshot"
 	previewsqlite "github.com/aholstenson/kvarn/internal/preview/sqlite"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
@@ -410,6 +411,7 @@ func (c *Cmd) Run() error {
 		return fmt.Errorf("preview: %w", err)
 	}
 	var previewStore preview.Store
+	var previewSnapshots snapshot.Store
 	if previewPolicy.Enabled() {
 		dbPath := c.PreviewsDB
 		if dbPath == "" {
@@ -422,6 +424,16 @@ func (c *Cmd) Run() error {
 		defer store.Close()
 		previewStore = store
 		slog.Info("previews database", "path", dbPath, "domain", previewPolicy.Domain)
+
+		// Preview state sits beside the caches rather than inside them: same
+		// root, its own directory, and swept by age alone, because nothing here
+		// can be rebuilt by re-running a job.
+		stateDir, err := snapshot.DefaultDir()
+		if err != nil {
+			return fmt.Errorf("preview state directory: %w", err)
+		}
+		previewSnapshots = snapshot.NewFileStore(stateDir)
+		slog.Info("preview state", "path", stateDir, "retention", previewPolicy.StateRetention)
 	}
 
 	// Disk overcommit is only safe while something watches the real
@@ -503,6 +515,7 @@ func (c *Cmd) Run() error {
 		Instruments:         instruments,
 		PreviewStore:        previewStore,
 		PreviewPolicy:       previewPolicy,
+		PreviewSnapshots:    previewSnapshots,
 	})
 }
 
@@ -514,6 +527,11 @@ const (
 	defaultPreviewIdleTimeout   = 30 * time.Minute
 	defaultPreviewMaxLifetime   = 8 * time.Hour
 	defaultPreviewMaxConcurrent = 3
+	// A month of retention is long enough that coming back to a pull request
+	// after a holiday still finds the preview as it was left, and short enough
+	// that a merged branch nobody deleted does not keep a database on the host
+	// forever. Restoring a preview restarts the clock.
+	defaultPreviewStateRetention = 30 * 24 * time.Hour
 )
 
 // resolvePreviewPolicy turns the [preview] table into the resolved policy. An
@@ -562,6 +580,28 @@ func resolvePreviewPolicy(cfg orchcfg.Preview) (PreviewPolicy, error) {
 			return PreviewPolicy{}, fmt.Errorf("max_disk: %w", err)
 		}
 		policy.MaxDiskBytes = size
+	}
+
+	if policy.StateTimeout, err = resolvePreviewDuration(
+		cfg.StateTimeout, "state_timeout", defaultPreviewStateTimeout); err != nil {
+		return PreviewPolicy{}, err
+	}
+	if policy.StateTimeout == 0 {
+		// Unlike the reaping timeouts, "0" here is not a way to disable
+		// something: it is a capture with no budget, which is a drain that never
+		// returns.
+		return PreviewPolicy{}, errors.New("state_timeout must be greater than zero")
+	}
+	if policy.StateRetention, err = resolvePreviewDuration(
+		cfg.StateRetention, "state_retention", defaultPreviewStateRetention); err != nil {
+		return PreviewPolicy{}, err
+	}
+	if cfg.MaxStateSize != "" {
+		size, err := projconfig.ParseSize(cfg.MaxStateSize)
+		if err != nil {
+			return PreviewPolicy{}, fmt.Errorf("max_state_size: %w", err)
+		}
+		policy.MaxStateBytes = size
 	}
 	return policy, nil
 }

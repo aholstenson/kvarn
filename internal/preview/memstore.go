@@ -135,6 +135,7 @@ func (m *memStore) ResetLive(_ context.Context) ([]string, error) {
 		p.StartedAt = time.Time{}
 		p.ExpiresAt = time.Time{}
 		p.SessionID = ""
+		p.StateError = ""
 		reset = append(reset, id)
 	}
 	sort.Strings(reset)

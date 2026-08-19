@@ -127,8 +127,9 @@ var _ = Describe("StartServices", func() {
 		procs := newStubProcesses()
 		err := preview.StartServices(context.Background(), procs, cfg, preview.ServeOpts{
 			WorkspaceDir: "/home/kvarn/workspace",
-			URLs:         map[string]string{"web": "http://localhost:3000", "api": "http://localhost:8080"},
-			IDPrefix:     "local",
+			Env: preview.Env(map[string]string{
+				"web": "http://localhost:3000", "api": "http://localhost:8080"}),
+			IDPrefix: "local",
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(procs.started).To(HaveLen(2))
@@ -142,6 +143,8 @@ var _ = Describe("StartServices", func() {
 		// their names.
 		Expect(web.Env).To(HaveKeyWithValue("KVARN_PREVIEW_URL_WEB", "http://localhost:3000"))
 		Expect(web.Env).To(HaveKeyWithValue("KVARN_PREVIEW_URL_API", "http://localhost:8080"))
+		// And where to keep anything it wants to still be there after a stop.
+		Expect(web.Env).To(HaveKeyWithValue("KVARN_PREVIEW_STATE_DIR", "/home/kvarn/state"))
 
 		Expect(procs.started[1].WorkingDir).To(Equal("/home/kvarn/workspace/backend"))
 	})
@@ -183,30 +186,31 @@ var _ = Describe("StartServices", func() {
 	})
 })
 
-var _ = Describe("ExportURLs", func() {
-	It("exports every site URL into the shell session", func() {
+var _ = Describe("ExportEnv", func() {
+	It("exports every site URL and the state directory into the shell session", func() {
 		runner := &stubRunner{}
-		err := preview.ExportURLs(context.Background(), runner, "shell", map[string]string{
+		err := preview.ExportEnv(context.Background(), runner, "shell", preview.Env(map[string]string{
 			"web":      "https://main.preview.example.com",
 			"admin-ui": "https://admin-main.preview.example.com",
-		})
+		}))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(runner.calls()).To(Equal([]string{
-			"export KVARN_PREVIEW_URL_ADMIN_UI='https://admin-main.preview.example.com'\n" +
+			"export KVARN_PREVIEW_STATE_DIR='/home/kvarn/state'\n" +
+				"export KVARN_PREVIEW_URL_ADMIN_UI='https://admin-main.preview.example.com'\n" +
 				"export KVARN_PREVIEW_URL_WEB='https://main.preview.example.com'",
 		}))
 	})
 
-	It("does nothing when there are no sites", func() {
+	It("does nothing when there is nothing to export", func() {
 		runner := &stubRunner{}
-		Expect(preview.ExportURLs(context.Background(), runner, "shell", nil)).To(Succeed())
+		Expect(preview.ExportEnv(context.Background(), runner, "shell", nil)).To(Succeed())
 		Expect(runner.calls()).To(BeEmpty())
 	})
 
 	It("reports a shell that would not take the exports", func() {
 		runner := &stubRunner{responses: []*v1.SessionExecResponse{{ExitCode: 1, Stderr: "read-only"}}}
-		err := preview.ExportURLs(context.Background(), runner, "shell", map[string]string{"web": "https://x"})
-		Expect(err).To(MatchError(ContainSubstring("export preview URLs")))
+		err := preview.ExportEnv(context.Background(), runner, "shell", map[string]string{"X": "https://x"})
+		Expect(err).To(MatchError(ContainSubstring("export preview environment")))
 	})
 })
 

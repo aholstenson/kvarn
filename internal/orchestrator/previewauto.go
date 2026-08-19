@@ -95,6 +95,10 @@ type previewTarget struct {
 	Ref string
 	// PR is the pull request, spelled the way the forge spells one.
 	PR string
+	// Fork says the pull request's head lives in a fork rather than in the
+	// project's own repository. Resolving the hostname is the only place that is
+	// known, and it decides whether the preview may ever keep state.
+	Fork bool
 }
 
 // previewHostResolver answers what an unclaimed hostname should boot. It is a
@@ -269,6 +273,7 @@ func (m *previewManager) AutoStart(ctx context.Context, host string) (*preview.P
 	p, err := m.Register(ctx, target.Project, target.Ref, previewOrigin{
 		PR:            target.PR,
 		AutoStartHost: host,
+		Fork:          target.Fork,
 	})
 	if err != nil {
 		return nil, err
@@ -424,7 +429,7 @@ func (s *Service) resolvePreviewHost(ctx context.Context, host string) (previewT
 		return previewTarget{}, fmt.Errorf("pull request %s does not name a head branch", match.PR)
 	}
 
-	return previewTarget{Project: proj.Name, Ref: pr.HeadBranch, PR: match.PR}, nil
+	return previewTarget{Project: proj.Name, Ref: pr.HeadBranch, PR: match.PR, Fork: isForkPR(pr)}, nil
 }
 
 // previewRouter compiles every project's auto-start patterns.

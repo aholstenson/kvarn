@@ -23,6 +23,11 @@ import (
 const (
 	GuestHome      = "/home/kvarn"
 	GuestWorkspace = "/home/kvarn/workspace"
+	// GuestPreviewState is the directory a preview environment keeps state in
+	// between boots. It sits outside GuestWorkspace on purpose: the workspace is
+	// a fresh clone on every boot, so anything kept there would be clobbered by
+	// the next one.
+	GuestPreviewState = "/home/kvarn/state"
 )
 
 const (
@@ -923,7 +928,15 @@ func (c *Config) validate() error {
 		return fmt.Errorf("pull_request: %w", err)
 	}
 
-	if err := c.Preview.validate(); err != nil {
+	// Preview state paths are checked against the cache paths, which the loop
+	// above has already normalized, so the overlap check compares absolute guest
+	// paths on both sides.
+	cachePaths := make([]string, 0, len(c.Cache.Paths)+len(c.Cache.Entries))
+	cachePaths = append(cachePaths, c.Cache.Paths...)
+	for _, e := range c.Cache.Entries {
+		cachePaths = append(cachePaths, e.Path)
+	}
+	if err := c.Preview.validate(cachePaths); err != nil {
 		return fmt.Errorf("preview: %w", err)
 	}
 

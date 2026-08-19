@@ -194,11 +194,41 @@
           "description": "Checks that decide when the preview may take traffic. Run in order and retried until they pass or the boot gives up.",
           "type": "array",
           "items": { "$ref": "#/$defs/step" }
+        },
+        "state": {
+          "$ref": "#/$defs/previewState"
         }
       }
     }
   },
   "$defs": {
+    "previewState": {
+      "description": "What this preview keeps between boots. Everything under $KVARN_PREVIEW_STATE_DIR (/home/kvarn/state) is captured on every graceful stop and unpacked on the next boot with nothing declared here; these fields are for state that lives elsewhere, and for a database that would rather be kept as a logical dump. Previews of a fork's pull request never keep state.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "save": {
+          "description": "Commands run before the state is captured, with the servers still up. Where a stack quiesces a database or writes a dump into $KVARN_PREVIEW_STATE_DIR.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" }
+        },
+        "restore": {
+          "description": "Commands run after the state has been unpacked and before the preview's setup steps. The mirror of `save`: loading the dump back.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/step" }
+        },
+        "paths": {
+          "description": "Extra guest directories captured alongside the state directory. Absolute, or ~-relative to /home/kvarn. May not sit inside the state directory (captured twice) nor overlap a cached path.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "max_size": {
+          "description": "Cap on the captured archive, e.g. \"2GiB\". A capture over the cap fails and leaves the previous archive in place.",
+          "type": "string",
+          "pattern": "^\\s*[0-9]+(M|MiB|G|GiB)\\s*$"
+        }
+      }
+    },
     "previewSite": {
       "description": "One hostname the preview answers on, and the guest port behind it.",
       "type": "object",

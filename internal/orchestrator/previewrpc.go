@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"connectrpc.com/connect"
@@ -34,6 +35,14 @@ func (s *Service) StartPreview(ctx context.Context, req *connect.Request[v1.Star
 	p, err := s.previews.Register(ctx, req.Msg.Project, req.Msg.Ref, previewOrigin{PR: req.Msg.Pr})
 	if err != nil {
 		return nil, previewConnectError(err)
+	}
+
+	// Discarding before the boot rather than skipping the restore inside it: a
+	// preview whose saved state no longer restores should come up clean and stay
+	// that way, not come up clean and then be captured over the archive that was
+	// already unusable.
+	if req.Msg.Fresh {
+		s.previews.ResetState(ctx, p.ID)
 	}
 
 	if _, err := s.previews.EnsureNow(ctx, p.ID); err != nil {
@@ -101,7 +110,11 @@ func (s *Service) StopPreview(ctx context.Context, req *connect.Request[v1.StopP
 		return connect.NewResponse(&v1.StopPreviewResponse{Preview: previewToProto(p)}), nil
 	}
 
-	if err := s.previews.Stop(ctx, id, "stopped by request"); err != nil {
+	stop := s.previews.Stop
+	if req.Msg.SkipState {
+		stop = s.previews.StopWithoutState
+	}
+	if err := stop(ctx, id, "stopped by request"); err != nil {
 		return nil, previewConnectError(err)
 	}
 	if updated, err := s.previews.Get(ctx, id); err == nil {
@@ -206,10 +219,85 @@ func (s *Service) WatchPreview(ctx context.Context, req *connect.Request[v1.Watc
 	}
 }
 
+// ResetPreviewState drops a preview's saved state. The preview keeps its
+// record, its hostnames and its place in the world; only what it was holding
+// goes away, so the next boot comes up as if nothing had ever run there.
+func (s *Service) ResetPreviewState(ctx context.Context, req *connect.Request[v1.ResetPreviewStateRequest]) (*connect.Response[v1.ResetPreviewStateResponse], error) {
+	if err := s.authorizeProject(ctx, req.Msg.Project, req.Spec().Procedure); err != nil {
+		return nil, err
+	}
+	if err := validatePreviewTarget(req.Msg.Project, req.Msg.Ref); err != nil {
+		return nil, err
+	}
+
+	id := preview.ID(req.Msg.Project, req.Msg.Ref)
+	if _, err := s.previews.Get(ctx, id); err != nil {
+		return nil, previewConnectError(err)
+	}
+
+	// A preview that is running would capture over whatever this deletes the
+	// moment it stops, so the reset would silently not have happened.
+	if s.previews.IsLive(id) {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New(
+			"this preview is running; stop it with `kvarn preview down --no-state` before resetting its state"))
+	}
+
+	s.previews.ResetState(ctx, id)
+
+	p, err := s.previews.Get(ctx, id)
+	if err != nil {
+		return nil, previewConnectError(err)
+	}
+	reqid.LoggerFrom(ctx).Info("preview state reset", "preview", id)
+	return connect.NewResponse(&v1.ResetPreviewStateResponse{Preview: previewToProto(p)}), nil
+}
+
+// PrunePreviewState runs the state sweep by hand. It is the same work the
+// periodic sweeper does, for an operator who wants the disk back now rather
+// than at the next tick.
+func (s *Service) PrunePreviewState(ctx context.Context, req *connect.Request[v1.PrunePreviewStateRequest]) (*connect.Response[v1.PrunePreviewStateResponse], error) {
+	// Pruning is host-wide rather than per-project, so it is an operator action
+	// and is authorized as one.
+	if err := s.authorizeHost(ctx, req.Spec().Procedure); err != nil {
+		return nil, err
+	}
+	if !s.previews.enabled() {
+		return nil, previewConnectError(ErrPreviewsDisabled)
+	}
+
+	retention := s.previews.policy.StateRetention
+	if req.Msg.OlderThan != "" {
+		d, err := time.ParseDuration(req.Msg.OlderThan)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("older_than: %w", err))
+		}
+		if d <= 0 {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				errors.New("older_than must be greater than zero"))
+		}
+		retention = d
+	}
+
+	report, err := s.previews.pruneState(retention)
+	if err != nil {
+		return nil, previewConnectError(err)
+	}
+	reqid.LoggerFrom(ctx).Info("preview state pruned",
+		"archives", report.Removed, "bytes", report.BytesFreed, "retention", retention)
+	return connect.NewResponse(&v1.PrunePreviewStateResponse{
+		Removed:    int32(report.Removed),
+		BytesFreed: report.BytesFreed,
+	}), nil
+}
+
 // previewPhase is the human-readable step a booting preview is on, read from
 // the session its boot reports through.
 func (s *Service) previewPhase(ctx context.Context, p *preview.Preview) string {
-	if p.SessionID == "" || s.sessionMgr == nil {
+	// A preview writing its state out still carries the session of the boot that
+	// brought it up, whose last word was "ready"; its own state is the truthful
+	// answer until the capture finishes.
+	if p.State == preview.StateStopping || p.SessionID == "" || s.sessionMgr == nil {
 		return previewPhaseFallback(p.State)
 	}
 	sess, err := s.sessionMgr.Get(ctx, p.SessionID)
@@ -295,5 +383,10 @@ func previewToProto(p *preview.Preview) *v1.Preview {
 	if !p.ExpiresAt.IsZero() {
 		out.ExpiresAt = timestamppb.New(p.ExpiresAt)
 	}
+	if !p.StateSavedAt.IsZero() {
+		out.StateSavedAt = timestamppb.New(p.StateSavedAt)
+	}
+	out.StateBytes = p.StateBytes
+	out.StateError = p.StateError
 	return out
 }

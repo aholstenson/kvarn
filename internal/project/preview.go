@@ -42,6 +42,55 @@ type Preview struct {
 	// are ordinary steps, run in order, and retried until they pass or the boot
 	// gives up.
 	Ready []Step `yaml:"ready,omitempty"`
+	// State is what survives the preview being stopped. Without it a preview
+	// holds nothing: it is stopped when it goes idle, destroyed, and re-derived
+	// from the branch on the next request, which loses whatever a reviewer
+	// entered into it.
+	State PreviewState `yaml:"state,omitempty"`
+}
+
+// PreviewState declares what a preview keeps between boots.
+//
+// Everything under GuestPreviewState is kept automatically — that directory is
+// created for every preview and is what $KVARN_PREVIEW_STATE_DIR points at, so
+// a compose stack that bind-mounts a volume out of it round-trips with nothing
+// declared here at all. The fields exist for the two cases that need more: a
+// data directory that lives somewhere else, and a database that would rather be
+// kept as a logical dump than as raw files, which is also the honest answer to
+// engine and schema drift between the commit that wrote the state and the one
+// that reads it back.
+type PreviewState struct {
+	// Save runs before the state is captured, with the preview's servers still
+	// up and the site URLs still in the environment. It is where a stack
+	// quiesces a database or writes a dump into $KVARN_PREVIEW_STATE_DIR.
+	Save []Step `yaml:"save,omitempty"`
+	// Restore runs after the state has been unpacked and before the preview's
+	// setup steps, and is the mirror of Save: loading the dump back.
+	Restore []Step `yaml:"restore,omitempty"`
+	// Paths are extra guest directories captured alongside the state directory,
+	// for state that cannot be moved under it.
+	Paths []string `yaml:"paths,omitempty"`
+	// MaxSize caps the captured archive. A capture over the cap fails rather
+	// than filling the operator's disk, and leaves the previous archive in
+	// place. Empty means the operator's own ceiling is the only limit.
+	MaxSize string `yaml:"max_size,omitempty"`
+}
+
+// Declared reports whether the repository has said anything about state. It is
+// not the whole answer to "is there state to capture" — a preview that only
+// ever wrote into $KVARN_PREVIEW_STATE_DIR declares nothing and still has data
+// — but it is the half that can be answered without asking the guest.
+func (s PreviewState) Declared() bool {
+	return len(s.Save) > 0 || len(s.Restore) > 0 || len(s.Paths) > 0
+}
+
+// MaxSizeBytes returns the parsed cap, or 0 when none is declared.
+func (s PreviewState) MaxSizeBytes() int64 {
+	if s.MaxSize == "" {
+		return 0
+	}
+	size, _ := ParseSize(s.MaxSize)
+	return size
 }
 
 // PreviewSite is one hostname the preview answers on, and the port that answers
@@ -272,6 +321,11 @@ func EnvVarName(site string) string {
 	return "KVARN_PREVIEW_URL_" + strings.ToUpper(strings.ReplaceAll(site, "-", "_"))
 }
 
+// EnvVarStateDir is the environment variable holding the directory a preview
+// keeps state in. It is exported everywhere the site URLs are, so a save or
+// restore hook, a setup step and a serve process all name the same place.
+const EnvVarStateDir = "KVARN_PREVIEW_STATE_DIR"
+
 // validate checks the preview block on its own terms: names, ports, the shape
 // of each host pattern, and that every step it declares is runnable.
 //
@@ -280,10 +334,10 @@ func EnvVarName(site string) string {
 // here is that a pattern names `{ref}` correctly and adds nothing that would
 // take the result outside a domain suffix; the containment check itself
 // happens at resolution.
-func (p Preview) validate() error {
+func (p *Preview) validate(cachePaths []string) error {
 	if len(p.Sites) == 0 {
-		if len(p.Setup) > 0 || len(p.Serve) > 0 || len(p.Ready) > 0 {
-			return errors.New("declares setup, serve or ready steps but no sites")
+		if len(p.Setup) > 0 || len(p.Serve) > 0 || len(p.Ready) > 0 || p.State.Declared() {
+			return errors.New("declares setup, serve, ready or state but no sites")
 		}
 		return nil
 	}
@@ -349,7 +403,64 @@ func (p Preview) validate() error {
 	if err := validatePreviewSteps("setup step", p.Setup); err != nil {
 		return err
 	}
-	return validatePreviewSteps("ready check", p.Ready)
+	if err := validatePreviewSteps("ready check", p.Ready); err != nil {
+		return err
+	}
+	return p.State.validate(cachePaths)
+}
+
+// validate checks the state block and normalizes its paths in place, so
+// everything downstream sees absolute guest paths.
+func (s *PreviewState) validate(cachePaths []string) error {
+	if err := validatePreviewSteps("state save step", s.Save); err != nil {
+		return err
+	}
+	if err := validatePreviewSteps("state restore step", s.Restore); err != nil {
+		return err
+	}
+	if s.MaxSize != "" {
+		if _, err := ParseSize(s.MaxSize); err != nil {
+			return fmt.Errorf("state.max_size: %w", err)
+		}
+	}
+
+	seen := make(map[string]struct{}, len(s.Paths))
+	for i, p := range s.Paths {
+		norm, err := validateCachePath("state.paths", p)
+		if err != nil {
+			return err
+		}
+		if _, dup := seen[norm]; dup {
+			return fmt.Errorf("state.paths entry %q is declared twice", p)
+		}
+		seen[norm] = struct{}{}
+
+		// The state directory is captured whole already, so naming a path under
+		// it puts the same bytes in the archive twice.
+		if nestsUnder(norm, GuestPreviewState) {
+			return fmt.Errorf(
+				"state.paths entry %q is inside %s, which is already captured; drop the entry",
+				p, GuestPreviewState)
+		}
+		// A directory that is both cached and kept as state has two mechanisms
+		// writing it with different rules — the cache is write-once and
+		// content-addressed, the state archive is last-write-wins — and which
+		// one a boot ends up with would depend on ordering.
+		for _, cached := range cachePaths {
+			if nestsUnder(norm, cached) {
+				return fmt.Errorf(
+					"state.paths entry %q overlaps the cached path %q; a directory cannot be both cache and state",
+					p, cached)
+			}
+		}
+		s.Paths[i] = norm
+	}
+	return nil
+}
+
+// nestsUnder reports whether path is root or sits beneath it.
+func nestsUnder(path, root string) bool {
+	return path == root || strings.HasPrefix(path, strings.TrimSuffix(root, "/")+"/")
 }
 
 // validatePreviewSteps checks the shape shared by the preview's one-shot step

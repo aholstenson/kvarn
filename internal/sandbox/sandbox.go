@@ -274,6 +274,17 @@ func (s *Session) BareProxy() *BridgeProxy {
 	return s.bareProxy
 }
 
+// BareRunner is BareProxy behind the general runner interface, for callers that
+// only need to run commands in the VM itself and should not have to know what
+// carries them. It returns a nil interface rather than a typed nil pointer when
+// there is no bridge, so a caller's nil check means what it looks like.
+func (s *Session) BareRunner() RunnerProxy {
+	if s.bareProxy == nil {
+		return nil
+	}
+	return s.bareProxy
+}
+
 // ExtractChanges copies changed files from the VM workspace back to a host
 // directory. It identifies modified/added/deleted files via git commands,
 // reads each changed file, writes them to destDir, and removes deleted files.

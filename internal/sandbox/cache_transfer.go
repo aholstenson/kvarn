@@ -62,7 +62,7 @@ func RestoreCache(ctx context.Context, proxy RunnerProxy, provider cache.Provide
 		// otherwise caching a nested path like /home/kvarn/.cache/nix would
 		// leave /home/kvarn/.cache root-owned, and the job's own writes there
 		// (e.g. Go creating .cache/go-build) would be denied.
-		chownTargets := strings.Join(ownedDirs(guestPath), " ")
+		chownTargets := strings.Join(OwnedDirs(guestPath), " ")
 		script := fmt.Sprintf("mkdir -p %s && chown kvarn:kvarn %s && tar -C %s --zstd --owner=kvarn --group=kvarn -xf %s && rm %s",
 			guestPath, chownTargets, guestPath, tmpFile, tmpFile)
 		resp, err := proxy.Exec(ctx, &v1.ExecRequest{
@@ -192,14 +192,18 @@ func tempName(key cache.Key) string {
 	return string(out) + "-" + key.InputKey
 }
 
-// ownedDirs returns the directory chain that must be chowned to the kvarn user
+// OwnedDirs returns the directory chain that must be chowned to the kvarn user
 // after a privileged mkdir -p of guestPath: every path component below the
 // kvarn home directory, down to and including guestPath. This fixes ancestors
 // that mkdir -p created as root (e.g. /home/kvarn/.cache when caching
 // /home/kvarn/.cache/nix). For paths outside the home directory only the leaf
 // is returned — the caller cannot assume the kvarn user owns arbitrary system
 // directories, matching the prior leaf-only behavior for such paths.
-func ownedDirs(guestPath string) []string {
+//
+// Exported because preview state transfers face the same problem with the same
+// answer: a declared state path several levels under the home directory is
+// created by the same privileged mkdir -p and needs the same chown chain.
+func OwnedDirs(guestPath string) []string {
 	if guestPath == kvarnHome || !strings.HasPrefix(guestPath, kvarnHome+"/") {
 		return []string{guestPath}
 	}

@@ -190,10 +190,12 @@ long-lived VM pinned to a branch, reachable at a stable hostname.
 
 | Subcommand | Purpose |
 | --- | --- |
-| `up <project> <ref>` | Register a preview of a branch and boot it. Prints each boot phase to stderr and the URLs to stdout. `--no-wait` returns as soon as the boot starts. `--pr <n>` gives the pull request that a repository whose site hostnames use `{pr}` needs. |
-| `down <project> <ref>` | Stop the VM, keeping the record and hostname so the next request boots it again. `--remove` forgets the preview entirely and releases its hostnames. |
-| `ls` | Preview environments with their state, URL, and how long since each booted and was last requested. `--project`. |
+| `up <project> <ref>` | Register a preview of a branch and boot it. Prints each boot phase to stderr and the URLs to stdout. `--no-wait` returns as soon as the boot starts. `--pr <n>` gives the pull request that a repository whose site hostnames use `{pr}` needs. `--fresh` discards the preview's saved state first, so it comes up empty. |
+| `down <project> <ref>` | Stop the VM, saving whatever state the repository declared and keeping the record and hostname so the next request boots it again. `--no-state` skips the save. `--remove` forgets the preview entirely, releases its hostnames and drops its saved state. |
+| `ls` | Preview environments with their state, URL, how long since each booted and was last requested, and how much saved state each holds. `--project`. |
 | `logs <project> <ref>` | The retained tail of what the preview's services printed. |
+| `reset <project> <ref>` | Drop a preview's saved state without touching the preview. It has to be stopped first, or the next stop would write over what this deleted. |
+| `prune` | Drop saved preview state nothing has come back to, the sweep the orchestrator runs periodically. `--older-than 720h` overrides the configured retention. |
 
 All take `--addr`, `--api-key` and `--json`.
 
@@ -251,6 +253,8 @@ servers streams to the terminal once the preview is up.
 | `--ref` | `local` | Ref label the `{ref}` part of a site's host pattern expands to. |
 | `--pr` | `local` | What the `{pr}` part of a site's host pattern expands to, for a repository whose sites are named by pull request. |
 | `--ingress-port` | the shared guest port, else `8080` | Host port every site is served on with `--base-domain`. |
+| `--fresh` | off | Discard the preview's saved state before booting, so it comes up empty. |
+| `--no-state` | off | Do not save the preview's state on the way out. |
 
 A site is served on the port it listens on inside the VM whenever that port is
 free on the host, so its own absolute URLs keep working; if it is taken, the
@@ -267,6 +271,11 @@ Host-routed listener serves all of them. `--port` does not apply then; use
 resolve to `127.0.0.1` on this machine, and the command prints the `/etc/hosts`
 line to add for any that do not. See
 [preview environments](../how-to/preview-environments.md#serve-them-under-real-hostnames).
+
+A repository that declares [`preview.state`](kvarn-yml.md#previewstate) keeps
+its state here too: it is unpacked before setup runs and written back out on
+Ctrl-C, keyed on the working directory and `--ref`. `--no-cache` governs the
+tool cache only — state is separate, and `--fresh` is what ignores it.
 
 ## `kvarn key`
 

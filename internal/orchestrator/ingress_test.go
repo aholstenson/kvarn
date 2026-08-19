@@ -28,6 +28,7 @@ import (
 
 // dialSandbox is a PreviewSandbox whose guest is a local TCP address.
 type dialSandbox struct {
+	statelessSandbox
 	addr string
 
 	mu     sync.Mutex
@@ -712,6 +713,26 @@ var _ = Describe("Preview ingress", func() {
 			}).Should(Equal("1"))
 		})
 
+		It("says a preview is saving its state, not that it is stopped", func() {
+			// The preview's VM is still up and its boot session's last word was
+			// "ready", so reading the phase off that session would tell somebody
+			// watching the holding page that the preview is running. The state
+			// itself is the truthful answer until the capture finishes.
+			p := registerStopped()
+			p.State = preview.StateStopping
+			p.SessionID = "sess-from-the-boot"
+			Expect(store.Put(ctx, p)).To(Succeed())
+
+			resp := xhrGet(previewStatusPath)
+			Expect(resp.Header.Get(previewStatusHeader)).To(Equal("1"))
+
+			var status struct {
+				Phase string `json:"phase"`
+			}
+			Expect(json.NewDecoder(resp.Body).Decode(&status)).To(Succeed())
+			Expect(status.Phase).To(Equal("Saving state"))
+		})
+
 		It("drops the mark once the preview serves, which is what tells the page to reload", func() {
 			// Most apps have no route here and answer 404. The page must read
 			// that as "the preview is up" rather than as a failed poll, so the
@@ -763,6 +784,7 @@ var _ = Describe("Preview ingress", func() {
 // portSandbox dials a different local address per guest port, so one spec can
 // prove that each app's traffic reaches its own server.
 type portSandbox struct {
+	statelessSandbox
 	ports map[uint16]string
 }
 

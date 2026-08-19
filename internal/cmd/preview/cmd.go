@@ -22,10 +22,12 @@ import (
 
 // Cmd is the parent command for `kvarn preview <subcommand>`.
 type Cmd struct {
-	Up   UpCmd   `cmd:"" help:"Start a preview environment for a branch."`
-	Down DownCmd `cmd:"" help:"Stop a preview environment."`
-	List ListCmd `cmd:"" help:"List preview environments."`
-	Logs LogsCmd `cmd:"" help:"Print the recent output of a preview's services."`
+	Up    UpCmd    `cmd:"" help:"Start a preview environment for a branch."`
+	Down  DownCmd  `cmd:"" help:"Stop a preview environment."`
+	List  ListCmd  `cmd:"" help:"List preview environments."`
+	Logs  LogsCmd  `cmd:"" help:"Print the recent output of a preview's services."`
+	Reset ResetCmd `cmd:"" help:"Drop a preview's saved state, so the next start comes up empty."`
+	Prune PruneCmd `cmd:"" help:"Drop saved preview state nothing has come back to."`
 }
 
 // connectFlags are what every subcommand needs to reach the orchestrator.
@@ -81,6 +83,20 @@ func formatAge(ts *timestamppb.Timestamp) string {
 		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
 	default:
 		return fmt.Sprintf("%dd%dh", int(d.Hours())/24, int(d.Hours())%24)
+	}
+}
+
+// formatBytes renders a saved-state size in the units a person reads.
+func formatBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1fG", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1fM", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1fK", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%dB", n)
 	}
 }
 

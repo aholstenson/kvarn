@@ -3,6 +3,8 @@ package cache_test
 import (
 	"bytes"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -196,6 +198,28 @@ var _ = Describe("FileCache", func() {
 			report, err := fc.Evict(cache.Quota{PerProjectBytes: 1 << 20, GlobalBytes: 1 << 20})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(report.RemovedEntries).To(BeZero())
+		})
+
+		It("leaves the cache root's other tenants alone", func() {
+			// Images, mirrors and preview state share the cache root and are not
+			// projects. Preview state in particular is the only copy of what
+			// somebody entered into a preview, so a size-driven sweep must not
+			// reach it whatever shape its files take.
+			for _, sibling := range []string{"images", "image-cache", "repos", "preview-state"} {
+				dir := filepath.Join(fc.BaseDir, sibling, "inner", "deeper")
+				Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
+				Expect(os.WriteFile(filepath.Join(dir, "k.meta"),
+					[]byte(`{"inputKey":"k","sizeBytes":1000}`), 0o644)).To(Succeed())
+				Expect(os.WriteFile(filepath.Join(dir, "k.tar.zst"),
+					bytes.Repeat([]byte("x"), 1000), 0o644)).To(Succeed())
+			}
+
+			report, err := fc.Evict(cache.Quota{PerProjectBytes: 1, GlobalBytes: 1})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(report.RemovedEntries).To(BeZero())
+
+			Expect(filepath.Join(fc.BaseDir, "preview-state", "inner", "deeper", "k.tar.zst")).
+				To(BeAnExistingFile())
 		})
 	})
 })

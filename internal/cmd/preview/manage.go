@@ -22,8 +22,12 @@ type DownCmd struct {
 	// Stopping leaves the record and its hostnames in place, so the next
 	// request boots the preview again. --remove is for when that is not wanted:
 	// the branch is gone, or the name should be freed.
-	Remove bool `help:"Forget the preview entirely and release its hostnames."`
-	JSON   bool `help:"Emit JSON instead of a summary." name:"json"`
+	Remove bool `help:"Forget the preview entirely, release its hostnames and drop its saved state."`
+	// Stopping normally saves whatever the preview was holding, so the next boot
+	// comes back to it. --no-state is for a preview whose contents are in the
+	// way: a half-migrated database, a seed that went wrong.
+	NoState bool `help:"Take the preview down without saving its state." name:"no-state"`
+	JSON    bool `help:"Emit JSON instead of a summary." name:"json"`
 }
 
 func (c *DownCmd) Run() error {
@@ -31,9 +35,10 @@ func (c *DownCmd) Run() error {
 	oc := c.client()
 
 	resp, err := oc.StopPreview(ctx, connect.NewRequest(&v1.StopPreviewRequest{
-		Project: c.Project,
-		Ref:     c.Ref,
-		Remove:  c.Remove,
+		Project:   c.Project,
+		Ref:       c.Ref,
+		Remove:    c.Remove,
+		SkipState: c.NoState,
 	}))
 	if err != nil {
 		return fmt.Errorf("stop preview: %w", err)
@@ -46,7 +51,75 @@ func (c *DownCmd) Run() error {
 		fmt.Fprintf(os.Stderr, "Removed the preview of %s.\n", c.Ref)
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "Stopped the preview of %s; the next request will start it again.\n", c.Ref)
+	p := resp.Msg.Preview
+	switch {
+	case p.GetStateError() != "":
+		fmt.Fprintf(os.Stderr, "Stopped the preview of %s, but its state could not be saved: %s\n",
+			c.Ref, p.GetStateError())
+	case p.GetStateBytes() > 0:
+		fmt.Fprintf(os.Stderr, "Stopped the preview of %s and saved %s of state; the next request starts it again.\n",
+			c.Ref, formatBytes(p.GetStateBytes()))
+	default:
+		fmt.Fprintf(os.Stderr, "Stopped the preview of %s; the next request will start it again.\n", c.Ref)
+	}
+	return nil
+}
+
+// ResetCmd drops a preview's saved state without touching the preview itself.
+type ResetCmd struct {
+	connectFlags
+
+	Project string `arg:"" help:"Project the branch belongs to."`
+	Ref     string `arg:"" help:"Branch whose saved state to drop."`
+
+	JSON bool `help:"Emit JSON instead of a summary." name:"json"`
+}
+
+func (c *ResetCmd) Run() error {
+	ctx := context.Background()
+	oc := c.client()
+
+	resp, err := oc.ResetPreviewState(ctx, connect.NewRequest(&v1.ResetPreviewStateRequest{
+		Project: c.Project,
+		Ref:     c.Ref,
+	}))
+	if err != nil {
+		return fmt.Errorf("reset preview state: %w", err)
+	}
+	if c.JSON {
+		return printJSON(resp.Msg.Preview)
+	}
+	fmt.Fprintf(os.Stderr, "Dropped the saved state of %s; the next start comes up empty.\n", c.Ref)
+	return nil
+}
+
+// PruneCmd runs the state sweep by hand.
+type PruneCmd struct {
+	connectFlags
+
+	OlderThan string `help:"Drop archives untouched for longer than this (e.g. 720h). Empty uses the orchestrator's own retention." name:"older-than"`
+	JSON      bool   `help:"Emit JSON instead of a summary." name:"json"`
+}
+
+func (c *PruneCmd) Run() error {
+	ctx := context.Background()
+	oc := c.client()
+
+	resp, err := oc.PrunePreviewState(ctx, connect.NewRequest(&v1.PrunePreviewStateRequest{
+		OlderThan: c.OlderThan,
+	}))
+	if err != nil {
+		return fmt.Errorf("prune preview state: %w", err)
+	}
+	if c.JSON {
+		return printJSON(resp.Msg)
+	}
+	if resp.Msg.Removed == 0 {
+		fmt.Fprintln(os.Stderr, "No preview state was old enough to drop.")
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "Dropped %d saved preview state archives, freeing %s.\n",
+		resp.Msg.Removed, formatBytes(resp.Msg.BytesFreed))
 	return nil
 }
 
@@ -82,18 +155,32 @@ func (c *ListCmd) Run() error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "PROJECT\tREF\tSTATE\tURL\tSTARTED\tLAST REQUEST")
+	fmt.Fprintln(w, "PROJECT\tREF\tSTATE\tURL\tSTARTED\tLAST REQUEST\tDATA")
 	for _, p := range previews {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.Project,
 			p.Ref,
 			p.State,
 			dash(p.Url),
 			formatAge(p.StartedAt),
 			formatAge(p.LastRequestAt),
+			formatSavedState(p),
 		)
 	}
 	return w.Flush()
+}
+
+// formatSavedState renders what a preview is holding: its size and how long ago
+// it was written, "failed" when the last capture did not finish, and "-" for a
+// preview that keeps nothing.
+func formatSavedState(p *v1.Preview) string {
+	if p.GetStateError() != "" {
+		return "failed"
+	}
+	if p.GetStateBytes() == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%s (%s)", formatBytes(p.GetStateBytes()), formatAge(p.GetStateSavedAt()))
 }
 
 // LogsCmd prints the recent output of a preview's services.

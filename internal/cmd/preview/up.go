@@ -18,9 +18,10 @@ type UpCmd struct {
 	Project string `arg:"" help:"Project the branch belongs to."`
 	Ref     string `arg:"" help:"Branch to preview."`
 
-	PR   string `help:"Pull request the branch belongs to, for repositories whose site hostnames use {pr}." name:"pr"`
-	Wait bool   `help:"Wait for the preview to be serving before returning." default:"true" negatable:""`
-	JSON bool `help:"Emit JSON instead of a summary." name:"json"`
+	PR    string `help:"Pull request the branch belongs to, for repositories whose site hostnames use {pr}." name:"pr"`
+	Wait  bool   `help:"Wait for the preview to be serving before returning." default:"true" negatable:""`
+	Fresh bool   `help:"Discard the preview's saved state before booting, so it comes up empty." name:"fresh"`
+	JSON  bool   `help:"Emit JSON instead of a summary." name:"json"`
 }
 
 func (c *UpCmd) Run() error {
@@ -35,6 +36,7 @@ func (c *UpCmd) Run() error {
 		Project: c.Project,
 		Ref:     c.Ref,
 		Pr:      c.PR,
+		Fresh:   c.Fresh,
 	}))
 	if err != nil {
 		return fmt.Errorf("start preview: %w", err)
@@ -103,6 +105,12 @@ func report(p *v1.Preview) error {
 		return fmt.Errorf("preview of %s failed to start: %s", p.Ref, dash(p.Error))
 	case "booting":
 		fmt.Fprintf(os.Stderr, "Preview of %s is starting; follow it with kvarn jobs watch %s\n", p.Ref, p.SessionId)
+		return nil
+	case "stopping":
+		// The previous stop is still writing the preview's state out. Booting on
+		// top of that would restore the archive it is about to replace, so the
+		// answer is to wait rather than to start something.
+		fmt.Fprintf(os.Stderr, "Preview of %s is saving its state; run this again once it has finished.\n", p.Ref)
 		return nil
 	default:
 		fmt.Fprintf(os.Stderr, "Preview of %s is %s.\n", p.Ref, p.State)

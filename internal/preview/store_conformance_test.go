@@ -111,6 +111,35 @@ func DescribeStore(name string, newStore func() preview.Store) bool {
 			Expect(got.AutoStarted()).To(BeTrue())
 		})
 
+		It("remembers what state a preview has stored and that it is of a fork", func() {
+			p := makePreview("proj/feature", "proj", "feature", preview.StateStopped, base,
+				"pr-12.preview.example.com")
+			p.StateSavedAt = base.Add(time.Hour)
+			p.StateBytes = 4711
+			p.StateError = "tar failed"
+			p.Fork = true
+			Expect(store.Put(ctx, p)).To(Succeed())
+
+			got, err := store.Get(ctx, "proj/feature")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.StateSavedAt).To(BeTemporally("==", base.Add(time.Hour)))
+			Expect(got.StateBytes).To(Equal(int64(4711)))
+			Expect(got.StateError).To(Equal("tar failed"))
+			Expect(got.Fork).To(BeTrue())
+		})
+
+		It("reports a preview that has never stored state as having none", func() {
+			p := makePreview("proj/main", "proj", "main", preview.StateStopped, base,
+				"main.preview.example.com")
+			Expect(store.Put(ctx, p)).To(Succeed())
+
+			got, err := store.Get(ctx, "proj/main")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.StateSavedAt.IsZero()).To(BeTrue())
+			Expect(got.StateBytes).To(BeZero())
+			Expect(got.Fork).To(BeFalse())
+		})
+
 		It("reports a preview nobody auto-started as such", func() {
 			p := makePreview("proj/main", "proj", "main", preview.StateStopped, base,
 				"main.preview.example.com")
@@ -294,6 +323,30 @@ func DescribeStore(name string, newStore func() preview.Store) bool {
 			got, err := store.Get(ctx, "proj/c")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got.LastRequestAt).To(BeTemporally("==", base))
+		})
+
+		It("resets a preview a crash caught mid-capture, keeping the archive it already had", func() {
+			stopping := makePreview("proj/a", "proj", "a", preview.StateStopping, base, "a.preview.example.com")
+			stopping.SessionID = "sess-a"
+			stopping.StartedAt = base
+			stopping.StateSavedAt = base.Add(-time.Hour)
+			stopping.StateBytes = 2048
+			stopping.StateError = "a reason from the process that died"
+			Expect(store.Put(ctx, stopping)).To(Succeed())
+
+			reset, err := store.ResetLive(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reset).To(ConsistOf("proj/a"))
+
+			got, err := store.Get(ctx, "proj/a")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.State).To(Equal(preview.StateStopped))
+			// The capture never finished, so the reason it did not is stale; the
+			// archive from the boot before it is still on disk and still the one
+			// the next boot restores.
+			Expect(got.StateError).To(BeEmpty())
+			Expect(got.StateSavedAt).To(BeTemporally("==", base.Add(-time.Hour)))
+			Expect(got.StateBytes).To(Equal(int64(2048)))
 		})
 
 		It("resets a failed preview too, so the next request can boot it", func() {

@@ -15,6 +15,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/logging"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	"github.com/aholstenson/kvarn/internal/preview"
+	"github.com/aholstenson/kvarn/internal/preview/snapshot"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
@@ -185,6 +186,8 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 
 	releaseStaging()
 
+	snapshotID := previewSnapshotID(proj.RepoURL, p.Ref)
+
 	lease, err := s.acquirePreviewCapacity(ctx, proj.Name, cfg)
 	if err != nil {
 		return nil, err
@@ -206,14 +209,17 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 	}
 	s.applyPreviewLimits(&createOpts, cfg)
 
-	// The site URLs have to be in the environment before the serve commands run:
-	// a server that cannot emit correct absolute URLs for its own assets is the
-	// most common way a preview ends up half-broken.
-	for _, site := range sites {
+	// The preview's own environment has to be in place before the serve commands
+	// run: a server that cannot emit correct absolute URLs for its own assets is
+	// the most common way a preview ends up half-broken, and one that cannot
+	// find its state directory writes its data somewhere the next boot will not
+	// look.
+	previewEnv := preview.Env(previewURLs(sites))
+	for name, value := range previewEnv {
 		if secretEnv == nil {
 			secretEnv = map[string]string{}
 		}
-		secretEnv[projconfig.EnvVarName(site.Name)] = site.URL()
+		secretEnv[name] = value
 	}
 
 	create := s.previewSandboxFactory
@@ -258,6 +264,14 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 		}
 	}
 
+	// State goes back before the preview's own setup runs. A stack that
+	// bind-mounts a database volume out of the state directory has to find it
+	// populated by the time its containers come up, and a restore hook has to
+	// run against a database the setup steps have not migrated yet.
+	if err := s.restorePreviewState(ctx, sandboxSession, cfg, p, snapshotID, sessionID, logs); err != nil {
+		return nil, err
+	}
+
 	if err := s.runPreviewSetup(ctx, sandboxSession, cfg, sites, sessionID, logs); err != nil {
 		return nil, err
 	}
@@ -283,11 +297,80 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 
 	succeeded = true
 	return &previewBoot{
-		Sandbox:   sandboxSession,
-		Sites:     resolved,
-		SessionID: sessionID,
-		Lease:     lease,
+		Sandbox:    sandboxSession,
+		Sites:      resolved,
+		SessionID:  sessionID,
+		Lease:      lease,
+		Config:     cfg,
+		SnapshotID: snapshotID,
+		Commit:     sandboxSession.GetBaseCommit(),
 	}, nil
+}
+
+// previewSnapshotID says where a preview's state archive lives: under the same
+// project identity the tool caches use, in a file named by the ref's DNS label.
+// Both halves are derived rather than stored, so the tree stays readable and a
+// ref with slashes in it is still one filename.
+func previewSnapshotID(repoURL, ref string) snapshot.ID {
+	return snapshot.ID{
+		ProjectID: cache.ProjectID(repoURL),
+		RefLabel:  projconfig.RefLabel(ref),
+	}
+}
+
+// restorePreviewState puts back what the preview's last stop wrote out, then
+// runs the repository's restore steps.
+//
+// A failure fails the boot. Coming up empty after somebody spent an afternoon
+// entering data is worse than refusing to come up and saying why, and there are
+// two ways past it: `preview up --fresh` and `preview reset`.
+func (s *Service) restorePreviewState(
+	ctx context.Context,
+	sess previewBootSandbox,
+	cfg *projconfig.Config,
+	p *preview.Preview,
+	snapshotID snapshot.ID,
+	sessionID string,
+	logs *preview.LogBuffer,
+) error {
+	proxy := sess.BareRunner()
+	if proxy == nil {
+		return fmt.Errorf("this sandbox cannot carry preview state into the guest: %w", errors.ErrUnsupported)
+	}
+
+	// The directory exists on every boot, declared state or not: a setup step
+	// that writes into $KVARN_PREVIEW_STATE_DIR must find somewhere to write.
+	if err := preview.PrepareStateDir(ctx, proxy); err != nil {
+		return err
+	}
+	if s.previewSnapshots == nil || p.Fork {
+		return nil
+	}
+
+	restored, err := preview.Restore(ctx, preview.RestoreOpts{
+		Proxy:          proxy,
+		Runner:         sess.GetRunner(),
+		ShellSessionID: sess.GetShellSessionID(),
+		Store:          s.previewSnapshots,
+		ID:             snapshotID,
+		State:          cfg.Preview.State,
+		OnStep: func(name string) {
+			logs.Append(fmt.Sprintf("==> %s\n", name))
+			s.sessionMgr.UpdateState(ctx, sessionID, session.StateSetup,
+				fmt.Sprintf("Restoring state: %s", name))
+		},
+		OnOutput: func(_ string, stdout, stderr string) {
+			logs.Append(stdout)
+			logs.Append(stderr)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("restore preview state: %w", err)
+	}
+	if restored {
+		s.sessionMgr.UpdateState(ctx, sessionID, session.StateSetup, "Restored saved state")
+	}
+	return nil
 }
 
 // checkAutoStartHost fails a boot whose sites do not answer on the hostname
@@ -436,7 +519,7 @@ func (s *Service) runPreviewSetup(
 	sessionID string,
 	logs *preview.LogBuffer,
 ) error {
-	if err := preview.ExportURLs(ctx, sess.GetRunner(), sess.GetShellSessionID(), previewURLs(sites)); err != nil {
+	if err := preview.ExportEnv(ctx, sess.GetRunner(), sess.GetShellSessionID(), preview.Env(previewURLs(sites))); err != nil {
 		return err
 	}
 	if len(cfg.Preview.Setup) == 0 {
@@ -478,11 +561,9 @@ func (s *Service) startPreviewServices(
 	previewID string,
 	logs *preview.LogBuffer,
 ) error {
-	urls := previewURLs(sites)
-
 	return preview.StartServices(ctx, sess.Processes(), cfg, preview.ServeOpts{
 		WorkspaceDir: s.workspaceDir,
-		URLs:         urls,
+		Env:          preview.Env(previewURLs(sites)),
 		IDPrefix:     previewID,
 		OnStarting: func(name string) {
 			logs.Append(fmt.Sprintf("==> starting %s\n", name))

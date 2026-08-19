@@ -12,6 +12,7 @@ import (
 
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	"github.com/aholstenson/kvarn/internal/preview"
+	"github.com/aholstenson/kvarn/internal/preview/snapshot"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 )
@@ -59,6 +60,12 @@ const previewReapInterval = 30 * time.Second
 // ignores it: somebody who just fixed the kvarn.yml should not have to wait.
 const previewBootRetryDelay = 2 * time.Minute
 
+// defaultPreviewStateTimeout bounds one preview's state capture when the
+// operator has not said otherwise. It has to fit a database dump and a tar of a
+// data directory, and it is what a drain waits on per preview, so it is
+// generous rather than open-ended.
+const defaultPreviewStateTimeout = 2 * time.Minute
+
 // PreviewPolicy is the resolved [preview] configuration. A zero Domain disables
 // previews entirely.
 type PreviewPolicy struct {
@@ -76,6 +83,17 @@ type PreviewPolicy struct {
 	// below whatever its kvarn.yml asks for. Zero leaves the request alone.
 	MaxMemoryBytes uint64
 	MaxDiskBytes   int64
+	// StateTimeout bounds how long one preview's state capture may take. It is
+	// what keeps a drain or a shutdown from waiting on a repository whose save
+	// hook never returns.
+	StateTimeout time.Duration
+	// StateRetention drops state archives untouched for this long. Zero never
+	// prunes.
+	StateRetention time.Duration
+	// MaxStateBytes is the operator's ceiling on one preview's archive, over
+	// whatever the repository's own max_size asks for. Zero leaves the
+	// repository's answer alone.
+	MaxStateBytes int64
 }
 
 // Enabled reports whether previews are configured at all.
@@ -88,8 +106,24 @@ func (p PreviewPolicy) Enabled() bool { return p.Domain != "" }
 type PreviewSandbox interface {
 	// DialGuest opens a connection to a port inside the VM.
 	DialGuest(ctx context.Context, port uint16) (net.Conn, error)
-	// Close stops the serve processes and destroys the VM.
+	// Close destroys the VM, taking its serve processes with it.
 	Close()
+
+	// The rest is what a graceful stop needs in order to leave something behind.
+	// A capture has to shut the servers down, run the repository's save hook in
+	// the boot's own shell, and tar the result out — all while the VM is still
+	// up, which is why these outlive the boot rather than ending with it.
+
+	// BareRunner talks straight to the VM rather than through whatever container
+	// a step wrapped itself in, which is where the tar has to run.
+	BareRunner() sandbox.RunnerProxy
+	// GetRunner and GetShellSessionID are the shell the save hook runs in, with
+	// the preview's environment still exported into it.
+	GetRunner() sandbox.RunnerProxy
+	GetShellSessionID() string
+	// Processes supervises the serve steps, and is how they are asked to stop
+	// before their data is captured.
+	Processes() sandbox.ProcessRunner
 }
 
 // previewBootSandbox is the wider surface the boot itself drives. It is a
@@ -100,10 +134,8 @@ type previewBootSandbox interface {
 	PreviewSandbox
 
 	CanDialGuest() bool
-	Processes() sandbox.ProcessRunner
-	GetRunner() sandbox.RunnerProxy
-	GetShellSessionID() string
 	GetWorkingDir() string
+	GetBaseCommit() string
 	RunSetup(ctx context.Context, cfg *projconfig.Config, onDone sandbox.OnStepDone, onOutput sandbox.OnOutput) (*sandbox.SetupResult, error)
 }
 
@@ -128,6 +160,13 @@ type previewInstance struct {
 	// startedAt is when the VM came up, for the max-lifetime cap.
 	startedAt time.Time
 
+	// cfg, snapshotID and commit are what capturing this preview's state needs
+	// and only its boot knows: which servers to stop and which state to keep,
+	// where the archive belongs, and which commit produced it.
+	cfg        *projconfig.Config
+	snapshotID snapshot.ID
+	commit     string
+
 	closeOnce sync.Once
 }
 
@@ -144,12 +183,29 @@ func (i *previewInstance) close() {
 	})
 }
 
+// state is what the repository declared about keeping state, tolerant of an
+// instance built by a spec that supplied no config.
+func (i *previewInstance) state() projconfig.PreviewState {
+	if i.cfg == nil {
+		return projconfig.PreviewState{}
+	}
+	return i.cfg.Preview.State
+}
+
 // previewBoot is the result of provisioning one preview.
 type previewBoot struct {
 	Sandbox   PreviewSandbox
 	Sites     []preview.Site
 	SessionID string
 	Lease     scheduler.Lease
+	// Config is the kvarn.yml the preview came up on, kept because stopping it
+	// needs to know which servers to shut down and what state to keep.
+	Config *projconfig.Config
+	// SnapshotID names this preview's state archive on the host.
+	SnapshotID snapshot.ID
+	// Commit is what the workspace was checked out at, recorded on whatever
+	// archive this boot produces.
+	Commit string
 }
 
 // previewBooter provisions a preview: clone, read kvarn.yml, take capacity,
@@ -176,6 +232,14 @@ type previewManager struct {
 	// that an auto-started preview has outlived its reason to exist. Nil leaves
 	// those previews to the ordinary idle and lifetime reaping.
 	prState previewPRState
+	// snapshots is where a stopped preview's declared state is kept. Nil means
+	// previews here hold nothing between boots: every stop is a discard and
+	// every boot comes up fresh.
+	snapshots snapshot.Store
+	// snapshotIDs says which archive a preview's state belongs to. It is a
+	// function because the answer is derived from the project's repository URL,
+	// which lives in the project store rather than on the preview record.
+	snapshotIDs func(ctx context.Context, p *preview.Preview) (snapshot.ID, error)
 
 	mu sync.Mutex
 	// live holds the in-memory half of every preview currently holding
@@ -284,6 +348,11 @@ type previewOrigin struct {
 	PR string
 	// AutoStartHost is the hostname whose request brought it into being.
 	AutoStartHost string
+	// Fork says the pull request's head lives in a fork. It is only ever known
+	// on the auto-start path, which is the only path that asks the forge; an
+	// explicit `kvarn preview up` names a ref in the project's own repository
+	// and leaves it false.
+	Fork bool
 }
 
 // Register creates or refreshes the durable record for a preview of a ref,
@@ -323,6 +392,13 @@ func (m *previewManager) Register(ctx context.Context, project, ref string, orig
 			existing.AutoStartHost = origin.AutoStartHost
 			changed = true
 		}
+		// Fork only ever goes on. Learning that a branch is a fork's is a
+		// restriction, and the caller that does not know — an explicit start —
+		// must not be able to lift one that a hostname resolution established.
+		if origin.Fork && !existing.Fork {
+			existing.Fork = true
+			changed = true
+		}
 		if !changed {
 			return existing, nil
 		}
@@ -339,6 +415,7 @@ func (m *previewManager) Register(ctx context.Context, project, ref string, orig
 		Ref:           ref,
 		PR:            origin.PR,
 		AutoStartHost: origin.AutoStartHost,
+		Fork:          origin.Fork,
 		State:         preview.StateStopped,
 		CreatedAt:     now,
 		UpdatedAt:     now,
@@ -394,6 +471,13 @@ func (m *previewManager) ensure(ctx context.Context, id string, force bool) (*pr
 		return p, nil
 	}
 	if isBooting {
+		return p, nil
+	}
+	// A preview whose state is still being written out is neither running nor
+	// ready to boot. Booting one now would restore the archive the capture is
+	// about to replace, so the caller gets the record and the holding page keeps
+	// polling until the capture finishes and the row says stopped.
+	if p.State == preview.StateStopping {
 		return p, nil
 	}
 	if !force && p.State == preview.StateFailed &&
@@ -499,11 +583,14 @@ func (m *previewManager) runBoot(ctx context.Context, p *preview.Preview, logs *
 	}
 
 	instance := &previewInstance{
-		sandbox:   boot.Sandbox,
-		sites:     boot.Sites,
-		sessionID: boot.SessionID,
-		lease:     boot.Lease,
-		startedAt: m.now().UTC(),
+		sandbox:    boot.Sandbox,
+		sites:      boot.Sites,
+		sessionID:  boot.SessionID,
+		lease:      boot.Lease,
+		startedAt:  m.now().UTC(),
+		cfg:        boot.Config,
+		snapshotID: boot.SnapshotID,
+		commit:     boot.Commit,
 	}
 
 	m.mu.Lock()
@@ -654,14 +741,22 @@ func lastRequest(p *preview.Preview) time.Time {
 	return p.LastRequestAt
 }
 
-// stopInstance tears down a preview's in-memory half without touching the
-// store. Returns whether there was anything to stop.
-func (m *previewManager) stopInstance(id string) bool {
+// takeInstance hands a preview's in-memory half to exactly one caller. The
+// reaper, a drain and an explicit `preview down` can all reach a stop at once;
+// deleting under the lock is what decides which of them does the work, and the
+// losers see nil.
+func (m *previewManager) takeInstance(id string) *previewInstance {
 	m.mu.Lock()
 	instance := m.live[id]
 	delete(m.live, id)
 	m.mu.Unlock()
+	return instance
+}
 
+// stopInstance tears down a preview's in-memory half without touching the store
+// or its state. Returns whether there was anything to stop.
+func (m *previewManager) stopInstance(id string) bool {
+	instance := m.takeInstance(id)
 	if instance == nil {
 		return false
 	}
@@ -669,24 +764,53 @@ func (m *previewManager) stopInstance(id string) bool {
 	return true
 }
 
-// Stop takes a preview's VM down and records it as stopped. The record and its
-// hostnames stay: the next request boots it again.
+// Stop takes a preview's VM down and records it as stopped, keeping whatever
+// state it declared. The record and its hostnames stay: the next request boots
+// it again, onto the state this stop wrote out.
 func (m *previewManager) Stop(ctx context.Context, id, reason string) error {
+	return m.stop(ctx, id, reason, true)
+}
+
+// StopWithoutState takes a preview down and throws away what it was holding.
+// It is what `preview down --no-state` and Remove use: both are somebody saying
+// this preview's contents are finished with.
+func (m *previewManager) StopWithoutState(ctx context.Context, id, reason string) error {
+	return m.stop(ctx, id, reason, false)
+}
+
+func (m *previewManager) stop(ctx context.Context, id, reason string, keepState bool) error {
 	if !m.enabled() {
 		return ErrPreviewsDisabled
 	}
 
-	stopped := m.stopInstance(id)
+	// The instance comes out of m.live before anything slow happens. A capture
+	// takes as long as a tar of a database, and nothing may route into a VM
+	// whose servers are being shut down underneath it.
+	instance := m.takeInstance(id)
 
 	p, err := m.store.Get(ctx, id)
 	if errors.Is(err, preview.ErrNotFound) {
+		if instance != nil {
+			instance.close()
+		}
 		return nil
 	}
 	if err != nil {
+		if instance != nil {
+			instance.close()
+		}
 		return err
 	}
-	if p.State == preview.StateStopped && !stopped {
+	// Somebody else already took this preview down, or is still capturing it.
+	// Overwriting their row with "stopped" while their tar is running would
+	// hand the next request a VM that is halfway gone.
+	if instance == nil && (p.State == preview.StateStopped || p.State == preview.StateStopping) {
 		return nil
+	}
+
+	if instance != nil {
+		m.captureState(ctx, p, instance, keepState)
+		instance.close()
 	}
 
 	p.State = preview.StateStopped
@@ -702,18 +826,197 @@ func (m *previewManager) Stop(ctx context.Context, id, reason string) error {
 	return nil
 }
 
-// Remove stops a preview and forgets it, releasing its hostnames.
+// captureState writes a stopping preview's declared state out, updating the
+// record in place with what happened. It never returns an error: a capture that
+// fails must not keep a drain or a shutdown waiting, and must not leave a VM
+// running because its data could not be saved. The reason lands on the record
+// instead, where `preview ls` and `preview logs` can report it.
+func (m *previewManager) captureState(ctx context.Context, p *preview.Preview, instance *previewInstance, keepState bool) {
+	if !keepState || m.snapshots == nil || instance.cfg == nil {
+		return
+	}
+	// A fork's branch is written by somebody without push access. Whatever their
+	// code put on disk — including anything it wrote out of the project's own
+	// secrets — is not going to sit on the operator's host for a month.
+	if p.Fork {
+		return
+	}
+
+	captureCtx, cancel := m.captureContext(ctx)
+	defer cancel()
+
+	st := instance.state()
+	proxy := instance.sandbox.BareRunner()
+	if proxy == nil {
+		return
+	}
+
+	// A repository that declares nothing may still have written into the state
+	// directory, so the guest is asked before the preview is moved into
+	// "stopping" — a preview that holds nothing tears down in exactly the number
+	// of calls it always did.
+	if !st.Declared() {
+		has, err := preview.HasState(captureCtx, proxy, st)
+		if err != nil {
+			m.log.Warn("could not check a preview for state", "preview", p.ID, "error", err)
+			return
+		}
+		if !has {
+			return
+		}
+	}
+
+	p.State = preview.StateStopping
+	p.StateError = ""
+	p.UpdatedAt = m.now().UTC()
+	if err := m.store.Put(ctx, p); err != nil {
+		m.log.Warn("could not record a preview as saving its state", "preview", p.ID, "error", err)
+	}
+
+	logs := m.logBuffer(p.ID)
+	if err := preview.StopServices(captureCtx, instance.sandbox.Processes(),
+		instance.cfg, p.ID, preview.DefaultStopGrace); err != nil {
+		// The servers could not be asked to stop, so whatever is captured next
+		// was taken from under a running process. Worth saying, not worth
+		// abandoning the capture over: a database that was not shut down cleanly
+		// still restores more often than no database at all.
+		m.log.Warn("could not stop a preview's services before capturing its state",
+			"preview", p.ID, "error", err)
+		logs.Append(fmt.Sprintf("==> could not stop services before saving state: %v\n", err))
+	}
+
+	meta, err := preview.Capture(captureCtx, preview.CaptureOpts{
+		Proxy:          proxy,
+		Runner:         instance.sandbox.GetRunner(),
+		ShellSessionID: instance.sandbox.GetShellSessionID(),
+		Store:          m.snapshots,
+		ID:             instance.snapshotID,
+		State:          st,
+		MaxBytes:       m.stateCap(st),
+		Meta: snapshot.Meta{
+			Commit: instance.commit,
+			Hosts:  p.Hosts(),
+			Ref:    p.Ref,
+		},
+		OnStep: func(name string) {
+			logs.Append(fmt.Sprintf("==> %s\n", name))
+		},
+		OnOutput: func(_ string, stdout, stderr string) {
+			logs.Append(stdout)
+			logs.Append(stderr)
+		},
+	})
+	if err != nil {
+		p.StateError = err.Error()
+		m.log.Warn("could not save a preview's state", "preview", p.ID, "error", err)
+		logs.Append(fmt.Sprintf("==> saving state failed: %v\n", err))
+		return
+	}
+	if meta.CreatedAt.IsZero() {
+		// Nothing was there after all; the declared paths do not exist in this
+		// guest yet.
+		return
+	}
+
+	p.StateSavedAt = meta.CreatedAt
+	p.StateBytes = meta.Bytes
+	p.StateError = ""
+	m.log.Info("saved preview state", "preview", p.ID, "bytes", meta.Bytes)
+}
+
+// snapshotID resolves a preview's archive identity, reporting false when there
+// is no way to work it out — a manager built without a resolver, or a project
+// that has since been removed from projects.toml.
+func (m *previewManager) snapshotID(ctx context.Context, p *preview.Preview) (snapshot.ID, bool) {
+	if m.snapshotIDs == nil {
+		return snapshot.ID{}, false
+	}
+	id, err := m.snapshotIDs(ctx, p)
+	if err != nil {
+		m.log.Warn("could not resolve where a preview's state is kept",
+			"preview", p.ID, "error", err)
+		return snapshot.ID{}, false
+	}
+	return id, true
+}
+
+// stateCap is the ceiling on one preview's archive: the repository's own
+// max_size, brought down to the operator's if that is lower.
+func (m *previewManager) stateCap(st projconfig.PreviewState) int64 {
+	want := st.MaxSizeBytes()
+	limit := m.policy.MaxStateBytes
+	switch {
+	case limit <= 0:
+		return want
+	case want <= 0 || want > limit:
+		return limit
+	default:
+		return want
+	}
+}
+
+// captureContext bounds one capture and detaches it from whoever asked for the
+// stop. The caller's context is the wrong clock here: a drain carries an RPC
+// deadline, and `kvarn local preview` reaches its teardown with a context that
+// the interrupt already cancelled. Neither is a reason to lose the data.
+func (m *previewManager) captureContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	budget := m.policy.StateTimeout
+	if budget <= 0 {
+		budget = defaultPreviewStateTimeout
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), budget)
+}
+
+// Remove stops a preview and forgets it, releasing its hostnames and dropping
+// whatever state it had stored.
+//
+// Nothing is captured on the way out: this path is somebody saying the preview
+// is finished with, and keeping an archive for a preview that no longer exists
+// would leave data on disk that nothing can ever restore or explain.
 func (m *previewManager) Remove(ctx context.Context, id string) error {
 	if !m.enabled() {
 		return ErrPreviewsDisabled
 	}
-	if err := m.Stop(ctx, id, "removed"); err != nil {
+	if err := m.StopWithoutState(ctx, id, "removed"); err != nil {
 		return err
 	}
+	m.ResetState(ctx, id)
 	m.mu.Lock()
 	delete(m.logs, id)
 	m.mu.Unlock()
 	return m.store.Delete(ctx, id)
+}
+
+// ResetState drops a preview's stored state, so the next boot comes up as if
+// nothing had ever run there. It is best-effort on the archive and exact on the
+// record: an archive that could not be deleted is logged, but the record must
+// not keep claiming state that is no longer restorable.
+func (m *previewManager) ResetState(ctx context.Context, id string) {
+	if m.snapshots == nil {
+		return
+	}
+	p, err := m.store.Get(ctx, id)
+	if err != nil {
+		return
+	}
+	sid, ok := m.snapshotID(ctx, p)
+	if !ok {
+		return
+	}
+	if err := m.snapshots.Delete(sid); err != nil {
+		m.log.Warn("could not delete a preview's stored state", "preview", id, "error", err)
+		return
+	}
+	if p.StateSavedAt.IsZero() && p.StateBytes == 0 && p.StateError == "" {
+		return
+	}
+	p.StateSavedAt = time.Time{}
+	p.StateBytes = 0
+	p.StateError = ""
+	p.UpdatedAt = m.now().UTC()
+	if err := m.store.Put(ctx, p); err != nil {
+		m.log.Warn("could not clear a preview's state record", "preview", id, "error", err)
+	}
 }
 
 // DialGuest opens a connection into a running preview's VM. It reports false
@@ -788,12 +1091,34 @@ func (m *previewManager) SetDraining(ctx context.Context, draining bool) {
 	}
 	m.mu.Unlock()
 
+	m.stopAll(ctx, ids, "host draining")
+}
+
+// stopAll takes several previews down at once.
+//
+// Sequentially would be simpler, and was enough while stopping a preview meant
+// destroying a VM. A capture is a tar of a database, so N previews stopped one
+// after another is N state timeouts end to end — and the VMs are independent, so
+// there is nothing to be gained by making them wait for each other. The bound
+// keeps a host with a dozen previews from thrashing its disk.
+func (m *previewManager) stopAll(ctx context.Context, ids []string, reason string) {
 	sort.Strings(ids)
+
+	const concurrency = 4
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
 	for _, id := range ids {
-		if err := m.Stop(ctx, id, "host draining"); err != nil {
-			m.log.Warn("could not stop preview while draining", "preview", id, "error", err)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if err := m.Stop(ctx, id, reason); err != nil {
+				m.log.Warn("could not stop preview", "preview", id, "reason", reason, "error", err)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 // StartReaper runs idle, max-lifetime and closed-pull-request reaping until ctx
@@ -812,6 +1137,24 @@ func (m *previewManager) StartReaper(ctx context.Context) {
 					return
 				case <-t.C:
 					m.Reap(ctx)
+				}
+			}
+		}()
+	}
+
+	// Stored state is swept on its own clock too. Retention is measured in
+	// weeks, so this is the slowest of the three and does no work at all on a
+	// host where no preview has ever kept anything.
+	if m.snapshots != nil && m.policy.StateRetention > 0 {
+		go func() {
+			t := time.NewTicker(previewPruneInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					m.PruneState(ctx)
 				}
 			}
 		}()
@@ -887,11 +1230,54 @@ func (m *previewManager) Shutdown(ctx context.Context) {
 		ids = append(ids, id)
 	}
 	m.mu.Unlock()
-	sort.Strings(ids)
 
-	for _, id := range ids {
-		if err := m.Stop(ctx, id, "orchestrator shutting down"); err != nil {
-			m.log.Warn("could not stop preview during shutdown", "preview", id, "error", err)
-		}
+	m.stopAll(ctx, ids, "orchestrator shutting down")
+}
+
+// previewPruneInterval is how often stored preview state is swept for archives
+// nobody has come back to. Retention is measured in weeks, so an hourly tick is
+// already far more often than it needs to be.
+const previewPruneInterval = time.Hour
+
+// PruneState drops state archives untouched for longer than the configured
+// retention. An expired archive is not an error: the next boot of that preview
+// comes up fresh and says so.
+//
+// Previews running right now are excluded — their archives are about to be
+// rewritten by the stop that takes them down, and sweeping one out from under a
+// live preview would silently turn a stop into a discard.
+func (m *previewManager) PruneState(context.Context) {
+	if m.snapshots == nil || m.policy.StateRetention <= 0 {
+		return
 	}
+	report, err := m.pruneState(m.policy.StateRetention)
+	if err != nil {
+		m.log.Warn("could not prune stored preview state", "error", err)
+		return
+	}
+	if report.Removed > 0 {
+		m.log.Info("pruned stored preview state",
+			"archives", report.Removed, "bytes", report.BytesFreed,
+			"retention", m.policy.StateRetention)
+	}
+}
+
+// pruneState is the sweep itself, taking the horizon as an argument so an
+// operator running it by hand can name a different one.
+func (m *previewManager) pruneState(retention time.Duration) (snapshot.PruneReport, error) {
+	if m.snapshots == nil {
+		return snapshot.PruneReport{}, ErrPreviewsDisabled
+	}
+
+	m.mu.Lock()
+	live := make(map[snapshot.ID]struct{}, len(m.live))
+	for _, instance := range m.live {
+		live[instance.snapshotID] = struct{}{}
+	}
+	m.mu.Unlock()
+
+	return m.snapshots.Prune(retention, func(id snapshot.ID) bool {
+		_, running := live[id]
+		return running
+	})
 }

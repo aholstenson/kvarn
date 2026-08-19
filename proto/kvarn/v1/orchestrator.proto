@@ -557,7 +557,9 @@ message Preview {
   string id = 1;
   string project = 2;
   string ref = 3;
-  // State is one of stopped, booting, running, failed.
+  // State is one of stopped, booting, running, stopping, failed. "stopping"
+  // means the VM is still up but nothing routes to it: its servers are being
+  // shut down and its declared state written out.
   string state = 4;
   // Sites are the addresses this preview answers on. Several may share a port
   // when one server answers under several hostnames.
@@ -578,6 +580,13 @@ message Preview {
   google.protobuf.Timestamp expires_at = 12;
   // Url is the address to hand a person who asked for "the" preview.
   string url = 13;
+  // StateSavedAt is when this preview's state archive was last written; unset
+  // when it keeps no state. StateBytes is that archive's compressed size.
+  google.protobuf.Timestamp state_saved_at = 14;
+  int64 state_bytes = 15;
+  // StateError is why the last capture failed, if it did. A capture never
+  // blocks a stop, so a failure is reported here rather than by the stop.
+  string state_error = 16;
 }
 
 message PreviewSite {
@@ -602,6 +611,10 @@ message StartPreviewRequest {
   // whose preview hostnames are named by pull request needs it; a repository
   // whose sites are named by ref does not.
   string pr = 4;
+  // Fresh discards whatever state this preview had saved before booting it, so
+  // it comes up as it would the first time. It is the escape from a snapshot
+  // that no longer restores onto the branch's current code.
+  bool fresh = 5;
 }
 
 message StartPreviewResponse {
@@ -612,8 +625,11 @@ message StopPreviewRequest {
   string project = 1;
   string ref = 2;
   // Remove deletes the record and releases its hostnames, rather than leaving
-  // a stopped preview the next request would boot again.
+  // a stopped preview the next request would boot again. It also drops the
+  // preview's saved state: nothing would ever restore it again.
   bool remove = 3;
+  // SkipState takes the preview down without saving what it was holding.
+  bool skip_state = 4;
 }
 
 message StopPreviewResponse {
@@ -655,6 +671,32 @@ message PreviewUpdate {
   string phase = 2;
 }
 
+// ResetPreviewStateRequest drops a preview's saved state, so the next boot
+// comes up as if nothing had ever run there. The preview itself is untouched.
+message ResetPreviewStateRequest {
+  string project = 1;
+  string ref = 2;
+}
+
+message ResetPreviewStateResponse {
+  Preview preview = 1;
+}
+
+// PrunePreviewStateRequest runs the state sweep by hand, rather than waiting
+// for the periodic one.
+message PrunePreviewStateRequest {
+  // OlderThan overrides the configured retention for this sweep, as a Go
+  // duration ("720h"). Empty uses the operator's own setting.
+  string older_than = 1;
+}
+
+message PrunePreviewStateResponse {
+  // Removed counts the archives deleted and BytesFreed how much disk they gave
+  // back.
+  int32 removed = 1;
+  int64 bytes_freed = 2;
+}
+
 service OrchestratorService {
   rpc StartJob(StartJobRequest) returns (StartJobResponse);
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
@@ -674,4 +716,6 @@ service OrchestratorService {
   rpc ListPreviews(ListPreviewsRequest) returns (ListPreviewsResponse);
   rpc GetPreview(GetPreviewRequest) returns (GetPreviewResponse);
   rpc WatchPreview(WatchPreviewRequest) returns (stream PreviewUpdate);
+  rpc ResetPreviewState(ResetPreviewStateRequest) returns (ResetPreviewStateResponse);
+  rpc PrunePreviewState(PrunePreviewStateRequest) returns (PrunePreviewStateResponse);
 }

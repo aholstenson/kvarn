@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -12,6 +13,9 @@ import (
 
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	"github.com/aholstenson/kvarn/internal/preview"
+	"github.com/aholstenson/kvarn/internal/preview/snapshot"
+	projconfig "github.com/aholstenson/kvarn/internal/project"
+	"github.com/aholstenson/kvarn/internal/sandbox"
 )
 
 // The manager specs live in-package: the manager is deliberately not exported
@@ -42,10 +46,18 @@ func (c *fakePreviewClock) advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-// fakePreviewSandbox records that it was closed, standing in for a VM.
+// fakePreviewSandbox records that it was closed, standing in for a VM. Its
+// guest answers the scripts a state capture runs, so the specs can tell a
+// preview that saved itself from one that did not.
 type fakePreviewSandbox struct {
+	guest *guestRecorder
+
 	mu     sync.Mutex
 	closed bool
+}
+
+func newFakePreviewSandbox() *fakePreviewSandbox {
+	return &fakePreviewSandbox{guest: newGuestRecorder()}
 }
 
 func (f *fakePreviewSandbox) DialGuest(context.Context, uint16) (net.Conn, error) {
@@ -57,6 +69,11 @@ func (f *fakePreviewSandbox) Close() {
 	defer f.mu.Unlock()
 	f.closed = true
 }
+
+func (f *fakePreviewSandbox) BareRunner() sandbox.RunnerProxy  { return f.guest }
+func (f *fakePreviewSandbox) GetRunner() sandbox.RunnerProxy   { return f.guest }
+func (f *fakePreviewSandbox) GetShellSessionID() string        { return "shell" }
+func (f *fakePreviewSandbox) Processes() sandbox.ProcessRunner { return f.guest }
 
 func (f *fakePreviewSandbox) isClosed() bool {
 	f.mu.Lock()
@@ -77,6 +94,12 @@ type fakeBooter struct {
 	sandboxes map[string]*fakePreviewSandbox
 	// block, when non-nil, holds each boot until it is closed.
 	block chan struct{}
+	// cfg is the kvarn.yml every booted preview is treated as having come up
+	// on, which is what says whether it keeps state and which servers to stop.
+	cfg *projconfig.Config
+	// hasState makes the booted guest answer the state probe with "yes", for a
+	// repository that declares nothing but writes into the state directory.
+	hasState bool
 }
 
 func newFakeBooter() *fakeBooter {
@@ -105,17 +128,26 @@ func (b *fakeBooter) boot(_ context.Context, p *preview.Preview, logs *preview.L
 		host = p.Ref + ".preview.example.com"
 	}
 
-	sb := &fakePreviewSandbox{}
+	sb := newFakePreviewSandbox()
 	b.mu.Lock()
+	sb.guest.hasState = b.hasState
+	cfg := b.cfg
 	b.sandboxes[p.ID] = sb
 	b.mu.Unlock()
 
+	if cfg == nil {
+		cfg = &projconfig.Config{}
+	}
+
 	logs.Append("==> booted " + p.ID + "\n")
 	return &previewBoot{
-		Sandbox:   sb,
-		Sites:     []preview.Site{{Name: "web", Host: host, Port: 3000}},
-		SessionID: "sess-" + p.ID,
-		Lease:     nil,
+		Sandbox:    sb,
+		Sites:      []preview.Site{{Name: "web", Host: host, Port: 3000}},
+		SessionID:  "sess-" + p.ID,
+		Lease:      nil,
+		Config:     cfg,
+		SnapshotID: snapshot.ID{ProjectID: "proj", RefLabel: projconfig.RefLabel(p.Ref)},
+		Commit:     "abc1234",
 	}, nil
 }
 
@@ -404,6 +436,247 @@ var _ = Describe("Preview manager", func() {
 		})
 	})
 
+	Describe("saving state", func() {
+		var snapshots *snapshot.FileStore
+
+		// stateful wires the manager to a state store and makes every booted
+		// preview one that declares state, which is the case worth testing; the
+		// stateless one is every spec above.
+		stateful := func(policy PreviewPolicy) *previewManager {
+			snapshots = snapshot.NewFileStore(GinkgoT().TempDir())
+			booter.cfg = &projconfig.Config{Preview: projconfig.Preview{
+				Sites: map[string]projconfig.PreviewSite{"web": {Port: 3000}},
+				Serve: []projconfig.PreviewProcess{{Name: "web", Run: "npm start"}},
+				State: projconfig.PreviewState{Paths: []string{"/home/kvarn/pgdata"}},
+			}}
+			m := build(policy)
+			m.snapshots = snapshots
+			m.snapshotIDs = func(_ context.Context, p *preview.Preview) (snapshot.ID, error) {
+				return snapshot.ID{ProjectID: "proj", RefLabel: projconfig.RefLabel(p.Ref)}, nil
+			}
+			return m
+		}
+
+		// savedState is what the store holds for a preview, or "" for nothing.
+		savedState := func(ref string) string {
+			GinkgoHelper()
+			r, _, err := snapshots.Open(snapshot.ID{ProjectID: "proj", RefLabel: projconfig.RefLabel(ref)})
+			if errors.Is(err, snapshot.ErrNoSnapshot) {
+				return ""
+			}
+			Expect(err).NotTo(HaveOccurred())
+			defer r.Close()
+			body, err := io.ReadAll(r)
+			Expect(err).NotTo(HaveOccurred())
+			return string(body)
+		}
+
+		DescribeTable("captures on every graceful stop",
+			func(stop func(m *previewManager, id string)) {
+				m := stateful(PreviewPolicy{IdleTimeout: time.Hour})
+				p := bootAndWait(m, "proj", "main")
+
+				stop(m, p.ID)
+
+				Eventually(func() string { return savedState("main") }).Should(Equal("tar-bytes"))
+				got, err := store.Get(ctx, p.ID)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got.State).To(Equal(preview.StateStopped))
+				Expect(got.StateBytes).To(Equal(int64(len("tar-bytes"))))
+				Expect(got.StateSavedAt.IsZero()).To(BeFalse())
+				Expect(got.StateError).To(BeEmpty())
+			},
+			Entry("an explicit stop", func(m *previewManager, id string) {
+				Expect(m.Stop(ctx, id, "spec")).To(Succeed())
+			}),
+			Entry("idle reaping", func(m *previewManager, id string) {
+				clock.advance(2 * time.Hour)
+				m.Reap(ctx)
+			}),
+			Entry("draining", func(m *previewManager, id string) {
+				m.SetDraining(ctx, true)
+			}),
+			Entry("shutdown", func(m *previewManager, id string) {
+				m.Shutdown(ctx)
+			}),
+		)
+
+		It("stops the preview's servers before archiving what they were writing", func() {
+			m := stateful(PreviewPolicy{})
+			p := bootAndWait(m, "proj", "main")
+			guest := booter.sandbox(p.ID).guest
+
+			Expect(m.Stop(ctx, p.ID, "spec")).To(Succeed())
+
+			Expect(guest.stoppedProcesses()).To(Equal([]string{p.ID + "/serve-0"}))
+			Expect(guest.events()).To(ContainElements("stop:"+p.ID+"/serve-0", "guest:tar"))
+			Expect(indexOf(guest.events(), "stop:"+p.ID+"/serve-0")).
+				To(BeNumerically("<", indexOf(guest.events(), "guest:tar")))
+		})
+
+		It("captures a preview that declares nothing but wrote into the state directory", func() {
+			booter.hasState = true
+			m := stateful(PreviewPolicy{})
+			booter.cfg = &projconfig.Config{Preview: projconfig.Preview{
+				Sites: map[string]projconfig.PreviewSite{"web": {Port: 3000}},
+			}}
+			p := bootAndWait(m, "proj", "main")
+
+			Expect(m.Stop(ctx, p.ID, "spec")).To(Succeed())
+			Expect(savedState("main")).To(Equal("tar-bytes"))
+		})
+
+		It("leaves a preview that holds nothing alone", func() {
+			m := stateful(PreviewPolicy{})
+			booter.cfg = &projconfig.Config{Preview: projconfig.Preview{
+				Sites: map[string]projconfig.PreviewSite{"web": {Port: 3000}},
+			}}
+			p := bootAndWait(m, "proj", "main")
+			guest := booter.sandbox(p.ID).guest
+
+			Expect(m.Stop(ctx, p.ID, "spec")).To(Succeed())
+
+			Expect(savedState("main")).To(BeEmpty())
+			Expect(guest.ranTar()).To(BeFalse())
+			// It never enters "stopping" either: a stateless preview tears down
+			// exactly as fast as it did before any of this existed.
+			got, err := store.Get(ctx, p.ID)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.State).To(Equal(preview.StateStopped))
+		})
+
+		It("never captures a preview of a fork's pull request", func() {
+			m := stateful(PreviewPolicy{})
+			p, err := m.Register(ctx, "proj", "main", previewOrigin{PR: "7", AutoStartHost: "pr-7.preview.example.com", Fork: true})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(p.Fork).To(BeTrue())
+			_, err = m.Ensure(ctx, p.ID)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() bool { return m.IsLive(p.ID) }).Should(BeTrue())
+
+			Expect(m.Stop(ctx, p.ID, "spec")).To(Succeed())
+			Expect(savedState("main")).To(BeEmpty())
+		})
+
+		It("never captures on the way to removing a preview, and drops what it had", func() {
+			m := stateful(PreviewPolicy{})
+			p := bootAndWait(m, "proj", "main")
+			Expect(m.Stop(ctx, p.ID, "spec")).To(Succeed())
+			Expect(savedState("main")).To(Equal("tar-bytes"))
+
+			_, err := m.Ensure(ctx, p.ID)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() bool { return m.IsLive(p.ID) }).Should(BeTrue())
+
+			Expect(m.Remove(ctx, p.ID)).To(Succeed())
+			Expect(savedState("main")).To(BeEmpty())
+		})
+
+		It("skips the capture when the caller asked for the contents to go", func() {
+			m := stateful(PreviewPolicy{})
+			p := bootAndWait(m, "proj", "main")
+
+			Expect(m.StopWithoutState(ctx, p.ID, "spec")).To(Succeed())
+			Expect(savedState("main")).To(BeEmpty())
+			Expect(booter.sandbox(p.ID).isClosed()).To(BeTrue())
+		})
+
+		It("still stops the preview when the capture fails, and says why", func() {
+			m := stateful(PreviewPolicy{})
+			p := bootAndWait(m, "proj", "main")
+			booter.sandbox(p.ID).guest.tarFails = true
+
+			Expect(m.Stop(ctx, p.ID, "spec")).To(Succeed())
+
+			Expect(booter.sandbox(p.ID).isClosed()).To(BeTrue())
+			Expect(m.IsLive(p.ID)).To(BeFalse())
+			got, err := store.Get(ctx, p.ID)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.State).To(Equal(preview.StateStopped))
+			Expect(got.StateError).To(ContainSubstring("archive preview state"))
+		})
+
+		It("refuses an archive over the operator's ceiling", func() {
+			m := stateful(PreviewPolicy{MaxStateBytes: 2})
+			p := bootAndWait(m, "proj", "main")
+
+			Expect(m.Stop(ctx, p.ID, "spec")).To(Succeed())
+
+			Expect(savedState("main")).To(BeEmpty())
+			got, err := store.Get(ctx, p.ID)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.StateError).To(ContainSubstring("maximum size"))
+		})
+
+		It("does not boot a second VM for a request that arrives mid-capture", func() {
+			m := stateful(PreviewPolicy{})
+			p := bootAndWait(m, "proj", "main")
+
+			// The row a capture leaves behind while it works is what a request
+			// arriving in that window sees; booting on top of it would restore the
+			// archive the capture is about to replace.
+			p.State = preview.StateStopping
+			Expect(store.Put(ctx, p)).To(Succeed())
+
+			got, err := m.Ensure(ctx, p.ID)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.State).To(Equal(preview.StateStopping))
+			Expect(booter.bootCount(p.ID)).To(Equal(1))
+		})
+
+		It("leaves a capture in progress alone when a second stop arrives", func() {
+			m := stateful(PreviewPolicy{})
+			p := bootAndWait(m, "proj", "main")
+			Expect(m.stopInstance(p.ID)).To(BeTrue())
+
+			// Standing in for the winner: the row says a capture is under way and
+			// the instance is already claimed.
+			p.State = preview.StateStopping
+			Expect(store.Put(ctx, p)).To(Succeed())
+
+			Expect(m.Stop(ctx, p.ID, "the loser")).To(Succeed())
+			got, err := store.Get(ctx, p.ID)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.State).To(Equal(preview.StateStopping))
+		})
+
+		It("restores the prune horizon rather than sweeping a live preview", func() {
+			m := stateful(PreviewPolicy{StateRetention: time.Nanosecond})
+			p := bootAndWait(m, "proj", "main")
+			Expect(m.Stop(ctx, p.ID, "spec")).To(Succeed())
+			Expect(savedState("main")).To(Equal("tar-bytes"))
+
+			// Booted again, so its archive is about to be rewritten by the stop
+			// that takes it down; sweeping it now would turn that stop into a
+			// discard.
+			_, err := m.Ensure(ctx, p.ID)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() bool { return m.IsLive(p.ID) }).Should(BeTrue())
+
+			m.PruneState(ctx)
+			Expect(savedState("main")).To(Equal("tar-bytes"))
+
+			Expect(m.StopWithoutState(ctx, p.ID, "spec")).To(Succeed())
+			m.PruneState(ctx)
+			Expect(savedState("main")).To(BeEmpty())
+		})
+
+		It("drops a preview's stored state on request", func() {
+			m := stateful(PreviewPolicy{})
+			p := bootAndWait(m, "proj", "main")
+			Expect(m.Stop(ctx, p.ID, "spec")).To(Succeed())
+			Expect(savedState("main")).To(Equal("tar-bytes"))
+
+			m.ResetState(ctx, p.ID)
+
+			Expect(savedState("main")).To(BeEmpty())
+			got, err := store.Get(ctx, p.ID)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.StateBytes).To(BeZero())
+			Expect(got.StateSavedAt.IsZero()).To(BeTrue())
+		})
+	})
+
 	Describe("eviction", func() {
 		It("evicts the least-recently-requested preview when at max_concurrent", func() {
 			mgr = build(PreviewPolicy{MaxConcurrent: 2})
@@ -648,3 +921,15 @@ var _ = Describe("Preview manager", func() {
 		})
 	})
 })
+
+// indexOf is where an event sits in a recorded sequence, or -1. It is what lets
+// a spec say "the servers stopped before the tar ran" rather than merely that
+// both happened.
+func indexOf(events []string, want string) int {
+	for i, e := range events {
+		if e == want {
+			return i
+		}
+	}
+	return -1
+}

@@ -122,8 +122,9 @@ func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO previews (
 		    id, project, ref, pr, auto_start_host, state, sites_json, session_id, error,
-		    created_at, updated_at, started_at, last_request_at, expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		    created_at, updated_at, started_at, last_request_at, expires_at,
+		    state_saved_at, state_bytes, state_error, fork
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		    project = excluded.project,
 		    ref = excluded.ref,
@@ -136,11 +137,16 @@ func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
 		    updated_at = excluded.updated_at,
 		    started_at = excluded.started_at,
 		    last_request_at = excluded.last_request_at,
-		    expires_at = excluded.expires_at`,
+		    expires_at = excluded.expires_at,
+		    state_saved_at = excluded.state_saved_at,
+		    state_bytes = excluded.state_bytes,
+		    state_error = excluded.state_error,
+		    fork = excluded.fork`,
 		p.ID, p.Project, p.Ref, p.PR, preview.NormalizeHost(p.AutoStartHost),
 		string(p.State), string(sitesJSON), p.SessionID, p.Error,
 		toMicros(p.CreatedAt), toMicros(p.UpdatedAt), toMicros(p.StartedAt),
 		toMicros(p.LastRequestAt), toMicros(p.ExpiresAt),
+		toMicros(p.StateSavedAt), p.StateBytes, p.StateError, p.Fork,
 	); err != nil {
 		return fmt.Errorf("upsert preview: %w", err)
 	}
@@ -170,7 +176,8 @@ func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
 }
 
 const previewColumns = `id, project, ref, pr, auto_start_host, state, sites_json, session_id, error, ` +
-	`created_at, updated_at, started_at, last_request_at, expires_at`
+	`created_at, updated_at, started_at, last_request_at, expires_at, ` +
+	`state_saved_at, state_bytes, state_error, fork`
 
 // scanPreview reads one row in previewColumns order.
 func scanPreview(row interface{ Scan(...any) error }) (*preview.Preview, error) {
@@ -178,12 +185,15 @@ func scanPreview(row interface{ Scan(...any) error }) (*preview.Preview, error) 
 		p                                                         preview.Preview
 		state, sitesJSON                                          string
 		createdAt, updatedAt, startedAt, lastRequestAt, expiresAt int64
+		stateSavedAt                                              int64
 	)
 	if err := row.Scan(&p.ID, &p.Project, &p.Ref, &p.PR, &p.AutoStartHost,
 		&state, &sitesJSON, &p.SessionID, &p.Error,
-		&createdAt, &updatedAt, &startedAt, &lastRequestAt, &expiresAt); err != nil {
+		&createdAt, &updatedAt, &startedAt, &lastRequestAt, &expiresAt,
+		&stateSavedAt, &p.StateBytes, &p.StateError, &p.Fork); err != nil {
 		return nil, err
 	}
+	p.StateSavedAt = fromMicros(stateSavedAt)
 	p.State = preview.State(state)
 	if err := json.Unmarshal([]byte(sitesJSON), &p.Sites); err != nil {
 		return nil, fmt.Errorf("decode preview sites for %q: %w", p.ID, err)
@@ -289,9 +299,14 @@ func (s *Store) ResetLive(ctx context.Context) ([]string, error) {
 		return nil, nil
 	}
 
+	// state_error goes with the VM: a row left "stopping" by a crash had a
+	// capture in flight that neither succeeded nor reported a reason, and a
+	// stale message from the process before it would describe an attempt that is
+	// no longer the last one. What the archive is — state_saved_at, state_bytes
+	// — outlives the process and stays.
 	if _, err := s.db.ExecContext(ctx, `
 		UPDATE previews
-		SET state = ?, started_at = 0, expires_at = 0, session_id = ''
+		SET state = ?, started_at = 0, expires_at = 0, session_id = '', state_error = ''
 		WHERE state != ?`, string(preview.StateStopped), string(preview.StateStopped)); err != nil {
 		return nil, fmt.Errorf("reset live previews: %w", err)
 	}

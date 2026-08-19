@@ -335,7 +335,8 @@ kvarn preview down my-project feat/new-checkout --remove   # and forget it
 
 `down` stops the VM but keeps the record and the hostname, so the next request
 to that hostname boots the preview again. `--remove` is for when the branch is
-gone and the name should be freed.
+gone and the name should be freed; it also drops whatever state the preview had
+saved, since nothing would ever restore it.
 
 Logs are the last ~256 KiB of what the serve processes printed, kept in memory.
 A server running for hours produces unbounded output, so it is not persisted;
@@ -360,9 +361,70 @@ exits.
   [started itself](#start-previews-on-demand). That one is removed rather than
   stopped: the record and its hostname go too, since nobody registered it and
   nobody should have to unregister it.
+- **`kvarn preview down`**, when somebody is finished with it before any of the
+  above gets there.
 
-None of these lose anything, because a preview holds nothing: it is derived from
-its branch and rebuilt from it.
+A preview that declares no state loses nothing when any of these happen: it is
+derived from its branch and rebuilt from it. A preview that
+[keeps state](#keeping-state-between-boots) has that state written out first on
+every one of them except the last two — a removed preview and a closed pull
+request are somebody saying the preview is finished with, and both discard what
+it was holding.
+
+## Keeping state between boots
+
+By default a preview holds nothing. It is stopped when it goes idle, destroyed,
+and re-derived from the branch on the next request — so a seeded tenant, an
+uploaded file, or rows a reviewer entered walking through a pull request are gone
+when they come back from lunch.
+
+A repository fixes that by naming what should survive:
+
+```yaml
+preview:
+  sites:
+    web: { port: 3000 }
+  state:
+    paths:
+      - ~/.local/share/containers/storage/volumes/pgdata
+    max_size: 4GiB
+```
+
+`$KVARN_PREVIEW_STATE_DIR` (`/home/kvarn/state`) is kept with nothing declared at
+all, so the simplest form is a compose stack that bind-mounts a volume out of it.
+It is exported everywhere the site URLs are: the preview's shell, the VM's
+environment, and each serve process. It sits outside the workspace on purpose —
+the workspace is a fresh clone on every boot.
+
+On every graceful stop kvarn runs the repository's `state.save` steps, shuts the
+serve processes down, and tars the state directory and any declared paths onto
+the host. The next boot unpacks them before `preview.setup` runs and then runs
+`state.restore`. **A restore that fails fails the boot**, with the reason on the
+holding page: a preview that quietly comes up empty after somebody spent an
+afternoon on it is worse than one that refuses and says why.
+
+```sh
+kvarn preview ls                                        # DATA shows size and age
+kvarn preview up my-project feat/checkout --fresh       # come up empty
+kvarn preview down my-project feat/checkout --no-state  # stop without saving
+kvarn preview reset my-project feat/checkout            # drop what it saved
+kvarn preview prune --older-than 720h                   # sweep by hand
+```
+
+`state.save` and `state.restore` are for a stack that would rather keep a
+logical dump than a raw data directory — `pg_dump` into the state directory on
+the way out, `pg_restore` on the way back in. That is also the honest answer to
+engine and schema drift: a snapshot is routinely restored onto a newer commit
+than the one that wrote it, and migrations are the repository's business.
+
+Archives are dropped after `state_retention` (default 30 days) without being
+used; restoring one restarts its clock. An expired archive is not an error — the
+next boot comes up fresh and says so. A SIGKILLed orchestrator loses whatever
+its VMs held: every graceful path is covered, an abrupt one is not.
+
+See [`preview.state`](../reference/kvarn-yml.md#previewstate) for the fields and
+[`[preview]`](../reference/orchestrator-toml.md#preview) for the operator's
+timeout, retention and size ceiling.
 
 ## Restrict who can reach a preview
 
@@ -387,6 +449,14 @@ staging deployment:
 - **A preview is guessable.** Its hostname comes from the branch name. Nothing
   about the URL is a secret, which is why kvarn sends `X-Robots-Tag: noindex` on
   every response but does not pretend that is protection.
+- **Saved state outlives the VM.** A repository that
+  [keeps state](#keeping-state-between-boots) has an archive written to the
+  orchestrator's disk, unencrypted, for as long as the retention window. Its
+  contents are whatever unreviewed branch code put on disk — which can include
+  secrets that code wrote there itself. It is readable by whoever can read the
+  host's cache directory, and by anyone who can reach the preview, since the next
+  boot puts it back. This is why a preview of a fork's pull request never keeps
+  state, and why `state_retention` is a security setting as much as a disk one.
 
 **Put previews on a domain that shares no registrable parent with production.**
 `preview.example.com` and `app.example.com` share `example.com`, and a cookie
@@ -396,14 +466,16 @@ will send back. Use a separate domain — `example-preview.com`,
 
 **Leave `allow_forks` off** unless the network boundary already answers for it.
 A fork's branch is written by somebody without push access to the repository,
-and a preview would give that branch the project's secrets. See
-[`projects.toml`](../reference/projects-toml.md#projectsnamepreview).
+and a preview would give that branch the project's secrets. Even with it on, a
+fork's preview never keeps state: whatever its code writes to disk goes with the
+VM. See [`projects.toml`](../reference/projects-toml.md#projectsnamepreview).
 
 ## Bring your own services
 
-A preview is ephemeral and holds no state: the VM is destroyed when it stops,
-and the next boot starts from the branch again. Anything the app needs — a
-database, a queue, an object store — has to come up inside the VM.
+Anything the app needs — a database, a queue, an object store — has to come up
+inside the VM. The VM is destroyed when the preview stops, and the next boot
+starts from the branch again; only what the repository
+[declares as state](#keeping-state-between-boots) survives that.
 
 The usual shape is a setup step that starts containers, and serve commands that
 talk to them:
@@ -432,6 +504,10 @@ Seed data belongs in a setup step too. Pointing a preview at a shared external
 database works, but it means every branch shares one schema, and a branch whose
 migrations are half-finished breaks the others — the thing previews exist to
 avoid.
+
+For the container's data to survive a stop, put its volume under
+`$KVARN_PREVIEW_STATE_DIR` and declare `preview.state` — see
+[keeping state between boots](#keeping-state-between-boots).
 
 ## When something does not work
 

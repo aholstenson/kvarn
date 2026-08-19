@@ -195,6 +195,9 @@ unimplemented.
 | `max_concurrent` | int | `3` | How many previews may run at once. `0` is unbounded. |
 | `max_memory` | size | unset | Ceiling on one preview VM's memory, below what its `kvarn.yml` asks for. |
 | `max_disk` | size | unset | Ceiling on one preview VM's disk. |
+| `state_timeout` | duration | `2m` | How long one preview's [state capture](../how-to/preview-environments.md#keeping-state-between-boots) may take. Must be greater than zero. |
+| `state_retention` | duration | `720h` | Drop state archives nothing has come back to for this long. Restoring a preview counts as coming back. `"0"` never prunes. |
+| `max_state_size` | size | unset | Ceiling on one preview's state archive, over what its `kvarn.yml` asks for. |
 
 `domain` and `listen` are required together: a preview with no name is
 unaddressable and one with no listener is unreachable, so setting one without
@@ -215,6 +218,14 @@ record and hostnames in place, so the next request boots it again. The database
 path is set with `--previews-db` (default `~/.config/kvarn/previews.db`), not in
 this file.
 
+A repository that declares `preview.state` also has its state written out on
+every graceful stop, into `<cache dir>/kvarn/preview-state/`. That directory is
+a sibling of the tool caches, not part of them: it is swept by age alone, never
+by the cache quota, because nothing in it can be rebuilt by re-running a job.
+`state_timeout` is what a drain or a shutdown waits per preview, so it bounds
+how long taking the host down can take; `kvarn preview prune` runs the age sweep
+by hand.
+
 ```toml
 [preview]
 domain = "preview.example.com"
@@ -223,4 +234,7 @@ idle_timeout = "30m"
 max_lifetime = "8h"
 max_concurrent = 3
 max_memory = "8G"
+state_timeout = "2m"
+state_retention = "720h"
+max_state_size = "5G"
 ```

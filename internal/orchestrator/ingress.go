@@ -302,7 +302,10 @@ func (h *previewIngress) writeStatus(w http.ResponseWriter, r *http.Request, p *
 // bootPhase reads the human-readable phase off the boot's session, falling back
 // to the preview's own state when there is no session to read.
 func (h *previewIngress) bootPhase(ctx context.Context, p *preview.Preview) string {
-	if p.SessionID == "" || h.svc.sessionMgr == nil {
+	// A preview writing its state out still carries the session of the boot that
+	// brought it up, and that session's last word was "ready". Reading it here
+	// would tell somebody watching the holding page that the preview is running.
+	if p.State == preview.StateStopping || p.SessionID == "" || h.svc.sessionMgr == nil {
 		return previewPhaseFallback(p.State)
 	}
 	sess, err := h.svc.sessionMgr.Get(ctx, p.SessionID)
@@ -324,6 +327,8 @@ func previewPhaseFallback(state preview.State) string {
 		return "Failed"
 	case preview.StateRunning:
 		return "Running"
+	case preview.StateStopping:
+		return "Saving state"
 	default:
 		return "Stopped"
 	}

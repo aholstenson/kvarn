@@ -62,6 +62,18 @@ type Preview struct {
 	// own request stands.
 	MaxMemory string `toml:"max_memory,omitempty"`
 	MaxDisk   string `toml:"max_disk,omitempty"`
+	// StateTimeout bounds how long one preview's state capture may take (e.g.
+	// "2m"). It is what a drain or a shutdown waits per preview before giving
+	// up on saving it, so it is a real bound rather than a suggestion.
+	StateTimeout string `toml:"state_timeout,omitempty"`
+	// StateRetention drops preview state archives nothing has come back to for
+	// this long (e.g. "720h"). Restoring a preview counts as coming back. "0"
+	// never prunes; empty takes the built-in default.
+	StateRetention string `toml:"state_retention,omitempty"`
+	// MaxStateSize caps one preview's state archive (e.g. "5G"), over whatever
+	// its kvarn.yml asks for. Empty means the repository's own max_size is the
+	// only limit.
+	MaxStateSize string `toml:"max_state_size,omitempty"`
 }
 
 // Enabled reports whether the operator has configured previews at all. Both a

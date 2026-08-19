@@ -310,6 +310,19 @@ func (f *FileCache) Evict(quota Quota) (EvictReport, error) {
 	return report, nil
 }
 
+// siblingRoots are the directories that share the kvarn cache root with the
+// per-project cache trees but are not project IDs. Eviction must never descend
+// into them: the VM images are large and checksum-verified, the repository
+// mirrors are what every clone is served from, and preview state is the only
+// copy of data somebody entered into a preview. None of them can be rebuilt by
+// re-running a job, which is the assumption the LRU sweep rests on.
+var siblingRoots = map[string]struct{}{
+	"images":        {},
+	"image-cache":   {},
+	"repos":         {},
+	"preview-state": {},
+}
+
 func (f *FileCache) projectIDs() ([]string, error) {
 	entries, err := os.ReadDir(f.BaseDir)
 	if err != nil {
@@ -317,9 +330,13 @@ func (f *FileCache) projectIDs() ([]string, error) {
 	}
 	var ids []string
 	for _, e := range entries {
-		if e.IsDir() {
-			ids = append(ids, e.Name())
+		if !e.IsDir() {
+			continue
 		}
+		if _, sibling := siblingRoots[e.Name()]; sibling {
+			continue
+		}
+		ids = append(ids, e.Name())
 	}
 	return ids, nil
 }

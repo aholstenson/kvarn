@@ -26,7 +26,7 @@ The home directory is `/home/kvarn`.
 | `validation` | object | Steps run after the agent. |
 | `modes` | map | Agent modes this repository defines, beside the built-in ones. |
 | `pull_request` | object | What the pull requests, commits and comments a run produces should say. |
-| `preview` | object | Preview environments: which hostnames are served from which ports, and what to run to bring them up. |
+| `preview` | object | Preview environments: which hostnames are served from which ports, what to run to bring them up, and what survives being stopped. |
 
 All keys are optional; a repository with no `kvarn.yml` gets a bare VM with no
 setup and no validation.
@@ -606,10 +606,75 @@ attempt would fail a preview that is merely still starting.
 Requests arriving before the checks pass get a holding page rather than a
 connection error.
 
+### `preview.state`
+
+What the preview keeps between boots. A preview is stopped when it goes idle
+and re-derived from the branch on the next request; without this block anything
+a reviewer entered into it goes with the VM.
+
+```yaml
+preview:
+  sites:
+    web: { port: 3000 }
+  state:
+    save:
+      - { name: Dump database, run: "pg_dump -Fc app > $KVARN_PREVIEW_STATE_DIR/app.dump" }
+    restore:
+      - { name: Load database, run: "pg_restore -d app $KVARN_PREVIEW_STATE_DIR/app.dump" }
+    paths:
+      - ~/.local/share/containers/storage/volumes/pgdata
+    max_size: 2GiB
+```
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `save` | list | [Steps](#step-fields) run before the state is captured, with the servers still up. |
+| `restore` | list | Steps run after the state has been unpacked, before `preview.setup`. |
+| `paths` | list | Extra guest directories captured alongside the state directory. |
+| `max_size` | string | Cap on the archive, e.g. `2GiB`. A capture over the cap fails and the previous archive stays. |
+
+**`$KVARN_PREVIEW_STATE_DIR` is `/home/kvarn/state`**, and everything in it is
+kept with nothing declared here at all. It is exported into the preview's shell,
+into every serve process's environment and into the VM's own environment, beside
+`KVARN_PREVIEW_URL_<SITE>`. It sits outside the workspace on purpose: the
+workspace is a fresh clone on every boot, so state kept there would be clobbered.
+
+The simplest useful form declares no hooks. A compose stack bind-mounts
+`${KVARN_PREVIEW_STATE_DIR}/pg` into its database container and the directory
+round-trips on its own:
+
+```yaml
+preview:
+  sites:
+    web: { port: 3000 }
+  state:
+    max_size: 4GiB
+```
+
+`save` and `restore` are for a stack that would rather keep a logical dump than
+a raw data directory, which is also the honest answer to engine and schema drift
+between the commit that wrote the state and the one that reads it back — a
+snapshot restored onto a newer commit is the normal case, and migrations are the
+repository's business.
+
+`paths` entries are absolute or `~`-relative to `/home/kvarn`. Two overlaps are
+rejected at load time, because both produce a directory written by two
+mechanisms with different rules: a path inside the state directory (it would be
+captured twice), and one that equals or nests under a [`cache`](#cache) path
+(write-once and content-addressed on one side, last-write-wins on the other).
+
+The state is captured on every graceful stop — idle, the lifetime cap, eviction,
+`kvarn preview down`, drain and shutdown — and unpacked again on the next boot.
+It is **not** kept for a preview of a fork's pull request: that branch is written
+by somebody without push access, and whatever their code puts on disk should not
+sit on the operator's host for weeks. `kvarn preview up --fresh` and
+`kvarn preview reset` discard it.
+
 ## Step fields
 
 Used by `setup.steps`, `setup.health_checks`, `validation.required`,
-`validation.advisory`, `preview.setup` and `preview.ready`.
+`validation.advisory`, `preview.setup`, `preview.ready`, `preview.state.save`
+and `preview.state.restore`.
 
 | Field | Type | Notes |
 | --- | --- | --- |

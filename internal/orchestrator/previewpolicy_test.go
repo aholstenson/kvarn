@@ -32,17 +32,23 @@ var _ = Describe("resolvePreviewPolicy", func() {
 		Expect(policy.MaxConcurrent).To(Equal(defaultPreviewMaxConcurrent))
 		Expect(policy.MaxMemoryBytes).To(BeZero())
 		Expect(policy.MaxDiskBytes).To(BeZero())
+		Expect(policy.StateTimeout).To(Equal(defaultPreviewStateTimeout))
+		Expect(policy.StateRetention).To(Equal(defaultPreviewStateRetention))
+		Expect(policy.MaxStateBytes).To(BeZero())
 	})
 
 	It("reads every field the operator set", func() {
 		policy, err := resolvePreviewPolicy(orchcfg.Preview{
-			Domain:        "preview.example.com",
-			Listen:        "100.64.0.1:8080",
-			IdleTimeout:   "45m",
-			MaxLifetime:   "12h",
-			MaxConcurrent: ptr(5),
-			MaxMemory:     "8G",
-			MaxDisk:       "64G",
+			Domain:         "preview.example.com",
+			Listen:         "100.64.0.1:8080",
+			IdleTimeout:    "45m",
+			MaxLifetime:    "12h",
+			MaxConcurrent:  ptr(5),
+			MaxMemory:      "8G",
+			MaxDisk:        "64G",
+			StateTimeout:   "5m",
+			StateRetention: "168h",
+			MaxStateSize:   "5G",
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(policy.IdleTimeout).To(Equal(45 * time.Minute))
@@ -50,6 +56,9 @@ var _ = Describe("resolvePreviewPolicy", func() {
 		Expect(policy.MaxConcurrent).To(Equal(5))
 		Expect(policy.MaxMemoryBytes).To(Equal(uint64(8) * 1024 * 1024 * 1024))
 		Expect(policy.MaxDiskBytes).To(Equal(int64(64) * 1024 * 1024 * 1024))
+		Expect(policy.StateTimeout).To(Equal(5 * time.Minute))
+		Expect(policy.StateRetention).To(Equal(168 * time.Hour))
+		Expect(policy.MaxStateBytes).To(Equal(int64(5) * 1024 * 1024 * 1024))
 	})
 
 	It("trims a domain written with trailing dots", func() {
@@ -75,6 +84,16 @@ var _ = Describe("resolvePreviewPolicy", func() {
 		Expect(policy.MaxConcurrent).To(BeZero())
 	})
 
+	It("treats a zero retention as never pruning saved state", func() {
+		policy, err := resolvePreviewPolicy(orchcfg.Preview{
+			Domain:         "preview.example.com",
+			Listen:         "100.64.0.1:8080",
+			StateRetention: "0",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(policy.StateRetention).To(BeZero())
+	})
+
 	It("refuses a domain with no listener", func() {
 		_, err := resolvePreviewPolicy(orchcfg.Preview{Domain: "preview.example.com"})
 		Expect(err).To(MatchError(ContainSubstring("unreachable")))
@@ -98,5 +117,11 @@ var _ = Describe("resolvePreviewPolicy", func() {
 		Entry("a negative max_concurrent", orchcfg.Preview{MaxConcurrent: ptr(-1)}, "must not be negative"),
 		Entry("an unparseable max memory", orchcfg.Preview{MaxMemory: "lots"}, "max_memory"),
 		Entry("an unparseable max disk", orchcfg.Preview{MaxDisk: "8TB"}, "max_disk"),
+		Entry("an unparseable state timeout", orchcfg.Preview{StateTimeout: "a while"}, "state_timeout"),
+		// A capture with no budget is a drain that never returns, so unlike the
+		// reaping timeouts "0" is not a way to switch something off here.
+		Entry("a zero state timeout", orchcfg.Preview{StateTimeout: "0"}, "greater than zero"),
+		Entry("an unparseable state retention", orchcfg.Preview{StateRetention: "a month"}, "state_retention"),
+		Entry("an unparseable max state size", orchcfg.Preview{MaxStateSize: "huge"}, "max_state_size"),
 	)
 })

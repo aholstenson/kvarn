@@ -358,7 +358,7 @@ preview:
 preview:
   serve:
     - { name: Web, run: npm start }
-`, "declares setup, serve or ready steps but no sites"),
+`, "declares setup, serve, ready or state but no sites"),
 			Entry("a ready check with no run command",
 				`
 preview:
@@ -369,6 +369,144 @@ preview:
   ready:
     - { name: Web up }
 `, "has empty run command"),
+		)
+	})
+
+	Describe("state", func() {
+		It("accepts a preview that keeps state without declaring hooks", func() {
+			cfg, err := writePreviewConfig(`
+preview:
+  sites:
+    web: { port: 3000 }
+  serve:
+    - { name: Web, run: docker compose up }
+  state:
+    paths:
+      - ~/.local/share/containers/storage/volumes/pgdata
+    max_size: 2GiB
+`)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Preview.State.Declared()).To(BeTrue())
+			Expect(cfg.Preview.State.Paths).To(ConsistOf(
+				"/home/kvarn/.local/share/containers/storage/volumes/pgdata"))
+			Expect(cfg.Preview.State.MaxSizeBytes()).To(Equal(int64(2 * 1024 * 1024 * 1024)))
+		})
+
+		It("accepts save and restore hooks", func() {
+			cfg, err := writePreviewConfig(`
+preview:
+  sites:
+    web: { port: 3000 }
+  state:
+    save:
+      - { name: Dump database, run: "pg_dump -Fc app > $KVARN_PREVIEW_STATE_DIR/app.dump" }
+    restore:
+      - { name: Load database, run: "pg_restore -d app $KVARN_PREVIEW_STATE_DIR/app.dump" }
+`)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Preview.State.Save).To(HaveLen(1))
+			Expect(cfg.Preview.State.Restore).To(HaveLen(1))
+			Expect(cfg.Preview.State.Paths).To(BeEmpty())
+		})
+
+		It("treats a preview with no state block as keeping nothing declared", func() {
+			cfg, err := writePreviewConfig(`
+preview:
+  sites:
+    web: { port: 3000 }
+`)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Preview.State.Declared()).To(BeFalse())
+			Expect(cfg.Preview.State.MaxSizeBytes()).To(BeZero())
+		})
+
+		DescribeTable("rejects a state block that cannot work",
+			func(body, wantErr string) {
+				_, err := writePreviewConfig(body)
+				Expect(err).To(MatchError(ContainSubstring(wantErr)))
+			},
+			Entry("a path inside the state directory, which is captured already",
+				`
+preview:
+  sites:
+    web: { port: 3000 }
+  state:
+    paths:
+      - /home/kvarn/state/pgdata
+`, "is inside /home/kvarn/state"),
+			Entry("a path that is also cached",
+				`
+cache:
+  paths:
+    - ~/.cache/pg
+preview:
+  sites:
+    web: { port: 3000 }
+  state:
+    paths:
+      - ~/.cache/pg/data
+`, "cannot be both cache and state"),
+			Entry("the workspace root, which is a fresh clone on every boot",
+				`
+preview:
+  sites:
+    web: { port: 3000 }
+  state:
+    paths:
+      - /home/kvarn/workspace
+`, "resolves to the workspace root"),
+			Entry("a path under /nix",
+				`
+preview:
+  sites:
+    web: { port: 3000 }
+  state:
+    paths:
+      - /nix/store
+`, "caching /nix is a first-class feature"),
+			Entry("the same path twice",
+				`
+preview:
+  sites:
+    web: { port: 3000 }
+  state:
+    paths:
+      - ~/data
+      - /home/kvarn/data
+`, "is declared twice"),
+			Entry("an unparseable max_size",
+				`
+preview:
+  sites:
+    web: { port: 3000 }
+  state:
+    max_size: huge
+`, "state.max_size"),
+			Entry("a save step with no run command",
+				`
+preview:
+  sites:
+    web: { port: 3000 }
+  state:
+    save:
+      - { name: Dump }
+`, `state save step "Dump" has empty run command`),
+			Entry("a restore step with an absolute working_dir",
+				`
+preview:
+  sites:
+    web: { port: 3000 }
+  state:
+    restore:
+      - { name: Load, run: ./load.sh, working_dir: /srv }
+`, "absolute working_dir"),
+			Entry("state without sites",
+				`
+preview:
+  state:
+    paths:
+      - ~/data
+`, "declares setup, serve, ready or state but no sites"),
 		)
 	})
 })

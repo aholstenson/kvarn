@@ -28,6 +28,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/aholstenson/kvarn/internal/cmd/imageutil"
 	"github.com/aholstenson/kvarn/internal/cmd/local/bootui"
@@ -37,6 +38,7 @@ import (
 	secrettoml "github.com/aholstenson/kvarn/internal/config/secret/tomlstore"
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 	"github.com/aholstenson/kvarn/internal/preview"
+	"github.com/aholstenson/kvarn/internal/preview/snapshot"
 	"github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
@@ -51,6 +53,8 @@ type Cmd struct {
 	DiskImagePath string `help:"Path to VM disk image. Auto-detected if not set."`
 	Dir           string `help:"Project directory." default:"." type:"existingdir"`
 	NoCache       bool   `help:"Disable cache persistence across runs." name:"no-cache"`
+	Fresh         bool   `help:"Discard the preview's saved state before booting, so it comes up empty." name:"fresh"`
+	NoState       bool   `help:"Do not save the preview's state on the way out." name:"no-state"`
 	Verbose       bool   `help:"Show all output, including from passing steps." short:"v"`
 	Logs          bool   `help:"Show log output." name:"logs"`
 	Project       string `help:"Project name for secret lookup. Falls back to git remote → project store if omitted." short:"p"`
@@ -70,6 +74,16 @@ type Cmd struct {
 // /etc/hosts entries and anything registered against them, such as OAuth
 // redirect URLs — survive switching branches.
 const DefaultRefLabel = "local"
+
+// refLabel is the ref this preview is keyed on: the same one its hostnames are
+// formed with, so switching branches does not switch which saved state comes
+// back.
+func (c *Cmd) refLabel() string {
+	if c.Ref == "" {
+		return DefaultRefLabel
+	}
+	return c.Ref
+}
 
 func (c *Cmd) Run() error {
 	// Redirect slog to discard unless --logs is passed.
@@ -135,13 +149,14 @@ func (c *Cmd) Run() error {
 		}
 	}
 
-	// The site URLs go into the environment the whole VM sees, so setup steps and
-	// ready checks read the same values the serve steps do.
+	// The preview's environment goes into the environment the whole VM sees, so
+	// setup steps and ready checks read the same values the serve steps do.
 	if secretEnv == nil {
 		secretEnv = map[string]string{}
 	}
-	for _, site := range sites.sites {
-		secretEnv[project.EnvVarName(site.Name)] = site.URL
+	previewEnv := preview.Env(sites.urls())
+	for name, value := range previewEnv {
+		secretEnv[name] = value
 	}
 
 	renderer := taskui.New(os.Stdout, c.Verbose)
@@ -166,6 +181,11 @@ func (c *Cmd) Run() error {
 		return fmt.Errorf("set up gitignore filter: %w", err)
 	}
 
+	absDir, err := filepath.Abs(c.Dir)
+	if err != nil {
+		return fmt.Errorf("resolve absolute dir: %w", err)
+	}
+
 	var cacheProvider cache.Provider
 	var projectID string
 	if !c.NoCache {
@@ -174,11 +194,25 @@ func (c *Cmd) Run() error {
 			return fmt.Errorf("set up cache: %w", err)
 		}
 		cacheProvider = fc
-		absDir, err := filepath.Abs(c.Dir)
-		if err != nil {
-			return fmt.Errorf("resolve absolute dir: %w", err)
-		}
 		projectID = cache.ProjectID(absDir)
+	}
+
+	// State is not the tool cache and --no-cache does not govern it: one is a
+	// rebuild's worth of work, the other is whatever somebody entered into the
+	// preview. --fresh is what ignores this one.
+	states, err := snapshot.DefaultDir()
+	if err != nil {
+		return fmt.Errorf("find preview state directory: %w", err)
+	}
+	stateStore := snapshot.NewFileStore(states)
+	stateID := snapshot.ID{
+		ProjectID: cache.ProjectID(absDir),
+		RefLabel:  project.RefLabel(c.refLabel()),
+	}
+	if c.Fresh {
+		if err := stateStore.Delete(stateID); err != nil {
+			return fmt.Errorf("discard saved preview state: %w", err)
+		}
 	}
 
 	boot := bootui.New(renderer)
@@ -240,11 +274,21 @@ func (c *Cmd) Run() error {
 	// is drained to stdout and later output follows it live.
 	logs := newServiceLog()
 
-	// The site URLs go into the shell before any preview step runs: a step that
-	// configures domains needs the names it is configuring, and so does a ready
-	// check that curls one.
-	if err := preview.ExportURLs(ctx, sess.GetRunner(), sess.GetShellSessionID(), sites.urls()); err != nil {
+	// The preview's environment goes into the shell before any preview step
+	// runs: a step that configures domains needs the names it is configuring, a
+	// ready check that curls one needs the same, and a restore hook needs to know
+	// where its dump was unpacked to.
+	if err := preview.ExportEnv(ctx, sess.GetRunner(), sess.GetShellSessionID(), previewEnv); err != nil {
 		stopRenderer()
+		return err
+	}
+
+	// What the last run left behind goes back before the preview's own setup: a
+	// stack that bind-mounts a database volume out of the state directory has to
+	// find it populated by the time its containers come up.
+	if err := c.restoreState(ctx, renderer, sess, cfg, stateStore, stateID, logs); err != nil {
+		stopRenderer()
+		logs.dump(os.Stdout)
 		return err
 	}
 
@@ -290,8 +334,8 @@ func (c *Cmd) Run() error {
 		serveChildren := make(map[string]*taskui.Item, len(cfg.Preview.Serve))
 		err = preview.StartServices(ctx, sess.Processes(), cfg, preview.ServeOpts{
 			WorkspaceDir: sess.GetWorkingDir(),
-			URLs:         sites.urls(),
-			IDPrefix:     "local",
+			Env:          previewEnv,
+			IDPrefix:     localProcessPrefix,
 			OnStarting: func(name string) {
 				item := renderer.AddChild(serveItem, name)
 				renderer.SetStatus(item, taskui.StatusRunning, "")
@@ -376,7 +420,130 @@ func (c *Cmd) Run() error {
 
 	<-ctx.Done()
 	fmt.Fprintln(os.Stdout, "\nStopping preview…")
+	c.captureState(sess, cfg, stateStore, stateID)
 	return nil
+}
+
+// localProcessPrefix namespaces the guest process IDs of a local preview's
+// serve steps. Stopping them on the way out needs the same prefix that started
+// them, so it is a constant rather than a literal in two places.
+const localProcessPrefix = "local"
+
+// restoreState puts back what the previous run of this preview left behind. It
+// gets a task item of its own beside "Preview setup", because unpacking a
+// database is slow enough that silence would read as a hang.
+func (c *Cmd) restoreState(
+	ctx context.Context,
+	renderer *taskui.Renderer,
+	sess *sandbox.Session,
+	cfg *project.Config,
+	store snapshot.Store,
+	id snapshot.ID,
+	logs *serviceLog,
+) error {
+	proxy := sess.BareRunner()
+	if proxy == nil {
+		return fmt.Errorf("this sandbox cannot carry preview state into the guest: %w", errors.ErrUnsupported)
+	}
+	if err := preview.PrepareStateDir(ctx, proxy); err != nil {
+		return err
+	}
+
+	if _, err := store.Stat(id); errors.Is(err, snapshot.ErrNoSnapshot) {
+		return nil
+	}
+
+	item := renderer.AddItem("Restoring saved state")
+	renderer.SetStatus(item, taskui.StatusRunning, "")
+	_, err := preview.Restore(ctx, preview.RestoreOpts{
+		Proxy:          proxy,
+		Runner:         sess.GetRunner(),
+		ShellSessionID: sess.GetShellSessionID(),
+		Store:          store,
+		ID:             id,
+		State:          cfg.Preview.State,
+		OnOutput: func(name, stdout, stderr string) {
+			logs.write(name, stdout)
+			logs.write(name, stderr)
+		},
+	})
+	if err != nil {
+		renderer.SetStatus(item, taskui.StatusFailed, "")
+		return fmt.Errorf("restore saved state (use --fresh to start empty): %w", err)
+	}
+	renderer.SetStatus(item, taskui.StatusPassed, "")
+	return nil
+}
+
+// captureState writes the preview's declared state out before the VM goes away.
+//
+// It cannot use the command's own context: that comes from the interrupt
+// handler and is already cancelled by the time this runs. It also cannot use
+// the task UI, which stopped when the preview came up — so it reports itself in
+// plain lines beside "Stopping preview…".
+func (c *Cmd) captureState(sess *sandbox.Session, cfg *project.Config, store snapshot.Store, id snapshot.ID) {
+	if c.NoState {
+		return
+	}
+	proxy := sess.BareRunner()
+	if proxy == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), localStateTimeout)
+	defer cancel()
+
+	st := cfg.Preview.State
+	if !st.Declared() {
+		has, err := preview.HasState(ctx, proxy, st)
+		if err != nil || !has {
+			return
+		}
+	}
+
+	fmt.Fprintln(os.Stdout, "Saving preview state…")
+	if err := preview.StopServices(ctx, sess.Processes(), cfg, localProcessPrefix, preview.DefaultStopGrace); err != nil {
+		fmt.Fprintf(os.Stderr, "Could not stop the preview's services first: %v\n", err)
+	}
+
+	meta, err := preview.Capture(ctx, preview.CaptureOpts{
+		Proxy:          proxy,
+		Runner:         sess.GetRunner(),
+		ShellSessionID: sess.GetShellSessionID(),
+		Store:          store,
+		ID:             id,
+		State:          st,
+		MaxBytes:       st.MaxSizeBytes(),
+		Meta:           snapshot.Meta{Commit: sess.GetBaseCommit(), Ref: c.refLabel()},
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Could not save the preview's state: %v\n", err)
+		return
+	}
+	if meta.CreatedAt.IsZero() {
+		return
+	}
+	fmt.Fprintf(os.Stdout, "Saved preview state (%s). The next run restores it; --fresh starts empty.\n",
+		formatBytes(meta.Bytes))
+}
+
+// localStateTimeout bounds the capture on the way out of `kvarn local preview`.
+// Ctrl-C should end in a preview that was saved, but a developer who presses it
+// twice is entitled to have the command actually stop.
+const localStateTimeout = 2 * time.Minute
+
+// formatBytes renders an archive size in the units a person reads.
+func formatBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 // resolveProjectName figures out which project name to use when looking up

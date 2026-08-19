@@ -41,6 +41,12 @@ const (
 	StateBooting State = "booting"
 	// StateRunning means the ready checks passed and the preview is serving.
 	StateRunning State = "running"
+	// StateStopping means the VM is still up but nothing routes to it any more:
+	// its servers are being shut down and its declared state written out. It is
+	// a state of its own rather than a variant of stopped because the archive is
+	// not yet on disk, and a boot started in that window would restore the
+	// previous one and then have it overwritten.
+	StateStopping State = "stopping"
 	// StateFailed means the last boot did not come up. The row is kept so the
 	// failure can be reported; the next explicit start clears it.
 	StateFailed State = "failed"
@@ -48,7 +54,9 @@ const (
 
 // IsLive reports whether the state implies a VM the manager is holding
 // resources for.
-func (s State) IsLive() bool { return s == StateBooting || s == StateRunning }
+func (s State) IsLive() bool {
+	return s == StateBooting || s == StateRunning || s == StateStopping
+}
 
 // Site is one address a preview answers on, with its hostname already resolved
 // against the project's domain. Several sites may share a port when one
@@ -104,6 +112,22 @@ type Preview struct {
 	// ExpiresAt is the hard deadline the current VM is stopped at regardless of
 	// traffic. Zero means no cap.
 	ExpiresAt time.Time
+
+	// StateSavedAt is when the preview's current state archive was written, and
+	// StateBytes is its compressed size. Both are zero for a preview that keeps
+	// no state, which is every preview whose repository declares none and never
+	// writes into the state directory.
+	StateSavedAt time.Time
+	StateBytes   int64
+	// StateError is why the last capture failed, if it did. A capture never
+	// blocks a stop, so this is where a failure is reported rather than in the
+	// error the stop returned.
+	StateError string
+	// Fork says the preview is of a pull request whose head lives in a fork.
+	// Such a preview never keeps state: the branch is written by somebody
+	// without push access, and whatever their code puts on disk should not sit
+	// on the operator's host for weeks after the preview stopped.
+	Fork bool
 }
 
 // AutoStarted reports whether this preview exists because somebody asked for a
