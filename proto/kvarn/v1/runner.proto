@@ -24,6 +24,9 @@ message ExecResponse {
   // dropped part of it.
   uint64 stdout_total_bytes = 4;
   uint64 stderr_total_bytes = 5;
+  // True if the command ran past timeout_seconds and was killed, with the
+  // output fields carrying whatever it wrote before that.
+  bool timed_out = 6;
 }
 
 message FileContent {
@@ -171,6 +174,11 @@ message SessionExecResponse {
   // dropped part of it.
   uint64 stdout_total_bytes = 6;
   uint64 stderr_total_bytes = 7;
+  // True if the command ran past timeout_seconds and was killed. The output
+  // fields still carry everything it managed to write before that, which is
+  // where the reason a command hangs is usually visible, so a timeout is
+  // reported as a result rather than as a failed call.
+  bool timed_out = 8;
 }
 
 message CloseSessionRequest {

@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"errors"
@@ -21,10 +22,24 @@ import (
 
 const streamChunkSize = 512 * 1024 // 512KB
 
+// maxConcurrentCommands bounds how many commands the runner works on at once.
+// The ceiling exists so a caller cannot make the guest spawn work without
+// limit; it is set well above the number of tools an agent turn issues in
+// parallel, so reaching it means something upstream is misbehaving rather than
+// a busy job hitting a wall. Once it is reached the receive loop stops reading
+// the stream, which is the backpressure the orchestrator should feel.
+const maxConcurrentCommands = 32
+
 func connectToOrchestrator(ctx context.Context, httpClient *http.Client, addr string, token string) error {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+
+	// Cancelling this context is how a command goroutine that can no longer
+	// report its result brings the whole connection down: the Register stream
+	// is dialed with it, so the receive loop below stops as well.
+	ctx, cancelConnection := context.WithCancel(ctx)
+	defer cancelConnection()
 
 	client := kvarnv1connect.NewBridgeServiceClient(httpClient, addr)
 
@@ -55,156 +70,74 @@ func connectToOrchestrator(ctx context.Context, httpClient *http.Client, addr st
 	h := NewHandler()
 	defer h.Close()
 
+	// Commands are handled off the receive loop. Each one is its own unit of
+	// work — a file read has nothing to do with a test suite — and running them
+	// inline would mean every command for this VM waits out the longest one
+	// ahead of it. A caller that issues several at once and gives each its own
+	// deadline would then watch the cheap ones expire having never started.
+	var (
+		wg      sync.WaitGroup
+		slots   = make(chan struct{}, maxConcurrentCommands)
+		fatalMu sync.Mutex
+		fatal   error
+	)
+	defer func() {
+		// Stop the commands still in flight and let them unwind before the
+		// handler that owns their sessions and processes goes away.
+		cancelConnection()
+		wg.Wait()
+	}()
+
+	// failConnection records why the connection cannot continue and stops it.
+	// The first reason wins: the cancellation it triggers makes every later
+	// command fail too, and those failures explain nothing.
+	failConnection := func(err error) {
+		fatalMu.Lock()
+		if fatal == nil {
+			fatal = err
+		}
+		fatalMu.Unlock()
+		cancelConnection()
+	}
+
+receive:
 	for stream.Receive() {
 		cmd := stream.Msg()
 		slog.Info("received command", "command_id", cmd.CommandId)
 
-		result := &v1.CommandResult{
-			CommandId: cmd.CommandId,
-			Token:     token,
+		// Taking a slot before reading the next command is what makes the cap
+		// backpressure rather than a queue: while the guest is saturated the
+		// stream goes unread and the orchestrator's sends block.
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			break receive
 		}
 
-		switch c := cmd.Command.(type) {
-		case *v1.RunnerCommand_Exec:
-			resp, execErr := h.Exec(ctx, connect.NewRequest(c.Exec))
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_Exec{Exec: resp.Msg}
-			}
-		case *v1.RunnerCommand_UploadFiles:
-			resp, execErr := h.UploadFiles(ctx, connect.NewRequest(c.UploadFiles))
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_UploadFiles{UploadFiles: resp.Msg}
-			}
-		case *v1.RunnerCommand_ReadFile:
-			resp, execErr := h.ReadFile(ctx, connect.NewRequest(c.ReadFile))
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_ReadFile{ReadFile: resp.Msg}
-			}
-		case *v1.RunnerCommand_EditFile:
-			resp, execErr := h.EditFile(ctx, connect.NewRequest(c.EditFile))
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_EditFile{EditFile: resp.Msg}
-			}
-		case *v1.RunnerCommand_WriteFile:
-			resp, execErr := h.WriteFile(ctx, connect.NewRequest(c.WriteFile))
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_WriteFile{WriteFile: resp.Msg}
-			}
-		case *v1.RunnerCommand_CreateSession:
-			resp, execErr := h.CreateSession(ctx, connect.NewRequest(c.CreateSession))
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_CreateSession{CreateSession: resp.Msg}
-			}
-		case *v1.RunnerCommand_SessionExec:
-			onOutput := func(stdout, stderr string) {
-				client.ReportOutput(ctx, connect.NewRequest(&v1.OutputChunk{
-					CommandId: cmd.CommandId,
-					Token:     token,
-					Stdout:    stdout,
-					Stderr:    stderr,
-				}))
-			}
-			resp, execErr := h.SessionExecWithOutput(ctx, c.SessionExec, onOutput)
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_SessionExec{SessionExec: resp.Msg}
-			}
-		case *v1.RunnerCommand_StartProcess:
-			// Output and exit are keyed on the process ID, not the command ID:
-			// the command that started the process completes immediately, and
-			// everything the process goes on to do arrives long after.
-			onOutput := func(processID, stdout, stderr string) {
-				client.ReportOutput(ctx, connect.NewRequest(&v1.OutputChunk{
-					CommandId: processID,
-					Token:     token,
-					Stdout:    stdout,
-					Stderr:    stderr,
-				}))
-			}
-			onExit := func(processID string, exitCode int32, exitErr error) {
-				event := &v1.ProcessEvent{
-					Token:     token,
-					ProcessId: processID,
-					Kind:      v1.ProcessEventKind_PROCESS_EVENT_KIND_EXITED,
-					ExitCode:  exitCode,
-				}
-				if exitErr != nil {
-					event.Error = exitErr.Error()
-				}
-				if _, err := client.ReportProcessEvent(ctx, connect.NewRequest(event)); err != nil {
-					slog.Warn("failed to report process exit", "process_id", processID, "error", err)
-				}
-			}
-			resp, execErr := h.StartProcessWithCallbacks(ctx, c.StartProcess, onOutput, onExit)
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_StartProcess{StartProcess: resp.Msg}
-			}
-		case *v1.RunnerCommand_StopProcess:
-			resp, execErr := h.StopProcess(ctx, connect.NewRequest(c.StopProcess))
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_StopProcess{StopProcess: resp.Msg}
-			}
-		case *v1.RunnerCommand_ListProcesses:
-			resp, execErr := h.ListProcesses(ctx, connect.NewRequest(c.ListProcesses))
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_ListProcesses{ListProcesses: resp.Msg}
-			}
-		case *v1.RunnerCommand_CloseSession:
-			resp, execErr := h.CloseSession(ctx, connect.NewRequest(c.CloseSession))
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_CloseSession{CloseSession: resp.Msg}
-			}
-		case *v1.RunnerCommand_DownloadFile:
-			written, execErr := handleDownloadFile(ctx, client, token, c.DownloadFile)
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_DownloadFileResult{DownloadFileResult: &v1.FileStreamResult{BytesWritten: written}}
-			}
-		case *v1.RunnerCommand_DialConnection:
-			// This loop runs one command at a time, and a dial to a port nothing
-			// is listening on blocks for the dial timeout on each candidate
-			// address. Doing that inline would stall every other command for this
-			// VM — an exec, a process stop — behind a browser opening a
-			// connection, so the dial reports its own result and the loop moves
-			// on to the next command immediately.
-			go reportDialConnection(ctx, client, token, cmd.CommandId, c.DialConnection)
-			continue
-		case *v1.RunnerCommand_UploadFile:
-			written, execErr := handleUploadFile(ctx, client, token, c.UploadFile)
-			if execErr != nil {
-				result.Error = execErr.Error()
-			} else {
-				result.Result = &v1.CommandResult_UploadFileResult{UploadFileResult: &v1.FileStreamResult{BytesWritten: written}}
-			}
-		default:
-			result.Error = "unknown command type"
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
 
-		if _, err := client.ReportResult(ctx, connect.NewRequest(result)); err != nil {
-			return fmt.Errorf("report result for command %s: %w", cmd.CommandId, err)
-		}
+			result := handleCommand(ctx, h, client, token, cmd)
+			if _, err := client.ReportResult(ctx, connect.NewRequest(result)); err != nil {
+				failConnection(fmt.Errorf("report result for command %s: %w", cmd.CommandId, err))
+			}
+		}()
+	}
+
+	// The stream is over, so the commands still running have nowhere to report
+	// to. Stopping and collecting them before reading fatal is what makes a
+	// report failure the reason returned, rather than the stream error that
+	// failure went on to cause.
+	cancelConnection()
+	wg.Wait()
+
+	fatalMu.Lock()
+	reportErr := fatal
+	fatalMu.Unlock()
+	if reportErr != nil {
+		return reportErr
 	}
 
 	if err := stream.Err(); err != nil {
@@ -214,27 +147,158 @@ func connectToOrchestrator(ctx context.Context, httpClient *http.Client, addr st
 	return nil
 }
 
-// reportDialConnection dials a guest port and reports the outcome under the
-// command it came from. It exists so the dial can happen off the command loop
-// while the orchestrator still learns the result the same way it learns every
-// other command's.
-func reportDialConnection(
+// handleCommand runs one command to completion and returns the result to report
+// for it. It runs on its own goroutine, so a command that blocks — an exec, a
+// dial to a port nothing is listening on — costs only itself.
+func handleCommand(
 	ctx context.Context,
+	h *Handler,
 	client kvarnv1connect.BridgeServiceClient,
 	token string,
-	commandID string,
-	cmd *v1.DialConnectionCommand,
-) {
-	result := &v1.CommandResult{CommandId: commandID, Token: token}
-	resp, err := handleDialConnection(ctx, client, token, cmd)
-	if err != nil {
-		result.Error = err.Error()
-	} else {
-		result.Result = &v1.CommandResult_DialConnection{DialConnection: resp}
+	cmd *v1.RunnerCommand,
+) *v1.CommandResult {
+	result := &v1.CommandResult{
+		CommandId: cmd.CommandId,
+		Token:     token,
 	}
-	if _, err := client.ReportResult(ctx, connect.NewRequest(result)); err != nil {
-		slog.Warn("failed to report dial result", "command_id", commandID, "error", err)
+
+	switch c := cmd.Command.(type) {
+	case *v1.RunnerCommand_Exec:
+		resp, execErr := h.Exec(ctx, connect.NewRequest(c.Exec))
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_Exec{Exec: resp.Msg}
+		}
+	case *v1.RunnerCommand_UploadFiles:
+		resp, execErr := h.UploadFiles(ctx, connect.NewRequest(c.UploadFiles))
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_UploadFiles{UploadFiles: resp.Msg}
+		}
+	case *v1.RunnerCommand_ReadFile:
+		resp, execErr := h.ReadFile(ctx, connect.NewRequest(c.ReadFile))
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_ReadFile{ReadFile: resp.Msg}
+		}
+	case *v1.RunnerCommand_EditFile:
+		resp, execErr := h.EditFile(ctx, connect.NewRequest(c.EditFile))
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_EditFile{EditFile: resp.Msg}
+		}
+	case *v1.RunnerCommand_WriteFile:
+		resp, execErr := h.WriteFile(ctx, connect.NewRequest(c.WriteFile))
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_WriteFile{WriteFile: resp.Msg}
+		}
+	case *v1.RunnerCommand_CreateSession:
+		resp, execErr := h.CreateSession(ctx, connect.NewRequest(c.CreateSession))
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_CreateSession{CreateSession: resp.Msg}
+		}
+	case *v1.RunnerCommand_SessionExec:
+		onOutput := func(stdout, stderr string) {
+			client.ReportOutput(ctx, connect.NewRequest(&v1.OutputChunk{
+				CommandId: cmd.CommandId,
+				Token:     token,
+				Stdout:    stdout,
+				Stderr:    stderr,
+			}))
+		}
+		resp, execErr := h.SessionExecWithOutput(ctx, c.SessionExec, onOutput)
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_SessionExec{SessionExec: resp.Msg}
+		}
+	case *v1.RunnerCommand_StartProcess:
+		// Output and exit are keyed on the process ID, not the command ID:
+		// the command that started the process completes immediately, and
+		// everything the process goes on to do arrives long after.
+		onOutput := func(processID, stdout, stderr string) {
+			client.ReportOutput(ctx, connect.NewRequest(&v1.OutputChunk{
+				CommandId: processID,
+				Token:     token,
+				Stdout:    stdout,
+				Stderr:    stderr,
+			}))
+		}
+		onExit := func(processID string, exitCode int32, exitErr error) {
+			event := &v1.ProcessEvent{
+				Token:     token,
+				ProcessId: processID,
+				Kind:      v1.ProcessEventKind_PROCESS_EVENT_KIND_EXITED,
+				ExitCode:  exitCode,
+			}
+			if exitErr != nil {
+				event.Error = exitErr.Error()
+			}
+			if _, err := client.ReportProcessEvent(ctx, connect.NewRequest(event)); err != nil {
+				slog.Warn("failed to report process exit", "process_id", processID, "error", err)
+			}
+		}
+		resp, execErr := h.StartProcessWithCallbacks(ctx, c.StartProcess, onOutput, onExit)
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_StartProcess{StartProcess: resp.Msg}
+		}
+	case *v1.RunnerCommand_StopProcess:
+		resp, execErr := h.StopProcess(ctx, connect.NewRequest(c.StopProcess))
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_StopProcess{StopProcess: resp.Msg}
+		}
+	case *v1.RunnerCommand_ListProcesses:
+		resp, execErr := h.ListProcesses(ctx, connect.NewRequest(c.ListProcesses))
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_ListProcesses{ListProcesses: resp.Msg}
+		}
+	case *v1.RunnerCommand_CloseSession:
+		resp, execErr := h.CloseSession(ctx, connect.NewRequest(c.CloseSession))
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_CloseSession{CloseSession: resp.Msg}
+		}
+	case *v1.RunnerCommand_DownloadFile:
+		written, execErr := handleDownloadFile(ctx, client, token, c.DownloadFile)
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_DownloadFileResult{DownloadFileResult: &v1.FileStreamResult{BytesWritten: written}}
+		}
+	case *v1.RunnerCommand_DialConnection:
+		resp, execErr := handleDialConnection(ctx, client, token, c.DialConnection)
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_DialConnection{DialConnection: resp}
+		}
+	case *v1.RunnerCommand_UploadFile:
+		written, execErr := handleUploadFile(ctx, client, token, c.UploadFile)
+		if execErr != nil {
+			result.Error = execErr.Error()
+		} else {
+			result.Result = &v1.CommandResult_UploadFileResult{UploadFileResult: &v1.FileStreamResult{BytesWritten: written}}
+		}
+	default:
+		result.Error = "unknown command type"
 	}
+
+	return result
 }
 
 // handleDownloadFile calls DownloadFile on the orchestrator and writes the

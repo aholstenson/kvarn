@@ -28,6 +28,13 @@ import (
 // DefaultExecTimeout is the default exec timeout in seconds (5 minutes).
 const DefaultExecTimeout uint32 = 300
 
+// execWaitDelay is how long a killed command has to release the output pipes
+// before they are closed from under it. It only matters for a process that put
+// itself outside the group the kill went to, which is rare enough that the
+// delay is never paid in practice and short enough that it is not felt when it
+// is.
+const execWaitDelay = 2 * time.Second
+
 // maxSessions is the maximum number of concurrent shell sessions per handler.
 const maxSessions = 16
 
@@ -132,10 +139,11 @@ func (h *Handler) SessionExecWithOutput(ctx context.Context, msg *v1.SessionExec
 	timeout := time.Duration(msg.TimeoutSeconds) * time.Second
 
 	result, err := sess.Execute(ctx, msg.Command, timeout, int(msg.MaxOutputBytes), onOutput)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, connect.NewError(connect.CodeDeadlineExceeded, errors.New("command timed out"))
-		}
+	// A command killed for running too long still produced everything it wrote
+	// up to that point, and that output is the only account of what it was
+	// doing. Reporting the timeout as a failed call would throw it away, so it
+	// comes back as a result carrying TimedOut and the timeout exit code.
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 
@@ -145,6 +153,7 @@ func (h *Handler) SessionExecWithOutput(ctx context.Context, msg *v1.SessionExec
 		Stderr:           result.Stderr,
 		WorkingDir:       result.Cwd,
 		StateReset:       result.StateReset,
+		TimedOut:         result.TimedOut,
 		StdoutTotalBytes: uint64(result.StdoutTotal),
 		StderrTotalBytes: uint64(result.StderrTotal),
 	}), nil
@@ -216,6 +225,19 @@ func (h *Handler) Exec(ctx context.Context, req *connect.Request[v1.ExecRequest]
 		cmd.Dir = msg.WorkingDir
 	}
 
+	// The timeout has to reach the whole tree, not just the process started
+	// here. Commands arrive as pipelines and login shells, so what runs long is
+	// usually a grandchild; killing only the leader leaves it running, still
+	// holding the output pipe, and the call then waits out the very command the
+	// timeout was meant to cut short. Its own process group makes the kill
+	// cover everything descended from it, and WaitDelay bounds the wait for
+	// anything that escapes the group anyway.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = execWaitDelay
+
 	stdout := newCapBuffer(int(msg.MaxOutputBytes))
 	stderr := newCapBuffer(int(msg.MaxOutputBytes))
 	cmd.Stdout = stdout
@@ -223,7 +245,7 @@ func (h *Handler) Exec(ctx context.Context, req *connect.Request[v1.ExecRequest]
 
 	err := cmd.Run()
 
-	exitCode, err := resolveExitCode(ctx, err)
+	exitCode, timedOut, err := resolveExitCode(ctx, err)
 	if err != nil {
 		return nil, err
 	}
@@ -232,6 +254,7 @@ func (h *Handler) Exec(ctx context.Context, req *connect.Request[v1.ExecRequest]
 		ExitCode: exitCode,
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),
+		TimedOut: timedOut,
 	}
 	if stdout.Truncated() {
 		resp.StdoutTotalBytes = uint64(stdout.Total())
@@ -838,32 +861,36 @@ func (h *Handler) WriteFile(ctx context.Context, req *connect.Request[v1.WriteFi
 	}), nil
 }
 
-// resolveExitCode extracts a meaningful exit code from an exec error.
-// For signal-killed processes it returns 128 + signal number (Unix convention).
-// If the context deadline was exceeded it returns a DeadlineExceeded RPC error.
-func resolveExitCode(ctx context.Context, err error) (int32, error) {
+// resolveExitCode extracts a meaningful exit code from an exec error, and
+// reports whether the command was killed for running past its deadline rather
+// than exiting on its own. For signal-killed processes it returns 128 + signal
+// number (Unix convention).
+func resolveExitCode(ctx context.Context, err error) (code int32, timedOut bool, _ error) {
 	if err == nil {
-		return 0, nil
+		return 0, false, nil
 	}
 
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
-		return 0, connect.NewError(connect.CodeInternal, err)
+		return 0, false, connect.NewError(connect.CodeInternal, err)
 	}
 
+	// A timeout is an outcome of the command, not a failure of the call: what
+	// it printed before being killed is the caller's only account of what it
+	// was doing, and an error would discard it.
 	if ctx.Err() == context.DeadlineExceeded {
-		return 0, connect.NewError(connect.CodeDeadlineExceeded, errors.New("command timed out"))
+		return timeoutExitCode, true, nil
 	}
 
 	// ExitCode() returns -1 when the process was killed by a signal.
 	// Extract the actual signal and use the Unix convention of 128 + signal.
 	if exitErr.ExitCode() == -1 {
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			return int32(128 + status.Signal()), nil
+			return int32(128 + status.Signal()), false, nil
 		}
 	}
 
-	return int32(exitErr.ExitCode()), nil
+	return int32(exitErr.ExitCode()), false, nil
 }
 
 // NewServer creates an HTTP server with the runner service registered.

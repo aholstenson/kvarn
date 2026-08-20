@@ -113,9 +113,17 @@ func InstallDependencies(
 			return nil
 		}
 
-		lastErr = fmt.Errorf("nix profile add failed (exit %d) after %s: %s",
-			resp.ExitCode, attemptCount(attempt), nixFailureDetail(resp.Stderr))
-		if !isTransientNixFailure(resp.Stderr) || attempt == maxAttempts {
+		// An attempt killed at its own timeout is a stalled download by another
+		// name, so it is retried on the same backoff as the network failures
+		// nix reports for itself — the budget above is what stops the retrying.
+		if resp.TimedOut {
+			lastErr = fmt.Errorf("nix profile add timed out after %s: %s",
+				attemptCount(attempt), nixFailureDetail(resp.Stderr))
+		} else {
+			lastErr = fmt.Errorf("nix profile add failed (exit %d) after %s: %s",
+				resp.ExitCode, attemptCount(attempt), nixFailureDetail(resp.Stderr))
+		}
+		if !(resp.TimedOut || isTransientNixFailure(resp.Stderr)) || attempt == maxAttempts {
 			break
 		}
 

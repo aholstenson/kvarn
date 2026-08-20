@@ -681,7 +681,7 @@ and `preview.state.restore`.
 | `name` | string | Required. Identifies the step in output and session events. |
 | `run` | string | Required. Executed via `sh -c`. |
 | `working_dir` | string | Relative to the workspace root. |
-| `timeout` | int or duration | Seconds as an integer, or a Go duration string (`30s`, `10m`, `1h30m`). Omitted or `0` means no timeout. |
+| `timeout` | int or duration | Seconds as an integer, or a Go duration string (`30s`, `10m`, `1h30m`). Omitted or `0` gives the step five minutes. A step that runs past it is killed and reported as timed out, along with whatever it printed first. |
 | `retry` | int | Additional attempts on failure, max 10. **Setup steps only.** |
 | `paths` | list | Doublestar globs. **Validation steps only** — the step runs only when a changed file matches. |
 

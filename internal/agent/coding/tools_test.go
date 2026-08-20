@@ -135,6 +135,61 @@ var _ = Describe("CodingToolkit", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 		})
+
+		It("gives the command a default timeout in the guest", func() {
+			var got uint32
+			runner.sessionExecFunc = func(_ context.Context, req *v1.SessionExecRequest) (*v1.SessionExecResponse, error) {
+				got = req.TimeoutSeconds
+				return &v1.SessionExecResponse{}, nil
+			}
+
+			_, err := tools["exec_command"].Execute(ctx, &coding.ExecCommandInput{Command: "make"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(Equal(uint32(600)))
+		})
+
+		It("honours a requested timeout up to the ceiling", func() {
+			var got uint32
+			runner.sessionExecFunc = func(_ context.Context, req *v1.SessionExecRequest) (*v1.SessionExecResponse, error) {
+				got = req.TimeoutSeconds
+				return &v1.SessionExecResponse{}, nil
+			}
+
+			_, err := tools["exec_command"].Execute(ctx, &coding.ExecCommandInput{
+				Command:        "make",
+				TimeoutSeconds: 900,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(Equal(uint32(900)))
+
+			_, err = tools["exec_command"].Execute(ctx, &coding.ExecCommandInput{
+				Command:        "make",
+				TimeoutSeconds: 99999,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(Equal(uint32(1800)))
+		})
+
+		It("renders a timeout as a timeout rather than as an exit code", func() {
+			runner.sessionExecFunc = func(_ context.Context, _ *v1.SessionExecRequest) (*v1.SessionExecResponse, error) {
+				return &v1.SessionExecResponse{
+					ExitCode: 124,
+					Stdout:   "running tests\n",
+					TimedOut: true,
+				}, nil
+			}
+
+			result, err := tools["exec_command"].Execute(ctx, &coding.ExecCommandInput{
+				Command:        "vendor/bin/paratest",
+				TimeoutSeconds: 30,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			rendered := tools["exec_command"].Render(result).Text
+			Expect(rendered).To(ContainSubstring("running tests"))
+			Expect(rendered).To(ContainSubstring("timed out after 30s"))
+			Expect(rendered).NotTo(ContainSubstring("exit code"))
+		})
 	})
 
 	Describe("read_file", func() {

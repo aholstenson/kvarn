@@ -36,6 +36,15 @@ const (
 // genuinely slow — but no single RPC should be.
 const GuestCallTimeout = 2 * time.Minute
 
+// stepCallBudget is how long to wait for a call running one of the repository's
+// own steps. The step carries its own timeout, which the guest enforces where
+// the command can be killed and its output collected, so the host waits out
+// that timeout and then some: were the host to give up first, a slow step would
+// come back as a bare deadline with nothing to show for it.
+func stepCallBudget(step project.Step) time.Duration {
+	return time.Duration(step.Timeout.Seconds())*time.Second + GuestCallTimeout
+}
+
 // ServeOpts is everything StartServices needs that does not come from the
 // repository's own configuration.
 type ServeOpts struct {
@@ -147,7 +156,7 @@ func runStepList(
 				lastErr = fmt.Errorf("%w (attempt %d)", lastErr, attempt)
 			}
 
-			execCtx, cancel := context.WithTimeout(ctx, GuestCallTimeout)
+			execCtx, cancel := context.WithTimeout(ctx, stepCallBudget(step))
 			resp, err := runner.SessionExec(execCtx, &v1.SessionExecRequest{
 				SessionId:      shellSessionID,
 				Command:        command,
@@ -162,6 +171,9 @@ func runStepList(
 			switch {
 			case err != nil:
 				lastErr = err
+			case resp.TimedOut:
+				lastErr = fmt.Errorf("timed out after %ds: %s",
+					step.Timeout.Seconds(), strings.TrimSpace(resp.Stderr))
 			case resp.ExitCode != 0:
 				lastErr = fmt.Errorf("exit code %s: %s",
 					FormatExitCode(resp.ExitCode), strings.TrimSpace(resp.Stderr))
@@ -262,7 +274,7 @@ func WaitReady(
 				}
 			}
 
-			execCtx, cancel := context.WithTimeout(ctx, GuestCallTimeout)
+			execCtx, cancel := context.WithTimeout(ctx, stepCallBudget(step))
 			resp, err := runner.SessionExec(execCtx, &v1.SessionExecRequest{
 				SessionId:      shellSessionID,
 				Command:        command,
@@ -273,6 +285,8 @@ func WaitReady(
 			switch {
 			case err != nil:
 				lastErr = err
+			case resp.TimedOut:
+				lastErr = fmt.Errorf("timed out after %ds: %s", step.Timeout.Seconds(), strings.TrimSpace(resp.Stderr))
 			case resp.ExitCode != 0:
 				lastErr = fmt.Errorf("exit code %s: %s", FormatExitCode(resp.ExitCode), strings.TrimSpace(resp.Stderr))
 			default:

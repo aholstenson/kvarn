@@ -21,7 +21,21 @@ type StepResult struct {
 	Stdout   string
 	Stderr   string
 	Skipped  bool  // true if skipped due to path filtering
+	TimedOut bool  // true if the step ran past its timeout and was killed
 	Err      error // non-nil if the RPC itself failed
+}
+
+// failure describes why a step did not pass, for a message naming it. It is
+// empty for a step that succeeded.
+func (r StepResult) failure() string {
+	switch {
+	case r.TimedOut:
+		return "timed out"
+	case r.ExitCode != 0:
+		return fmt.Sprintf("failed with exit code %s", formatExitCode(r.ExitCode))
+	default:
+		return ""
+	}
 }
 
 // SetupResult captures the outcome of all setup steps and health checks.
@@ -70,8 +84,8 @@ func RunSetup(ctx context.Context, runner RunnerProxy, cfg *project.Config, sess
 		if sr.Err != nil {
 			return result, fmt.Errorf("setup step %q: %w", step.Name, sr.Err)
 		}
-		if sr.ExitCode != 0 {
-			return result, fmt.Errorf("setup step %q failed with exit code %s", step.Name, formatExitCode(sr.ExitCode))
+		if why := sr.failure(); why != "" {
+			return result, fmt.Errorf("setup step %q %s", step.Name, why)
 		}
 	}
 
@@ -84,8 +98,8 @@ func RunSetup(ctx context.Context, runner RunnerProxy, cfg *project.Config, sess
 		if sr.Err != nil {
 			return result, fmt.Errorf("health check %q: %w", step.Name, sr.Err)
 		}
-		if sr.ExitCode != 0 {
-			return result, fmt.Errorf("health check %q failed with exit code %s", step.Name, formatExitCode(sr.ExitCode))
+		if why := sr.failure(); why != "" {
+			return result, fmt.Errorf("health check %q %s", step.Name, why)
 		}
 	}
 
@@ -245,6 +259,7 @@ func execStep(ctx context.Context, runner RunnerProxy, step project.Step, sessio
 		ExitCode: resp.ExitCode,
 		Stdout:   resp.Stdout,
 		Stderr:   resp.Stderr,
+		TimedOut: resp.TimedOut,
 	}
 }
 

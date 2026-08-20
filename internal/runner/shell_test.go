@@ -175,29 +175,44 @@ var _ = Describe("Shell Sessions", func() {
 			}
 		})
 
-		It("returns error for timeout", func() {
+		It("reports a timeout as a result rather than an error", func() {
 			id := createSession()
-			_, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+			resp, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
 				SessionId:      id,
 				Command:        "sleep 60",
 				TimeoutSeconds: 1,
 			}))
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("timed out"))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(resp.Msg.TimedOut).To(BeTrue())
+			Expect(resp.Msg.ExitCode).To(Equal(int32(124)))
+			Expect(resp.Msg.StateReset).To(BeTrue())
+		})
+
+		It("returns what a command printed before it timed out", func() {
+			id := createSession()
+			resp, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+				SessionId:      id,
+				Command:        "echo started; sleep 60",
+				TimeoutSeconds: 1,
+			}))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(resp.Msg.TimedOut).To(BeTrue())
+			Expect(resp.Msg.Stdout).To(ContainSubstring("started"))
 		})
 
 		It("recovers after timeout", func() {
 			id := createSession()
-			_, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+			resp, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
 				SessionId:      id,
 				Command:        "sleep 60",
 				TimeoutSeconds: 1,
 			}))
-			Expect(err).To(HaveOccurred())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(resp.Msg.TimedOut).To(BeTrue())
 
 			// Should still work after timeout.
-			resp := sessionExec(id, "echo recovered")
-			Expect(resp.Stdout).To(Equal("recovered\n"))
+			resp2 := sessionExec(id, "echo recovered")
+			Expect(resp2.Stdout).To(Equal("recovered\n"))
 		})
 
 		It("returns error for unknown session", func() {

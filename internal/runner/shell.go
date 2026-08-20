@@ -161,6 +161,12 @@ func (s *shellSession) killAndRespawn() error {
 // OutputCallback is called with new stdout/stderr content as it becomes available.
 type OutputCallback func(stdout, stderr string)
 
+// timeoutExitCode is what a command killed for running past its timeout
+// reports, following the convention timeout(1) established: 124 is outside the
+// range a shell command sets for itself, so a caller reading only the exit code
+// still sees a failure it cannot mistake for the command's own.
+const timeoutExitCode int32 = 124
+
 // executeResult holds the output of a shell command execution.
 type executeResult struct {
 	Stdout     string
@@ -168,6 +174,7 @@ type executeResult struct {
 	ExitCode   int32
 	Cwd        string
 	StateReset bool // true if the shell died and was respawned (state lost)
+	TimedOut   bool // true if the command ran past its timeout and was killed
 	// Byte counts of what the command actually wrote, set only for a stream
 	// that maxOutputBytes cut down.
 	StdoutTotal int64
@@ -303,11 +310,16 @@ func (s *shellSession) Execute(ctx context.Context, command string, timeout time
 			s.cleanupFiles(prefix)
 
 			result.StateReset = true
+			result.TimedOut = true
+			result.ExitCode = timeoutExitCode
 
 			if respawnErr := s.killAndRespawn(); respawnErr != nil {
 				err = fmt.Errorf("respawn after timeout failed: %w", respawnErr)
 				return
 			}
+			// The result carries the timeout, so the output collected above
+			// survives the trip back: what a command printed before it hung is
+			// the only evidence of why it hung.
 			err = context.DeadlineExceeded
 			return
 

@@ -472,6 +472,10 @@ func provisionTool(ctx context.Context, runner RunnerProxy, sessionID string, st
 	if err != nil {
 		return fmt.Errorf("provision %s: %w", step.Tool, err)
 	}
+	if resp.TimedOut {
+		return fmt.Errorf("provision %s: %q timed out after %ds: %s",
+			step.Tool, step.Command, toolProvisionTimeoutSeconds, strings.TrimSpace(resp.Stderr))
+	}
 	if resp.ExitCode != 0 {
 		return fmt.Errorf("provision %s: %q failed (exit %s): %s",
 			step.Tool, step.Command, formatExitCode(resp.ExitCode), strings.TrimSpace(resp.Stderr))

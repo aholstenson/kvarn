@@ -50,6 +50,18 @@ var _ = Describe("Runner", func() {
 		Expect(resp.Msg.Stderr).To(BeEmpty())
 	})
 
+	It("reports a timed-out command as a result carrying what it printed", func() {
+		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
+			Command:        "sh",
+			Args:           []string{"-c", "echo started; sleep 60"},
+			TimeoutSeconds: 1,
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Msg.TimedOut).To(BeTrue())
+		Expect(resp.Msg.ExitCode).To(Equal(int32(124)))
+		Expect(resp.Msg.Stdout).To(ContainSubstring("started"))
+	})
+
 	It("caps output at max_output_bytes and reports the true size", func() {
 		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
 			Command:        "sh",

@@ -135,6 +135,7 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 		llms.WithMessages(llms.NewMessage(llms.RoleUser, llms.NewTextPart(agentCtx.Prompt))),
 		llms.WithMaxSteps(maxSteps),
 		llms.WithMaxOutputTokens(maxOut),
+		llms.WithToolCallTimeout(hostToolCallTimeout),
 	}
 	if mode.ReadOnly() {
 		opts = append(opts, llms.WithTools(toolkit.ReadOnlyTools()...))

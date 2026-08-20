@@ -30,9 +30,9 @@ type CodingToolkit struct {
 	agentModels  map[string]llms.Model
 	agentConfigs map[string]modelcfg.Entry
 	subAgents    SubAgents
-	repoCtx    *repocontext.RepoContext
-	tracker    *cost.Tracker
-	tasks      *TaskList
+	repoCtx      *repocontext.RepoContext
+	tracker      *cost.Tracker
+	tasks        *TaskList
 }
 
 // CodingToolkitOpts configures a CodingToolkit. AgentModels, SubAgents, and
@@ -175,15 +175,44 @@ func (t *CodingToolkit) ReadOnlyTools() []llms.ToolDef {
 
 // exec_command
 
+// hostToolCallTimeout is how long the host waits for any one tool call. It is
+// the backstop for a call that can never return — a bridge that went away
+// mid-command — and not the mechanism for bounding a slow command: a command is
+// bounded in the guest, where it can be killed and its output collected, so
+// this sits far enough above every guest deadline that the guest always
+// reports first. Left at the library default it would be five minutes, short
+// enough that an ordinary test suite expires here and comes back as a bare
+// deadline with nothing to read.
+const hostToolCallTimeout = 45 * time.Minute
+
+// A command gets a deadline in the guest, where the shell running it can be
+// killed and what it printed first can be collected. The alternative is the
+// host giving up on the call, which yields a bare timeout and no output at all,
+// so these must stay comfortably below hostToolCallTimeout.
+const (
+	// defaultExecTimeoutSeconds is long enough for the builds and test suites a
+	// command is usually reaching for, and short enough that something wedged
+	// on a prompt or a lock is reported while the turn can still act on it.
+	defaultExecTimeoutSeconds uint32 = 600
+	// maxExecTimeoutSeconds is the ceiling on the timeout a caller may ask for.
+	maxExecTimeoutSeconds uint32 = 1800
+)
+
 type ExecCommandInput struct {
-	Command string   `json:"command" jsonschema:"description=The command to run"`
-	Args    []string `json:"args,omitempty" jsonschema:"description=Arguments for the command. If empty and command contains spaces or pipes it runs through sh -c"`
+	Command        string   `json:"command" jsonschema:"description=The command to run"`
+	Args           []string `json:"args,omitempty" jsonschema:"description=Arguments for the command. If empty and command contains spaces or pipes it runs through sh -c"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty" jsonschema:"description=How long the command may run before it is killed. Defaults to 600 and is capped at 1800. Raise it for a long build or test suite; the output produced before a timeout is returned either way."`
 }
 
 type ExecCommandOutput struct {
 	ExitCode int32
 	Stdout   string
 	Stderr   string
+	// TimedOut reports that the command was killed at TimeoutSeconds rather
+	// than exiting on its own, and ExitCode is the timeout's rather than the
+	// command's.
+	TimedOut       bool
+	TimeoutSeconds uint32
 }
 
 type execCommandTool struct {
@@ -192,9 +221,22 @@ type execCommandTool struct {
 
 func (t *execCommandTool) Name() string { return "exec_command" }
 func (t *execCommandTool) Description() string {
-	return "Run a shell command (build, test, lint, install deps). If no args are provided and the command contains spaces or pipes, it runs through sh -c for shell expansion."
+	return "Run a shell command (build, test, lint, install deps). If no args are provided and the command contains spaces or pipes, it runs through sh -c for shell expansion. A command that runs past its timeout (600s by default, set timeout_seconds to raise it) is killed and reports what it had printed by then."
 }
 func (t *execCommandTool) Schema() *ExecCommandInput { return &ExecCommandInput{} }
+
+// execTimeout resolves the guest-side deadline for one command: the caller's
+// request when it made one, clamped to the ceiling, and the default otherwise.
+func execTimeout(requested int) uint32 {
+	switch {
+	case requested <= 0:
+		return defaultExecTimeoutSeconds
+	case requested > int(maxExecTimeoutSeconds):
+		return maxExecTimeoutSeconds
+	default:
+		return uint32(requested)
+	}
+}
 
 func (t *execCommandTool) Execute(ctx context.Context, input *ExecCommandInput) (*ExecCommandOutput, error) {
 	cmd := input.Command
@@ -216,9 +258,11 @@ func (t *execCommandTool) Execute(ctx context.Context, input *ExecCommandInput) 
 	// available to whichever stream the command actually used. A command that
 	// floods both leaves the rendered pair over the ceiling and the clamp on
 	// the way to the model trims it the rest of the way.
+	timeout := execTimeout(input.TimeoutSeconds)
 	resp, err := t.toolkit.runner.SessionExec(ctx, &v1.SessionExecRequest{
 		SessionId:      t.toolkit.sessionID,
 		Command:        cmd,
+		TimeoutSeconds: timeout,
 		MaxOutputBytes: uint32(limitForTool(t.Name()).bytes),
 	}, nil)
 	if err != nil {
@@ -226,9 +270,11 @@ func (t *execCommandTool) Execute(ctx context.Context, input *ExecCommandInput) 
 	}
 
 	return &ExecCommandOutput{
-		ExitCode: resp.ExitCode,
-		Stdout:   resp.Stdout,
-		Stderr:   resp.Stderr,
+		ExitCode:       resp.ExitCode,
+		Stdout:         resp.Stdout,
+		Stderr:         resp.Stderr,
+		TimedOut:       resp.TimedOut,
+		TimeoutSeconds: timeout,
 	}, nil
 }
 
@@ -249,7 +295,14 @@ func (t *execCommandTool) Render(o *ExecCommandOutput) llms.ToolResult {
 		sb.WriteString("STDERR:\n")
 		sb.WriteString(o.Stderr)
 	}
-	fmt.Fprintf(&sb, "\n[exit code: %d]", o.ExitCode)
+	if o.TimedOut {
+		// Said plainly, because the difference between "the suite failed" and
+		// "the suite never finished" decides what to do next, and an exit code
+		// alone does not carry it.
+		fmt.Fprintf(&sb, "\n[timed out after %ds and was killed; the output above is what it produced before that. The shell session was restarted, so any working directory or environment it had set is gone. Re-run with a larger timeout_seconds if it needs longer.]", o.TimeoutSeconds)
+	} else {
+		fmt.Fprintf(&sb, "\n[exit code: %d]", o.ExitCode)
+	}
 	return llms.TextToolResult(sb.String())
 }
 
@@ -704,6 +757,12 @@ func (t *listFilesTool) Execute(ctx context.Context, input *ListFilesInput) (*Li
 	if err != nil {
 		return nil, err
 	}
+	// A walk that was killed part-way has an answer that looks complete and is
+	// not, so it is reported as a failure rather than as a short listing.
+	if resp.TimedOut {
+		out.Failure = "the listing took too long and was stopped; list a narrower path or a smaller depth"
+		return out, nil
+	}
 
 	lines := splitNonEmptyLines(resp.Stdout)
 	if len(lines) == 0 {
@@ -941,6 +1000,13 @@ func (t *searchFilesTool) Execute(ctx context.Context, input *SearchFilesInput) 
 	})
 	if err != nil {
 		return nil, err
+	}
+	// A search that was killed part-way through the walk has an answer that
+	// looks complete and is not, so it is reported as a failure rather than as
+	// a short list of matches.
+	if resp.TimedOut {
+		out.Failure = "the search took too long and was stopped; narrow it with path or glob"
+		return out, nil
 	}
 
 	lines := splitNonEmptyLines(resp.Stdout)
@@ -1246,6 +1312,7 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 		llms.WithTools(sub.Tools(deps)...),
 		llms.WithMaxSteps(maxSteps),
 		llms.WithMaxOutputTokens(maxOut),
+		llms.WithToolCallTimeout(hostToolCallTimeout),
 	}
 	if cfg.ReasoningEffort != "" {
 		opts = append(opts, llms.WithReasoningEffort(cfg.ReasoningEffort))
