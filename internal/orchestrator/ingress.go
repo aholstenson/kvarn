@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"strings"
 	"time"
 
@@ -59,14 +58,50 @@ const previewRetryAfter = 15
 // dial that is slow is a dial that is never going to connect.
 const previewDialTimeout = 10 * time.Second
 
+// previewIdleConnTimeout is how long an unused connection into a guest is kept
+// for the next request. A browser fetching a page's assets comes back within
+// milliseconds, so this only has to outlive a page load; keeping it much longer
+// would hold bridge streams open for a preview nobody is looking at any more.
+const previewIdleConnTimeout = 30 * time.Second
+
+// previewMaxIdleConnsPerSite is how many spare connections one site may keep.
+// Browsers open around six per hostname and asset-heavy pages use all of them,
+// so a smaller pool would send most requests back through a fresh guest dial.
+const previewMaxIdleConnsPerSite = 8
+
 // PreviewIngressHandler builds the HTTP handler that serves preview traffic.
 func PreviewIngressHandler(svc *Service) http.Handler {
-	return &previewIngress{svc: svc, log: slog.With("component", "preview-ingress")}
+	h := &previewIngress{svc: svc, log: slog.With("component", "preview-ingress")}
+	h.guestProxy = h.newProxy()
+	svc.previews.onInstanceGoneCallback(h.closeIdleGuestConns)
+	return h
 }
 
 type previewIngress struct {
 	svc *Service
 	log *slog.Logger
+	// guestProxy carries every preview's traffic. It is built once and shared:
+	// its transport is where connections into the guests are pooled, and a
+	// per-request proxy would dial the bridge again for every asset on a page.
+	guestProxy *httputil.ReverseProxy
+}
+
+// proxyTarget is which preview and which of its ports a request is bound for.
+// It rides on the request context because the reverse proxy is shared, so the
+// destination cannot be captured in its closures.
+type proxyTarget struct {
+	preview *preview.Preview
+	site    preview.Site
+}
+
+type proxyTargetKey struct{}
+
+// targetFrom returns the preview and site a proxied request is for. The proxy
+// only ever runs on requests ServeHTTP has stamped, so a missing target is a
+// programming error rather than something to serve a page about.
+func targetFrom(ctx context.Context) (proxyTarget, bool) {
+	t, ok := ctx.Value(proxyTargetKey{}).(proxyTarget)
+	return t, ok
 }
 
 func (h *previewIngress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -358,42 +393,58 @@ func previewPhaseLabel(state session.State) string {
 	}
 }
 
-// proxy forwards the request into the guest.
-func (h *previewIngress) proxy(w http.ResponseWriter, r *http.Request, p *preview.Preview, site preview.Site) {
-	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("%s:%d", preview.NormalizeHost(site.Host), site.Port)}
-
-	rp := &httputil.ReverseProxy{
+// newProxy builds the shared reverse proxy. Everything that varies per request
+// comes off the request's target rather than out of a closure, so one proxy —
+// and with it one pool of connections into the guests — serves every preview.
+func (h *previewIngress) newProxy() *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(target)
+			t, ok := targetFrom(pr.In.Context())
+			if !ok {
+				return
+			}
+			pr.Out.URL.Scheme = "http"
+			// The URL's host is what the transport pools connections under, so
+			// it has to name one site of one preview and nothing else. The
+			// hostname the request came in on does exactly that: it is what
+			// resolved to this preview in the first place.
+			pr.Out.URL.Host = previewPoolKey(pr.In.Host, t.site.Port)
 			// The app sees the hostname the browser asked for, not the
 			// synthetic one the transport dials: absolute URLs it generates
 			// have to match what is in the address bar.
-			pr.Out.Host = r.Host
+			pr.Out.Host = pr.In.Host
 			pr.SetXForwarded()
 			// TLS terminated in front of us, so the app cannot see the scheme
 			// from the connection and has to be told.
-			pr.Out.Header.Set("X-Forwarded-Proto", forwardedProto(r))
+			pr.Out.Header.Set("X-Forwarded-Proto", forwardedProto(pr.In))
 		},
 		Transport: &http.Transport{
 			// Every connection goes through the preview's own netstack; the
-			// address in the URL exists only to satisfy the URL type.
+			// address in the URL exists only to key the connection pool.
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				t, ok := targetFrom(ctx)
+				if !ok {
+					return nil, errors.New("no preview target on this request")
+				}
 				dialCtx, cancel := context.WithTimeout(ctx, previewDialTimeout)
 				defer cancel()
-				conn, live, err := h.svc.previews.DialGuest(dialCtx, p.ID, site.Port)
+				conn, live, err := h.svc.previews.DialGuest(dialCtx, t.preview.ID, t.site.Port)
 				if err != nil {
 					return nil, err
 				}
 				if !live {
-					return nil, fmt.Errorf("preview %s is not running", p.ID)
+					return nil, fmt.Errorf("preview %s is not running", t.preview.ID)
 				}
 				return conn, nil
 			},
 			// A preview runs one small server behind a userspace network, so
 			// the defaults sized for a public-internet client pool are wrong
-			// here in both directions.
-			MaxIdleConns:          16,
-			IdleConnTimeout:       90 * time.Second,
+			// here in both directions. Reaching a guest costs a round trip
+			// across the bridge, which is why a page's worth of assets has to
+			// be able to share the connections it opens.
+			MaxIdleConns:          64,
+			MaxIdleConnsPerHost:   previewMaxIdleConnsPerSite,
+			IdleConnTimeout:       previewIdleConnTimeout,
 			ResponseHeaderTimeout: 5 * time.Minute,
 			// Compression is negotiated between the browser and the app; we
 			// have no reason to insert ourselves into it.
@@ -409,7 +460,14 @@ func (h *previewIngress) proxy(w http.ResponseWriter, r *http.Request, p *previe
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			h.log.Warn("preview upstream failed", "preview", p.ID, "site", site.Name, "error", err)
+			// A failure is the one place the target may be missing, so the
+			// labels fall back rather than assuming it is there.
+			previewID, siteName := "unknown", "requested"
+			if t, ok := targetFrom(r.Context()); ok {
+				previewID, siteName = t.preview.ID, t.site.Name
+			}
+			h.log.Warn("preview upstream failed",
+				"preview", previewID, "site", siteName, "error", err)
 			w.Header().Set("X-Robots-Tag", "noindex")
 			if !wantsHTML(r) {
 				http.Error(w, "preview upstream unavailable", http.StatusBadGateway)
@@ -417,13 +475,34 @@ func (h *previewIngress) proxy(w http.ResponseWriter, r *http.Request, p *previe
 			}
 			writeHTML(w, http.StatusBadGateway, previewErrorPage(
 				"The app is not answering",
-				fmt.Sprintf("The %s service in this preview did not respond.", site.Name),
+				fmt.Sprintf("The %s service in this preview did not respond.", siteName),
 				"Check kvarn preview logs for what it printed."))
 		},
 		ErrorLog: slog.NewLogLogger(h.log.Handler(), slog.LevelDebug),
 	}
+}
 
-	rp.ServeHTTP(w, r)
+// previewPoolKey names one site of one preview for the transport's connection
+// pool. Requests that share it share connections, so it is built from the
+// hostname that routes to the preview rather than from anything a client sends.
+func previewPoolKey(host string, port uint16) string {
+	return fmt.Sprintf("%s:%d", preview.NormalizeHost(host), port)
+}
+
+// proxy forwards the request into the guest.
+func (h *previewIngress) proxy(w http.ResponseWriter, r *http.Request, p *preview.Preview, site preview.Site) {
+	ctx := context.WithValue(r.Context(), proxyTargetKey{}, proxyTarget{preview: p, site: site})
+	h.guestProxy.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// closeIdleGuestConns drops the connections the proxy is holding open for
+// previews that are no longer running. A pooled connection outlives the request
+// that opened it, so without this a stopped preview's bridge streams would stay
+// up until the pool expired them.
+func (h *previewIngress) closeIdleGuestConns() {
+	if tr, ok := h.guestProxy.Transport.(*http.Transport); ok {
+		tr.CloseIdleConnections()
+	}
 }
 
 // forwardedProto is the scheme the client used, which is https whenever

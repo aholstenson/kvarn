@@ -459,6 +459,34 @@ var _ = Describe("Preview ingress", func() {
 			Expect(seen).To(Equal("https"))
 		})
 
+		It("reuses one connection into the guest for a page's assets", func() {
+			registerRunning()
+
+			// Reaching the guest costs a round trip across the bridge, so a
+			// page pulling a dozen images must not pay for a dozen dials.
+			for range 12 {
+				Expect(bodyOf(get("/asset.png", nil))).To(Equal("hello from the guest"))
+			}
+			Expect(sandbox.dialCount()).To(Equal(1))
+		})
+
+		It("does not hand a stopped preview's connections to the next boot", func() {
+			p := registerRunning()
+			bodyOf(get("/", nil))
+			Expect(sandbox.dialCount()).To(Equal(1))
+
+			// The VM behind a pooled connection is gone once the preview stops.
+			// Its replacement has to be dialled, not inherited.
+			svc.previews.stopInstance(p.ID)
+			next := &dialSandbox{addr: sandbox.addr}
+			svc.previews.mu.Lock()
+			svc.previews.live[p.ID] = &previewInstance{sandbox: next}
+			svc.previews.mu.Unlock()
+
+			Expect(bodyOf(get("/", nil))).To(Equal("hello from the guest"))
+			Expect(next.dialCount()).To(Equal(1))
+		})
+
 		It("marks every response noindex", func() {
 			registerRunning()
 			resp := browserGet("/")

@@ -242,6 +242,11 @@ type previewManager struct {
 	snapshotIDs func(ctx context.Context, p *preview.Preview) (snapshot.ID, error)
 
 	mu sync.Mutex
+	// onInstanceGone is called after a preview's in-memory half is taken down,
+	// so anything holding connections into that VM can let go of them. Ingress
+	// pools connections across requests and would otherwise keep a stopped
+	// preview's bridge streams open until the pool expired them.
+	onInstanceGone func()
 	// live holds the in-memory half of every preview currently holding
 	// resources, keyed by preview ID.
 	live map[string]*previewInstance
@@ -749,8 +754,24 @@ func (m *previewManager) takeInstance(id string) *previewInstance {
 	m.mu.Lock()
 	instance := m.live[id]
 	delete(m.live, id)
+	gone := m.onInstanceGone
 	m.mu.Unlock()
+	if instance != nil && gone != nil {
+		gone()
+	}
 	return instance
+}
+
+// onInstanceGoneCallback installs the notification takeInstance sends. It is
+// set under the lock because the reaper is already running by the time ingress
+// is built, and it is the reaper that most often takes an instance down.
+func (m *previewManager) onInstanceGoneCallback(fn func()) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onInstanceGone = fn
 }
 
 // stopInstance tears down a preview's in-memory half without touching the store

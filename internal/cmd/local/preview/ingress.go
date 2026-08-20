@@ -51,6 +51,9 @@ type ingress struct {
 
 	srv   *http.Server
 	proxy *httputil.ReverseProxy
+	// transport holds the pooled connections into the guest, so closing the
+	// ingress can drop them rather than leave bridge streams open behind it.
+	transport *http.Transport
 
 	done chan struct{}
 	once sync.Once
@@ -92,11 +95,17 @@ func startIngress(
 			}
 			return g.dial(ctx, route.Port)
 		},
-		// Every connection is a fresh dial into the guest, so idle sockets
-		// would only hold bridge resources open between requests.
-		DisableKeepAlives: true,
+		// Reaching the guest costs a round trip across the bridge, so a page
+		// full of assets has to be able to reuse the connections it opens
+		// rather than pay that per image. The pool is sized for one browser
+		// and expires quickly, so an idle preview stops holding bridge
+		// streams open soon after the tab goes quiet.
+		MaxIdleConns:        32,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     30 * time.Second,
 	}
 
+	g.transport = transport
 	g.proxy = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.Out.URL.Scheme = "http"
@@ -170,6 +179,7 @@ func (g *ingress) Close() error {
 		if err := g.srv.Shutdown(ctx); err != nil {
 			g.srv.Close()
 		}
+		g.transport.CloseIdleConnections()
 	})
 	return nil
 }
