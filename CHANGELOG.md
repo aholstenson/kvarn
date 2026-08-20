@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.8.0](https://github.com/aholstenson/kvarn/compare/v0.7.0...v0.8.0) (2026-08-20)
+
+
+### Features
+
+* Ability to link a branch's preview in posted comments ([a6e10d1](https://github.com/aholstenson/kvarn/commit/a6e10d12bc343f27bbce2721ba1a0a13c1056413))
+* Add support for hosting previews ([#13](https://github.com/aholstenson/kvarn/issues/13)) ([5c44c67](https://github.com/aholstenson/kvarn/commit/5c44c672502c63cce63fdea9a8d32d9724b6c948))
+* Improve throughput of preview requests ([3967e61](https://github.com/aholstenson/kvarn/commit/3967e6195472f73abd5c7dfce9a6b75808347f85))
+* Resolve nixpkgs version in the orchestrator ([e13d406](https://github.com/aholstenson/kvarn/commit/e13d406e6714e9ea2f3edb2be2dd4e6308788ad2))
+* State management for previews ([037c10c](https://github.com/aholstenson/kvarn/commit/037c10c210a5ec7cf7522b9cfca840cfb25467f9))
+
+
+### Bug Fixes
+
+* **image:** Dependency installs survive a slow or stalled download ([6179724](https://github.com/aholstenson/kvarn/commit/6179724f630b33fec13c4ad127a6f3c2b49e11ba))
+* Tool calls no longer expire waiting behind a long-running command ([7d5731a](https://github.com/aholstenson/kvarn/commit/7d5731aae741f924160840af23a750589405e4ba))
+
 ## [0.7.0](https://github.com/aholstenson/kvarn/compare/v0.6.0...v0.7.0) (2026-08-18)
 
 
