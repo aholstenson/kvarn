@@ -51,8 +51,8 @@ fit waits in the queue.
 | `max_concurrent_clones` | int | `4` | Jobs that may clone and read their `kvarn.yml` at once — work that happens *before* admission. `0` is unbounded. |
 
 Disk is overcommitted because a job is charged its VM's *virtual* disk size
-while the image on the host stays thin — a qcow2 overlay on Linux, a sparse file
-on macOS. `disk_floor` is what makes that safe: real free space is measured
+while the image on the host stays thin — a qcow2 overlay on Linux, an APFS
+copy-on-write clone on macOS. `disk_floor` is what makes that safe: real free space is measured
 continuously, and admission stops entirely while it is under the floor.
 
 Sizes accept `M`, `MiB`, `G`, `GiB`. Durations use Go syntax (`30s`, `10m`,

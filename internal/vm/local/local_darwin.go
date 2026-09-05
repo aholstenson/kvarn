@@ -31,12 +31,11 @@ type Provider struct {
 	vms map[string]*vmInstance
 }
 
-// NewProvider creates a new Provider for macOS using Apple Virtualization Framework.
-// NewProvider creates a Provider and clears VM temp files left by an earlier
-// run. There are no orphan processes to reap here: a Virtualization.framework
-// VM lives in the orchestrator's address space and dies with it. Its disk does
-// not, and on this platform that disk is a full raw copy of the base image
-// rather than a thin overlay, so sweeping is the whole cleanup story.
+// NewProvider creates a Provider for macOS using Apple Virtualization
+// Framework, and clears VM temp files left by an earlier run. There are no
+// orphan processes to reap here: a Virtualization.framework VM lives in the
+// orchestrator's address space and dies with it. Its disk does not, so sweeping
+// is the whole cleanup story.
 func NewProvider() *Provider {
 	sweepStaleVMFiles(os.TempDir())
 	return &Provider{}
@@ -112,15 +111,15 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 	}
 	log.Info("image file", "file", "disk", "size", info.Size())
 
-	// Convert qcow2 to raw in a temp file for this VM instance.
+	// Give this VM its own raw disk.
 	tmpDiskFile, err := os.CreateTemp("", "kvarn-disk-*.img")
 	if err != nil {
 		return nil, nil, fmt.Errorf("create temp disk file: %w", err)
 	}
 	tmpDisk = tmpDiskFile.Name()
 	tmpDiskFile.Close()
-	if err := disk.ConvertQcow2ToRaw(base.DiskImagePath, tmpDisk); err != nil {
-		return nil, nil, fmt.Errorf("convert disk image: %w", err)
+	if err := materializeDisk(base.DiskImagePath, tmpDisk); err != nil {
+		return nil, nil, err
 	}
 
 	// Resize disk to requested size (or default).
@@ -372,6 +371,40 @@ func (p *Provider) Create(ctx context.Context, opts vm.CreateOpts) (*vm.VM, *vm.
 			// trust-on-first-use to bind the runner to its first peer.
 			ExpectedPeerCID: 0,
 		}, nil
+}
+
+// materializeDisk writes the per-VM boot disk at dst from the qcow2 image at
+// src. It clones the cached raw copy of that image, which APFS does
+// copy-on-write, so booting a VM neither waits for a multi-gigabyte copy nor
+// occupies the space for one.
+//
+// Cloning needs both files on the same APFS volume and a writable cache. Where
+// that does not hold — another filesystem, or a cache dir this process cannot
+// write — it converts the image directly instead: slower and a full copy, but
+// the VM still boots.
+func materializeDisk(src, dst string) error {
+	raw, err := vm.EnsureRawDiskImage(src)
+	if err != nil {
+		slog.Warn("could not cache a raw disk image; copying the image for this VM", "error", err)
+		return convertDisk(src, dst)
+	}
+
+	// The clone creates dst itself, so give up the reserved temp file first.
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clear temp disk file: %w", err)
+	}
+	if err := disk.CloneFile(raw, dst); err != nil {
+		slog.Warn("could not clone the raw disk image; copying the image for this VM", "error", err)
+		return convertDisk(src, dst)
+	}
+	return nil
+}
+
+func convertDisk(src, dst string) error {
+	if err := disk.ConvertQcow2ToRaw(src, dst); err != nil {
+		return fmt.Errorf("convert disk image: %w", err)
+	}
+	return nil
 }
 
 func (p *Provider) Destroy(_ context.Context, id string) error {

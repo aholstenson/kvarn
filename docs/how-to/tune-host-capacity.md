@@ -34,8 +34,9 @@ disk_floor = "40G"
 ```
 
 Disk overcommit is not a guess. A job is charged its VM's *virtual* disk size
-while the image on the host stays thin — a qcow2 overlay on Linux, a sparse file
-on macOS — so charging the full request would idle most of the pool. What makes
+while the image on the host stays thin — a qcow2 overlay on Linux, an APFS
+copy-on-write clone on macOS — so charging the full request would idle most of
+the pool. What makes
 it safe is `disk_floor`: real free space is measured continuously, and admission
 stops entirely while it is below the floor, whatever the accounting says. It
 defaults to 10% of the pool. Lower `disk_overcommit` to `1.0` if you would

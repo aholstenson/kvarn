@@ -19,11 +19,11 @@ var vmTempGlobs = []string{
 // has created a VM, so everything it matches belongs to a run that is over —
 // which is what makes a blind prefix sweep safe here and nowhere else.
 //
-// It matters more than it looks. A crash mid-boot leaves a VM's disk behind:
-// on Linux a qcow2 overlay, but on macOS a full raw copy of the base image,
-// resized to the job's disk request. Those land on the same filesystem the
-// admission pool is sized from, so without this a host that restarts under
-// load quietly loses the space it needs to admit the jobs it just requeued.
+// It matters more than it looks. A crash mid-boot leaves a VM's disk behind —
+// a qcow2 overlay on Linux, an APFS clone on macOS — holding every block that
+// VM wrote. Those land on the same filesystem the admission pool is sized from,
+// so without this a host that restarts under load quietly loses the space it
+// needs to admit the jobs it just requeued.
 //
 // Like the QEMU reaping beside it, this assumes one orchestrator per host —
 // the same assumption the session database and the VM table already make.
