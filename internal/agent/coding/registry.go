@@ -17,12 +17,12 @@ type Registry map[string]*Mode
 // builtinModes lists the modes kvarn ships with, in the order `kvarn modes
 // list` shows them.
 func builtinModes() []*Mode {
-	return []*Mode{ModeAuto, ModeImplement, ModeFix, ModeFeedback, ModeReview, ModeResearch}
+	return []*Mode{ModeAuto, ModeImplement, ModeFix, ModeFeedback, ModeResolveConflicts, ModeReview, ModeResearch}
 }
 
 // Builtins returns a registry holding only the built-in modes.
 func Builtins() Registry {
-	r := make(Registry, 6)
+	r := make(Registry, len(builtinModes()))
 	for _, m := range builtinModes() {
 		r[m.Name] = m
 	}

@@ -38,6 +38,46 @@ and validation retries come from whichever mode ends up running — see
 max_cost_usd = 3.0
 ```
 
+## Merging the base branch and resolving the conflicts
+
+A pull request that has fallen behind its base branch can be brought up to date
+by the same command. The `resolve-conflicts` mode exists for exactly that:
+
+```sh
+kvarn jobs start my-project --pr-ref 1234 --mode resolve-conflicts \
+  "merge master and resolve the conflicts"
+```
+
+The agent merges the base branch into the pull request's head branch, resolves
+what conflicted, and the pull request gains **one merge commit** with the head
+and the base as its two parents — so the forge sees a genuine merge, not a
+squashed copy of one.
+
+Asking for a merge *and* a change in one job works, and lands two commits: the
+merge first, then everything the agent did afterwards. Any write mode on a pull
+request can merge, so the wording of the prompt is enough — the mode only
+changes the instructions the agent starts from:
+
+```sh
+kvarn jobs start my-project --pr-ref 1234 \
+  "merge in the latest master, then fix the empty-input crash"
+```
+
+What to expect:
+
+| | |
+| --- | --- |
+| The base branch is a snapshot | The merge is against the base tip as it stood when the job started. If the base moves again during the run, the pull request may still be behind on landing. |
+| One merge per job | Run the job again to merge again. |
+| Validation still gates the push | A merge can break a build neither branch broke on its own. The agent gets its retries to fix that; a run still red when they run out fails and pushes nothing, merge included. |
+| An unfinished merge fails the job | If the agent leaves conflicts half-resolved, nothing is pushed. |
+| Fork pull requests are refused | The base branch lives in another repository — the same reason a fork cannot be continued at all. |
+| Submodules are refused | A merge that moves a submodule pointer fails the job rather than pushing a merge missing part of itself. |
+
+If the merge base lies deeper than the job's clone depth, kvarn completes the
+clone's history before merging rather than merging against history it does not
+hold. On a large repository that first job is slower.
+
 ## What gets rejected, and why
 
 All of these are refused **before a session is created**, so a rejected request

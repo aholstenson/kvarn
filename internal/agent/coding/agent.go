@@ -99,6 +99,15 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 
 	subAgents := BuiltinSubAgents()
 
+	// The merge tools are offered only when the run has both halves: a branch
+	// shipped into the guest and somewhere for the resulting commit to go. A
+	// read-only mode gets neither, since ReadOnlyTools never carries them.
+	mergeTarget := agentCtx.MergeTarget
+	checkpointer := agentCtx.Checkpointer
+	if mergeTarget == nil || checkpointer == nil || mode.ReadOnly() {
+		mergeTarget, checkpointer = nil, nil
+	}
+
 	toolkit := NewCodingToolkitWithOpts(CodingToolkitOpts{
 		Runner:       agentCtx.Runner,
 		WorkingDir:   agentCtx.WorkingDir,
@@ -109,8 +118,14 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 		SubAgents:    subAgents,
 		RepoCtx:      agentCtx.RepoContext,
 		Tracker:      agentCtx.Cost,
+		HeadBranch:   agentCtx.Branch,
+		MergeTarget:  mergeTarget,
+		Checkpointer: checkpointer,
 	})
 	systemPrompt := mode.SystemPrompt(agentCtx.ProjectName, agentCtx.RepoURL, agentCtx.Branch, agentCtx.RepoContext, subAgents, agentCtx.PullRequest)
+	if mergeTarget != nil {
+		systemPrompt += MergeInstructions(mergeTarget.Branch)
+	}
 
 	mainCfg := models.ClassConfigs[ModelMain]
 	maxOut := mainCfg.MaxOutputTokens

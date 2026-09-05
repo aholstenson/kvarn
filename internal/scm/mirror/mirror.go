@@ -400,6 +400,59 @@ func (s *Store) Clone(ctx context.Context, opts CloneOpts) error {
 	return nil
 }
 
+// FetchInto brings branch into an existing job clone, taking the objects from
+// the mirror rather than from the forge.
+//
+// It is how a clone made `--single-branch` gains a second branch — the base of
+// the pull request it is about to merge. Going through the mirror keeps that a
+// local copy rather than another round trip to the forge, and the shared lock
+// is the same one Clone takes: any number of jobs may read a mirror at once,
+// none while it is being fetched into or repacked.
+func (s *Store) FetchInto(ctx context.Context, ref Ref, branch, destRepo string) error {
+	if destRepo == "" {
+		return errors.New("destination repository is required")
+	}
+	if err := s.refresh(ctx, ref, branch, ""); err != nil {
+		return err
+	}
+
+	lock, err := s.lock(ctx, ref.Project, false)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+
+	return gitscm.FetchBranch(ctx, gitscm.FetchBranchOpts{
+		RepoDir: destRepo,
+		Source:  s.mirrorPath(ref.Project),
+		Branch:  branch,
+	})
+}
+
+// UnshallowFrom completes a job clone's history out of the mirror, for the case
+// where the commit two branches parted at lies deeper than the clone's depth.
+//
+// A mirror that is itself shallow cannot supply what it does not have, and git
+// says so; the caller treats that as the base branch being unusable rather than
+// working from a history it cannot trust.
+func (s *Store) UnshallowFrom(ctx context.Context, ref Ref, destRepo string, refs []string) error {
+	if destRepo == "" {
+		return errors.New("destination repository is required")
+	}
+
+	lock, err := s.lock(ctx, ref.Project, false)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+
+	return gitscm.Unshallow(ctx, gitscm.UnshallowOpts{
+		RepoDir: destRepo,
+		Source:  s.mirrorPath(ref.Project),
+		Refs:    refs,
+	})
+}
+
 // RecordPush brings a branch that kvarn has just pushed upstream into the
 // mirror, taking the objects from the job clone that produced them rather than
 // from the network, so the next run on that branch starts warm.

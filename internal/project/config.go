@@ -673,7 +673,7 @@ var (
 // It mirrors coding.Builtins(), which this package cannot read: the coding
 // package depends on this one through the sandbox. A test asserts the two lists
 // agree, so a mode added there is caught here rather than drifting.
-var builtinModeNames = []string{"auto", "implement", "fix", "feedback", "review", "research"}
+var builtinModeNames = []string{"auto", "implement", "fix", "feedback", "resolve-conflicts", "review", "research"}
 
 // BuiltinModeNames returns the reserved mode names, for callers that need the
 // same list this package validates against.

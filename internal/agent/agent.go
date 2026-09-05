@@ -93,6 +93,57 @@ type Context struct {
 	// Cost is the per-job spend tracker. When non-nil the agent should record
 	// LLM token usage through it and consult it for budget enforcement.
 	Cost *cost.Tracker
+	// MergeTarget is the branch this run may merge and Checkpointer is how a
+	// finished merge becomes a commit. Both are set or neither is: the tools
+	// that merge are only offered when there is something to merge and somewhere
+	// for the result to go.
+	MergeTarget  *MergeTarget
+	Checkpointer Checkpointer
+}
+
+// MergeTarget is the branch a run may merge, and the exact commit of it that was
+// shipped into the guest.
+//
+// The commit is carried alongside the name because the two answer different
+// questions: the guest merges what it was given, and the commit the host records
+// as the second parent has to be that same commit — not wherever the branch has
+// moved to since.
+type MergeTarget struct {
+	Branch string
+	SHA    string
+}
+
+// Checkpointer records a commit boundary mid-run: the host extracts what the
+// guest has and turns it into a commit that will be pushed with the rest of the
+// run's work.
+//
+// It exists because a run is no longer one flat diff. A merge has to become its
+// own commit, with its own parents, at the moment it is resolved — extraction
+// reads the live worktree, so there is no replaying it later.
+type Checkpointer interface {
+	Checkpoint(ctx context.Context, req CheckpointRequest) error
+}
+
+// CheckpointKind says what sort of commit boundary is being recorded.
+type CheckpointKind int
+
+const (
+	// CheckpointMerge records a merge: a commit with the run's head and the
+	// merged commit as its two parents.
+	CheckpointMerge CheckpointKind = iota + 1
+)
+
+// CheckpointRequest describes one commit boundary.
+type CheckpointRequest struct {
+	Kind    CheckpointKind
+	Message string
+	// MergeParent is the second parent of the commit to record. Empty would be
+	// an ordinary single-parent commit, which is the seam a general commit tool
+	// would reuse; nothing asks for that today.
+	MergeParent string
+	// GuestCommit is what the guest recorded for this boundary. It becomes the
+	// revision later change detection measures against.
+	GuestCommit string
 }
 
 // Result holds the outcome of an agent run, including a summary suitable for

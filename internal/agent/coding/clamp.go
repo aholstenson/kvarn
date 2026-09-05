@@ -53,6 +53,12 @@ var resultLimits = map[string]resultLimit{
 	"edit_file":    {maxFileToolResultBytes, "read a window of the file with start_line and end_line"},
 	"write_file":   {maxFileToolResultBytes, "read a window of the file with start_line and end_line"},
 
+	// A merge reports one line per conflicting path, so a merge of a wide branch
+	// is the one case these can grow: the ceiling keeps that bounded, and the
+	// paths that were cut are still in the working tree for git to list again.
+	"merge_branch": {maxToolResultBytes, "list the remaining conflicts with git diff --name-only --diff-filter=U"},
+	"finish_merge": {maxToolResultBytes, "read the merge commit message with git log -1"},
+
 	"activate_skill": {maxFileToolResultBytes, ""},
 	"spawn_agent":    {maxFileToolResultBytes, "ask the sub-agent for a shorter answer"},
 }

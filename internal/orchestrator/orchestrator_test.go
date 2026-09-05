@@ -247,6 +247,8 @@ func (m *testSandbox) ExtractChanges(ctx context.Context, destDir string) error 
 	return sandbox.ExtractChanges(ctx, m.runner, m.workingDir, destDir, m.baseCommit)
 }
 
+func (m *testSandbox) SetBaseCommit(sha string) { m.baseCommit = sha }
+
 // mockSCM records clone calls and performs a real local clone.
 // Use the files field to inject additional files into the "cloned" directory.
 type mockSCM struct {

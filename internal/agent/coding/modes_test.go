@@ -143,7 +143,8 @@ var _ = Describe("Registry", func() {
 		It("returns the built-ins when nothing is defined", func() {
 			reg, err := coding.Merge(nil)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(reg.Names()).To(ConsistOf("auto", "implement", "fix", "feedback", "review", "research"))
+			Expect(reg.Names()).To(ConsistOf(
+				"auto", "implement", "fix", "feedback", "resolve-conflicts", "review", "research"))
 		})
 
 		It("inherits every unset axis from the mode it extends", func() {

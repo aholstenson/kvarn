@@ -154,27 +154,45 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 		return fmt.Errorf("stage changes: %w", err)
 	}
 
-	// Identity comes from -c rather than global config, which the orchestrator
-	// host may not have at all. The message arrives on stdin so an agent-written
-	// body of arbitrary length and shape never has to survive argv.
-	if _, err := Run(ctx, Cmd{
-		Dir: opts.RepoDir,
-		Config: []string{
-			"user.name=" + opts.AuthorName,
-			"user.email=" + opts.AuthorEmail,
-			"commit.gpgsign=false",
-		},
-		Sub:   "commit",
-		Flags: []string{"--no-verify", "-F", "-"},
-		Stdin: opts.Message,
-	}); err != nil {
-		return fmt.Errorf("commit: %w", err)
+	// A run can arrive here with commits already recorded and nothing left over
+	// — a job that only merged its base branch, whose merge commit MergeCommit
+	// has already made. Committing an empty tree change on top would add a
+	// commit saying nothing, and refusing to push would drop the merge.
+	staged, err := Run(ctx, Cmd{
+		Dir:      opts.RepoDir,
+		Sub:      "diff",
+		Flags:    []string{"--cached", "--name-only"},
+		Operands: []string{"HEAD"},
+	})
+	if err != nil {
+		return fmt.Errorf("check staged changes: %w", err)
 	}
 
-	slog.Info("committed changes",
-		"branch", opts.Branch,
-		"author", opts.AuthorName,
-	)
+	if strings.TrimSpace(staged) == "" {
+		slog.Info("nothing staged; pushing the commits already recorded", "branch", opts.Branch)
+	} else {
+		// Identity comes from -c rather than global config, which the orchestrator
+		// host may not have at all. The message arrives on stdin so an agent-written
+		// body of arbitrary length and shape never has to survive argv.
+		if _, err := Run(ctx, Cmd{
+			Dir: opts.RepoDir,
+			Config: []string{
+				"user.name=" + opts.AuthorName,
+				"user.email=" + opts.AuthorEmail,
+				"commit.gpgsign=false",
+			},
+			Sub:   "commit",
+			Flags: []string{"--no-verify", "-F", "-"},
+			Stdin: opts.Message,
+		}); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+
+		slog.Info("committed changes",
+			"branch", opts.Branch,
+			"author", opts.AuthorName,
+		)
+	}
 
 	// Resolved here rather than reused from clone time: the job between the two
 	// can outlive a short-lived token, and this is the last moment before the

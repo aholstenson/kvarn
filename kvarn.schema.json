@@ -164,7 +164,7 @@
       }
     },
     "modes": {
-      "description": "Agent modes this repository defines, keyed by the name a job selects with --mode. Each sits beside the built-in modes (auto, implement, fix, feedback, review, research) rather than replacing one: it inherits from a mode via `extends` and overrides only the axes it names.",
+      "description": "Agent modes this repository defines, keyed by the name a job selects with --mode. Each sits beside the built-in modes (auto, implement, fix, feedback, resolve-conflicts, review, research) rather than replacing one: it inherits from a mode via `extends` and overrides only the axes it names.",
       "type": "object",
       "propertyNames": { "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64 },
       "additionalProperties": { "$ref": "#/$defs/mode" }

@@ -15,6 +15,7 @@ import (
 	llms "github.com/aholstenson/llms-go"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/internal/agent"
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
@@ -33,6 +34,13 @@ type CodingToolkit struct {
 	repoCtx      *repocontext.RepoContext
 	tracker      *cost.Tracker
 	tasks        *TaskList
+
+	// headBranch is the branch the workspace is checked out on, named in the
+	// merge commit's subject.
+	headBranch   string
+	mergeTarget  *agent.MergeTarget
+	checkpointer agent.Checkpointer
+	merge        *mergeState
 }
 
 // CodingToolkitOpts configures a CodingToolkit. AgentModels, SubAgents, and
@@ -55,6 +63,13 @@ type CodingToolkitOpts struct {
 	// budget warning note in the next tool result it sees after the warn
 	// threshold is crossed.
 	Tracker *cost.Tracker
+	// HeadBranch is the branch the workspace sits on.
+	HeadBranch string
+	// MergeTarget and Checkpointer add the merge tools. Both are required: a
+	// branch to merge with nowhere to record the result would let the agent
+	// produce a merge that never reaches the pull request.
+	MergeTarget  *agent.MergeTarget
+	Checkpointer agent.Checkpointer
 }
 
 func NewCodingToolkit(runner sandbox.RunnerProxy, workingDir string, sessionID string, skills []repocontext.Skill) *CodingToolkit {
@@ -82,6 +97,10 @@ func NewCodingToolkitWithOpts(opts CodingToolkitOpts) *CodingToolkit {
 		repoCtx:      opts.RepoCtx,
 		tracker:      opts.Tracker,
 		tasks:        NewTaskList(),
+		headBranch:   opts.HeadBranch,
+		mergeTarget:  opts.MergeTarget,
+		checkpointer: opts.Checkpointer,
+		merge:        &mergeState{},
 	}
 }
 
@@ -147,6 +166,15 @@ func (t *CodingToolkit) Tools() []llms.ToolDef {
 	}
 	if len(t.agentModels) > 0 && len(t.subAgents) > 0 {
 		tools = append(tools, llms.NewToolDef(&spawnAgentTool{toolkit: t}))
+	}
+	// Merging needs both a branch that was shipped into the guest and a way to
+	// turn the result into a commit, which together mean a write mode on a pull
+	// request. A read-only run never gets these; see ReadOnlyTools.
+	if t.mergeTarget != nil && t.checkpointer != nil {
+		tools = append(tools,
+			llms.NewToolDef(&mergeBranchTool{toolkit: t}),
+			llms.NewToolDef(&finishMergeTool{toolkit: t}),
+		)
 	}
 	return t.guard(tools)
 }

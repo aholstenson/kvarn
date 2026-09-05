@@ -44,7 +44,7 @@ max_cost_usd = 1.0
 
 `[projects.<name>.jobs.<mode>]` overrides `max_cost_usd`,
 `max_validation_retries` and `priority` for one agent mode (`auto`,
-`implement`, `fix`, `feedback`, `review`, `research`).
+`implement`, `fix`, `feedback`, `resolve-conflicts`, `review`, `research`).
 
 Omitting these keys does **not** mean unlimited — the built-in fallbacks are
 `max_cost_usd = 5.00` and `max_validation_retries = 3`.

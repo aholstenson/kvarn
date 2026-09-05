@@ -44,6 +44,10 @@ type deliveryRequest struct {
 	// comment header can name them.
 	metadata map[string]string
 	worklog  []worklogEntry
+	// checkpoints is how many commits the run already recorded in the clone — a
+	// merge, today. A run that made one has something to push even when its
+	// trailing diff is empty.
+	checkpoints int
 	// valResult is the last validation pass, reported alongside the result so a
 	// comment says which steps ran and how they went. Nil when the mode skips
 	// validation or the project declares no steps.
@@ -137,7 +141,7 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 		case coding.SinkNewPullRequest:
 			if err := s.submitChanges(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
 				req.proj, req.cfg, req.behavior, req.mode.Name, req.baseBranch, req.cloneURL, req.cloneDir, req.creds,
-				req.userPrompt, req.metadata, req.worklog, req.cost, req.log); err != nil {
+				req.userPrompt, req.metadata, req.worklog, req.checkpoints, req.cost, req.log); err != nil {
 				return err
 			}
 			commented = true
@@ -148,7 +152,7 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 			}
 			if err := s.submitFollowup(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
 				req.proj, req.cfg, req.behavior, req.mode.Name, req.pr, req.cloneURL, req.cloneDir, req.creds,
-				req.userPrompt, req.metadata, req.worklog, req.cost, req.log); err != nil {
+				req.userPrompt, req.metadata, req.worklog, req.checkpoints, req.cost, req.log); err != nil {
 				return err
 			}
 			commented = true

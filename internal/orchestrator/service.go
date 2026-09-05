@@ -360,6 +360,9 @@ type Sandbox interface {
 	RunValidation(ctx context.Context, cfg *projconfig.Config, changedFiles []string, onDone sandbox.OnStepDone, onOutput sandbox.OnOutput) (*sandbox.ValidationResult, error)
 	ChangedFiles(ctx context.Context) ([]string, error)
 	ExtractChanges(ctx context.Context, destDir string) error
+	// SetBaseCommit moves the revision change detection measures against, which
+	// is what a checkpoint does once the work so far has become a commit.
+	SetBaseCommit(sha string)
 	SaveCache(ctx context.Context) error
 	Close()
 }
@@ -1341,6 +1344,19 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	// as the repository's own block and the chosen mode are both known.
 	prBehavior := s.resolvePRBehavior(ctx, proj, forgeCfg, cfg, userDefaults, mode.Name, log)
 
+	// A run on a pull request that may commit is the one that can be asked to
+	// merge, so its base branch is fetched into the clone before the transfer
+	// ships that clone into the VM. A read-only run skips the work: it has
+	// nothing to merge with.
+	//
+	// A fork's base branch lives in another repository, so it is neither ours to
+	// merge from nor pushable — but a fork never reaches here, because a pull
+	// request from one is refused when the job is submitted.
+	mergeBaseSHA := ""
+	if spec.pr != nil && mode.WritesChanges() {
+		mergeBaseSHA = s.prepareMergeBase(ctx, proj, cloneURL, cloneDir, branch, spec.baseBranch, creds, log)
+	}
+
 	// The footprint is known, so the clone permit has done its job. Handing it
 	// back here rather than at the end of the run is the whole point: held
 	// across the wait for capacity, the number of permits would cap the queue
@@ -1486,6 +1502,13 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		// The clone is untouched at this point, so its worktree is exactly
 		// HEAD: ship the repository alone and let the guest write the files.
 		PristineClone: true,
+		// The same author the host commits and pushes under, so a commit the
+		// guest makes — the merge the agent resolves, above all — is already
+		// attributed correctly before the host rebuilds it.
+		CommitIdentity: sandbox.Identity{
+			Name:  prBehavior.CommitAuthorName,
+			Email: prBehavior.CommitAuthorEmail,
+		},
 		WorkingDir:    s.workspaceDir,
 		Registry:      s.registry,
 		BridgeHandler: s.bridgeHandler,
@@ -1523,6 +1546,22 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 
 	worklog := &worklogCollector{}
 
+	// The merge tools reach the agent only with both halves in place: the base
+	// commit that was shipped into the guest, and the checkpointer that turns a
+	// finished merge into a commit with that commit as its second parent.
+	var mergeTarget *agent.MergeTarget
+	var checkpointer *runCheckpointer
+	if mergeBaseSHA != "" {
+		mergeTarget = &agent.MergeTarget{Branch: spec.baseBranch, SHA: mergeBaseSHA}
+		checkpointer = &runCheckpointer{
+			sess:        sess,
+			cloneDir:    cloneDir,
+			authorName:  prBehavior.CommitAuthorName,
+			authorEmail: prBehavior.CommitAuthorEmail,
+			log:         log,
+		}
+	}
+
 	agentCtx := &agent.Context{
 		ProjectName: proj.Name,
 		RepoURL:     proj.RepoURL,
@@ -1535,6 +1574,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		RepoContext: rc,
 		PullRequest: prBehavior.PullRequest,
 		Cost:        tracker,
+		MergeTarget: mergeTarget,
 		OnProgress: func(event agent.ProgressEvent) {
 			switch e := event.(type) {
 			case agent.ProgressToolUse:
@@ -1569,6 +1609,11 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 				})
 			}
 		},
+	}
+	// Assigned only when there is one, so the interface stays nil rather than
+	// holding a nil pointer the agent would treat as a working checkpointer.
+	if checkpointer != nil {
+		agentCtx.Checkpointer = checkpointer
 	}
 
 	// Run the agent; if it modifies files and the project has validation
@@ -1641,8 +1686,12 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		// that writes one has. A read-only run leaves the list nil so every step
 		// runs: gating it on an empty diff would skip each step that declares
 		// `paths:` and report the pass those skips add up to.
+		//
+		// A run that has merged leaves it nil for a related reason: the diff now
+		// describes only what came after the merge, so gating on it would skip
+		// exactly the steps a merge most needs run.
 		var changedFiles []string
-		if mode.WritesChanges() {
+		if mode.WritesChanges() && checkpointer.Count() == 0 {
 			changedFiles, err = sess.ChangedFiles(ctx)
 			if err != nil {
 				log.Error("failed to get changed files", "error", err)
@@ -1737,6 +1786,21 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		}
 	}
 
+	// A merge the agent started and never finished leaves conflict markers in
+	// the tree. Delivering that would put them in the pull request, so the run
+	// fails here — before any sink runs, and with nothing pushed.
+	if mergeTarget != nil {
+		inProgress, err := sandbox.MergeInProgress(ctx, sess.GetRunner(), sess.GetWorkingDir())
+		if err != nil {
+			log.Warn("could not check for an unfinished merge", "error", err)
+		} else if inProgress {
+			log.Error("the run left a merge unfinished")
+			s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf(
+				"the agent started merging %s and never finished it; nothing was delivered", mergeTarget.Branch))
+			return
+		}
+	}
+
 	// Deliver the run's output wherever the mode says it goes.
 	userPrompt := spec.userPrompt
 	if userPrompt == "" {
@@ -1758,6 +1822,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		userPrompt:  userPrompt,
 		metadata:    spec.metadata,
 		worklog:     worklog.snapshot(),
+		checkpoints: checkpointer.Count(),
 
 		valResult:        valResult,
 		validationFailed: requiredFailed,
@@ -1869,15 +1934,18 @@ func (s *Service) submitChanges(
 	prompt string,
 	metadata map[string]string,
 	worklog []worklogEntry,
+	checkpoints int,
 	costReport cost.Report,
 	log *slog.Logger,
 ) error {
-	// Check if there are any changes.
+	// Check if there are any changes. A commit the run already recorded counts:
+	// a run that only merged its base branch has an empty trailing diff and a
+	// merge commit that must still reach the forge.
 	changedFiles, err := sess.ChangedFiles(ctx)
 	if err != nil {
 		return fmt.Errorf("check changed files for submission: %w", err)
 	}
-	if len(changedFiles) == 0 {
+	if len(changedFiles) == 0 && checkpoints == 0 {
 		log.Info("no changes to submit")
 		return nil
 	}
@@ -2023,15 +2091,18 @@ func (s *Service) submitFollowup(
 	feedback string,
 	metadata map[string]string,
 	worklog []worklogEntry,
+	checkpoints int,
 	costReport cost.Report,
 	log *slog.Logger,
 ) error {
-	// The VM cloned the PR head, so the changed set is the follow-up delta.
+	// The VM cloned the PR head, so the changed set is the follow-up delta. A
+	// merge-only run has none and a merge commit waiting in the clone, so a
+	// commit already recorded counts as something to submit.
 	changedFiles, err := sess.ChangedFiles(ctx)
 	if err != nil {
 		return fmt.Errorf("check changed files for submission: %w", err)
 	}
-	if len(changedFiles) == 0 {
+	if len(changedFiles) == 0 && checkpoints == 0 {
 		log.Info("no changes to submit")
 		return nil
 	}

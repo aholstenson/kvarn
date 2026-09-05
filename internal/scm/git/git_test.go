@@ -243,7 +243,9 @@ var _ = Describe("Git SCM", func() {
 			Expect(string(out)).To(ContainSubstring("kvarn <kvarn@noreply>"))
 		})
 
-		It("returns error when no changes to commit", func() {
+		It("pushes without committing when nothing is staged", func() {
+			head := runGit(cloneDir, "rev-parse", "HEAD")
+
 			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
 				RepoDir:     cloneDir,
 				RemoteURL:   bareDir,
@@ -252,8 +254,12 @@ var _ = Describe("Git SCM", func() {
 				AuthorName:  "kvarn",
 				AuthorEmail: "kvarn@noreply",
 			})
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("commit"))
+			Expect(err).NotTo(HaveOccurred())
+
+			// The branch is pushed at the commit it already had: a run whose only
+			// work is a commit made earlier still has something to deliver, and an
+			// empty commit on top would say nothing.
+			Expect(runGit(bareDir, "rev-parse", "refs/heads/kvarn/empty")).To(Equal(head))
 		})
 
 		It("returns error for missing repo dir", func() {

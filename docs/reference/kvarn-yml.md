@@ -283,8 +283,8 @@ modes:
 ```
 
 Declares agent modes for this repository, keyed by the name a job selects with
-`--mode`. They sit beside the six built-in modes (`auto`, `implement`, `fix`,
-`feedback`, `review`, `research`) rather than replacing one: a definition
+`--mode`. They sit beside the seven built-in modes (`auto`, `implement`, `fix`,
+`feedback`, `resolve-conflicts`, `review`, `research`) rather than replacing one: a definition
 inherits from a mode via `extends` and overrides only the axes it names. Run
 `kvarn modes list` in a checkout to see the resolved set.
 

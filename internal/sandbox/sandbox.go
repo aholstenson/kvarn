@@ -167,6 +167,14 @@ type Opts struct {
 	// "pr-<n>" isolates untrusted fork PRs.
 	Namespace string
 
+	// CommitIdentity is the git identity the guest commits under. It is the
+	// forge's configured commit author, so a commit made inside the VM is
+	// attributed the same way as one the host makes on the run's behalf.
+	// Either half left empty falls back to DefaultIdentity: git needs a name
+	// before it will merge or commit at all, so a run must never be without
+	// one.
+	CommitIdentity Identity
+
 	// Secrets are env-var-name → final-string pairs to expose inside the
 	// VM. For env-typed secrets the value is the real secret; for bearer
 	// secrets the orchestrator has already substituted the unguessable
@@ -370,6 +378,13 @@ func (s *Session) ChangedFiles(ctx context.Context) ([]string, error) {
 // GetBaseCommit returns the commit the workspace started at, or "" when it
 // could not be resolved.
 func (s *Session) GetBaseCommit() string { return s.BaseCommit }
+
+// SetBaseCommit moves the anchor every later change detection measures against.
+//
+// It is what a checkpoint does: once the host has turned the guest's work so far
+// into a commit of its own, the next extraction must describe what came after
+// that commit rather than repeating everything since the run began.
+func (s *Session) SetBaseCommit(sha string) { s.BaseCommit = sha }
 
 // SaveCache creates tarballs from cached guest paths and stores them via the
 // cache provider. Should be called explicitly by the caller after job
@@ -582,6 +597,14 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	// instead.
 	if err := ConfigureHostAliases(ctx, proxy, exactHostAliases(opts.hostAliases())); err != nil {
 		return nil, fmt.Errorf("configure host aliases: %w", err)
+	}
+
+	// Give git an identity before anything in the guest reaches for one. The
+	// transfer, the checkout and every command the agent runs are all git, and
+	// a guest without an identity fails them at the point of use rather than
+	// here.
+	if err := ConfigureIdentity(ctx, proxy, opts.CommitIdentity); err != nil {
+		return nil, fmt.Errorf("configure git identity: %w", err)
 	}
 
 	// Transfer files.

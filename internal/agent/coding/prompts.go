@@ -131,6 +131,28 @@ func (m *Mode) appendCommentConventions(sb *strings.Builder, content forgeconfig
 	}
 }
 
+// MergeInstructions is the block appended to a run's system prompt when the
+// merge tools are present. It is separate from any mode's body because the
+// tools are offered by circumstance — a write mode on a pull request whose base
+// branch was shipped into the guest — rather than by the mode a run asked for.
+//
+// The ordering rule it states is load-bearing rather than stylistic: the merge
+// is a commit boundary, so anything done before finish_merge is folded into the
+// merge commit, and a reader of the pull request can no longer tell what the
+// merge brought in from what the agent decided.
+func MergeInstructions(baseBranch string) string {
+	return fmt.Sprintf(`
+
+## Merging the base branch
+
+This pull request's base branch, %s, is available in the checkout, and merge_branch merges it. Nothing else is: no other branch was shipped into this VM, and there is no network access to fetch one.
+
+- The merge is its own commit. Call merge_branch and then finish_merge before you do anything else the task asks for; work done in between lands inside the merge commit, where nobody can tell it apart from the merge.
+- Anything you change after finish_merge lands as a second commit on top. That is how a task that asks for a merge *and* a change delivers both.
+- One merge per run. There is no way to undo one, so resolve what it produces rather than starting over.
+- These tools are the only way to merge. A merge you run yourself with git is not recorded as a merge at all: it arrives as one ordinary commit holding the whole base branch, on a pull request nobody can review. If merge_branch or finish_merge fails, report the failure in your summary and stop — the run is better ended than merged by hand.`, baseBranch)
+}
+
 // builtin declares one of the modes kvarn ships with. Built-ins are their own
 // base, so BaseName is the mode's own name and every axis is stated outright
 // rather than inherited.
@@ -197,6 +219,27 @@ var ModeFeedback = builtin(&Mode{
 	role:        "an autonomous coding agent addressing review feedback",
 	body:        feedbackBody,
 	taskHeading: "Feedback to address",
+})
+
+// ModeResolveConflicts merges a pull request's base branch into it and resolves
+// whatever conflicts that produces. The merge lands as its own commit; anything
+// the run does afterwards lands in a second one.
+//
+// Validation is `run` rather than `require`, because a merge can legitimately
+// surface a build that neither branch broke on its own: the agent gets its
+// retries to fix what the merge caused, instead of the run settling on the first
+// red step with the conflicts resolved and nothing to show for it.
+var ModeResolveConflicts = builtin(&Mode{
+	Name:        "resolve-conflicts",
+	Description: "Merge the base branch into an open pull request and resolve the conflicts.",
+	Workspace:   WorkspaceReadWrite,
+	Validation:  ValidationRun,
+	Deliver:     []Sink{SinkFollowUpCommit},
+	Start:       StartPullRequest,
+	Context:     []ContextBlock{ContextPRMetadata},
+	role:        "an autonomous coding agent resolving merge conflicts",
+	body:        resolveConflictsBody,
+	taskHeading: "Task",
 })
 
 // ModeReview is a read-only audit of the working tree / branch against the
@@ -285,6 +328,20 @@ const qualityRules = `## Quality
 - Match existing style, structure, and tooling.
 - Keep changes minimal and scoped to the task. Do not refactor unrelated code, rename APIs, or clean up beyond what the task requires unless necessary to complete it.
 - Do not disable tests, weaken assertions, or paper over failures unless the task explicitly allows it.`
+
+// versionControl keeps the run's history in kvarn's hands. The guest's git
+// history never travels: changes leave the VM as a flat diff against the run's
+// base commit, and the host makes the commits the pull request carries. An
+// agent that runs git by hand therefore changes what is delivered without
+// changing how it is recorded — a hand-run `git merge` folds the whole base
+// branch into the run's single commit, which is what turns a pull request
+// unreviewable.
+const versionControl = `## Version control
+
+- Do not run git commands that write: no commit, merge, rebase, cherry-pick, revert, reset, stash, push, or checkout of another branch. Reading is what git is here for — status, log, diff and show, whenever you want to see where you stand.
+- kvarn commits and pushes for you at the end of the run, from the files you changed. A commit you make yourself is not what gets delivered.
+- Merging has tools of its own when a run can merge at all. Never run git merge: if this run offers no merge tool, it is not a run that merges.
+- If a tool fails, report the failure in your summary and leave that work undone. Never reach for git to do what a tool refused — the refusal means the result would be wrong or undeliverable, and doing it by hand only hides that.`
 
 const outputRules = `## Output
 
@@ -375,13 +432,31 @@ If you disagree with a feedback item, or it rests on a misreading of the code, s
 
 Summarize what you changed per feedback item, and note any item you did not act on along with the reason. This summary becomes the follow-up commit message and the comment posted back on the pull request.`
 
-const feedbackBody = feedbackIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules
+const resolveConflictsIntro = `The pull request this run is checked out on has fallen behind its base branch. Your job is to merge the base branch in and resolve whatever conflicts that produces — nothing else.
 
-const autoBody = autoIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + outputRules
+## Workflow
 
-const implementBody = implementIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + outputRules
+1. Call merge_branch. It merges the base branch and leaves the result staged and uncommitted, reporting any conflicting paths.
+2. For each conflicting path, read the file and understand both sides before editing. A conflict is two intentions meeting: keep both unless they genuinely contradict, and when they do, keep the one the pull request is for.
+3. Remove every conflict marker. A file that still holds one is not resolved.
+4. Call finish_merge. Pass a one-line note on how you decided anything non-obvious.
+5. Run the project's build and tests. A merge can break something neither side broke on its own; fix what the merge caused, and say so in your summary.
 
-const fixBody = fixIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + outputRules
+Do not take on work the merge did not force. If the merged result reveals a pre-existing problem that is not a conflict, note it in your summary and leave it alone.
+
+## Output
+
+Say what conflicted, how you resolved each one, and what the build and tests did afterwards. If you had to guess at an intention, say which one and why.`
+
+const resolveConflictsBody = resolveConflictsIntro + "\n\n" + operatingPrinciples + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + versionControl
+
+const feedbackBody = feedbackIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + versionControl
+
+const autoBody = autoIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + versionControl + "\n\n" + outputRules
+
+const implementBody = implementIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + versionControl + "\n\n" + outputRules
+
+const fixBody = fixIntro + "\n\n" + operatingPrinciples + "\n\n" + taskAsSourceOfTruth + "\n\n" + editingRules + "\n\n" + qualityRules + "\n\n" + versionControl + "\n\n" + outputRules
 
 const reviewBody = `The task message describes what to audit — for example pending changes on a branch, a specific area of the codebase, or compliance with a guideline.
 

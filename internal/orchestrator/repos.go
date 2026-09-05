@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/config/project"
 	"github.com/aholstenson/kvarn/internal/logging"
 	"github.com/aholstenson/kvarn/internal/scm"
+	gitscm "github.com/aholstenson/kvarn/internal/scm/git"
 	"github.com/aholstenson/kvarn/internal/scm/mirror"
 )
 
@@ -97,6 +99,116 @@ func (s *Service) mirrorDepth(proj *project.Project, cloneDepth int, log *slog.L
 		return cloneDepth
 	}
 	return depth
+}
+
+// prepareMergeBase brings the pull request's base branch into the job clone and
+// returns the commit it sits at, so the agent can merge it inside the VM.
+//
+// The clone is `--single-branch`, so the base branch is simply not there
+// otherwise. Nothing else has to be arranged: the transfer ships the clone's
+// whole .git into the guest, so a ref fetched here arrives with it.
+//
+// It returns an empty SHA — never an error — when the base cannot be made
+// usable. A run that cannot merge is worth continuing without the merge tools;
+// a run that merges against a history it does not fully hold produces a wrong
+// diff nobody would notice.
+func (s *Service) prepareMergeBase(
+	ctx context.Context,
+	proj *project.Project,
+	cloneURL string,
+	cloneDir string,
+	headBranch string,
+	baseBranch string,
+	creds scm.CredentialSource,
+	log *slog.Logger,
+) string {
+	if baseBranch == "" || baseBranch == headBranch {
+		return ""
+	}
+	log = log.With("base_branch", baseBranch)
+
+	start := time.Now()
+	if err := s.fetchMergeBase(ctx, proj, cloneURL, cloneDir, headBranch, baseBranch, creds); err != nil {
+		log.Warn("could not prepare the base branch for merging; this run cannot merge", "error", err)
+		// A half-fetched ref would travel into the guest and promise a merge
+		// that would be wrong, so it goes rather than staying behind.
+		if delErr := gitscm.DeleteBranch(ctx, cloneDir, baseBranch); delErr != nil {
+			log.Debug("could not remove the unusable base branch ref", "error", delErr)
+		}
+		return ""
+	}
+
+	sha, err := gitscm.ResolveRef(ctx, cloneDir, "refs/heads/"+baseBranch)
+	if err != nil {
+		log.Warn("could not read the base branch tip; this run cannot merge", "error", err)
+		return ""
+	}
+	log.Info("base branch is available for merging", "sha", sha, "duration", logging.Elapsed(start))
+	return sha
+}
+
+// fetchMergeBase does the work prepareMergeBase reports on: fetch the base
+// branch, then make sure the clone actually holds the commit the two branches
+// parted at.
+func (s *Service) fetchMergeBase(
+	ctx context.Context,
+	proj *project.Project,
+	cloneURL string,
+	cloneDir string,
+	headBranch string,
+	baseBranch string,
+	creds scm.CredentialSource,
+) error {
+	ref := mirror.Ref{Project: proj.Name, URL: cloneURL, Credentials: creds}
+	viaMirror := s.repoMirror != nil
+
+	if viaMirror {
+		if err := s.repoMirror.FetchInto(ctx, ref, baseBranch, cloneDir); err != nil {
+			return fmt.Errorf("fetch %s from the mirror: %w", baseBranch, err)
+		}
+	} else if err := gitscm.FetchBranch(ctx, gitscm.FetchBranchOpts{
+		RepoDir:     cloneDir,
+		Source:      cloneURL,
+		Branch:      baseBranch,
+		Credentials: creds,
+	}); err != nil {
+		return err
+	}
+
+	ok, err := gitscm.HasMergeBase(ctx, cloneDir, "HEAD", "refs/heads/"+baseBranch)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+
+	// No merge base means the clone's depth cuts above the point the branches
+	// parted. Completing the history is the only way to merge correctly, and out
+	// of the mirror it costs disk rather than network.
+	refs := []string{"refs/heads/" + headBranch, "refs/heads/" + baseBranch}
+	if viaMirror {
+		err = s.repoMirror.UnshallowFrom(ctx, ref, cloneDir, refs)
+	} else {
+		err = gitscm.Unshallow(ctx, gitscm.UnshallowOpts{
+			RepoDir:     cloneDir,
+			Source:      cloneURL,
+			Credentials: creds,
+			Refs:        refs,
+		})
+	}
+	if err != nil {
+		return fmt.Errorf("complete history to reach the merge base: %w", err)
+	}
+
+	ok, err = gitscm.HasMergeBase(ctx, cloneDir, "HEAD", "refs/heads/"+baseBranch)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%s and %s have no common ancestor in this repository", headBranch, baseBranch)
+	}
+	return nil
 }
 
 // recordMirrorPush brings a branch kvarn has just pushed upstream into the
