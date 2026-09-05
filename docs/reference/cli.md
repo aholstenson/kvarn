@@ -357,6 +357,19 @@ Manages the pull-through OCI image cache every image a job pulls goes through.
 
 `--dir` defaults to `~/.cache/kvarn/image-cache`.
 
+## `kvarn nix-cache`
+
+Manages the pull-through Nix binary cache every closure a job downloads goes
+through.
+
+| Command | Flags |
+| --- | --- |
+| `stats` | `--dir` — totals plus hit/miss counters. |
+| `clear` | `--all` (required), `--dir` |
+| `evict` | `--global` (required, e.g. `20G`), `--dir` |
+
+`--dir` defaults to `~/.cache/kvarn/nix-cache`.
+
 ## `kvarn image`
 
 Resolves and pre-seeds the VM disk image.

@@ -28,6 +28,8 @@ import (
 	imagestore "github.com/aholstenson/kvarn/internal/imagecache/store"
 	"github.com/aholstenson/kvarn/internal/llmauth"
 	"github.com/aholstenson/kvarn/internal/localsock"
+	nixproxy "github.com/aholstenson/kvarn/internal/nixcache/proxy"
+	nixstore "github.com/aholstenson/kvarn/internal/nixcache/store"
 	"github.com/aholstenson/kvarn/internal/observability/metrics"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
 	"github.com/aholstenson/kvarn/internal/preview"
@@ -318,7 +320,9 @@ func (c *Cmd) Run() error {
 	if err != nil {
 		return fmt.Errorf("image-cache: %w", err)
 	}
-	var imageCacheNet vm.NetworkConfig
+	// cacheNet is the network configuration every VM starts from: the
+	// host-side caches reachable on the gateway address.
+	var cacheNet vm.NetworkConfig
 	if imageCacheCfg.Enabled {
 		dir, err := imagestore.DefaultDir()
 		if err != nil {
@@ -331,17 +335,44 @@ func (c *Cmd) Run() error {
 			ManifestTagTTL:   imageCacheCfg.ManifestTagTTL,
 			GlobalQuotaBytes: imageCacheCfg.GlobalBytes,
 		})
-		imageCacheNet = vm.NetworkConfig{
-			ImageCacheHandler:   handler,
-			ImageCachePort:      imageCacheCfg.Port,
-			ImageCacheUpstreams: imageCacheCfg.Upstreams,
-		}
+		cacheNet.ImageCacheHandler = handler
+		cacheNet.ImageCachePort = imageCacheCfg.Port
+		cacheNet.ImageCacheUpstreams = imageCacheCfg.Upstreams
 		slog.Info("image cache enabled",
 			"dir", dir,
 			"listen", fmt.Sprintf("%s:%d", imageCacheCfg.GatewayHost, imageCacheCfg.Port),
 			"upstreams", imageCacheCfg.Upstreams,
 			"global_bytes", imageCacheCfg.GlobalBytes,
 			"manifest_tag_ttl", imageCacheCfg.ManifestTagTTL,
+		)
+	}
+
+	nixCacheCfg, err := resolveNixCacheConfig(orchFile.NixCache)
+	if err != nil {
+		return fmt.Errorf("nix-cache: %w", err)
+	}
+	if nixCacheCfg.Enabled {
+		dir, err := nixstore.DefaultDir()
+		if err != nil {
+			return fmt.Errorf("nix-cache dir: %w", err)
+		}
+		handler, err := nixproxy.New(nixproxy.Config{
+			Store:            nixstore.New(dir),
+			Upstreams:        nixCacheCfg.Upstreams,
+			GlobalQuotaBytes: nixCacheCfg.GlobalBytes,
+		})
+		if err != nil {
+			return fmt.Errorf("nix-cache: %w", err)
+		}
+		cacheNet.NixCacheHandler = handler
+		cacheNet.NixCachePort = nixCacheCfg.Port
+		cacheNet.NixCacheUpstreams = nixCacheCfg.Upstreams
+		cacheNet.NixCacheTrustedPublicKeys = nixCacheCfg.TrustedPublicKeys
+		slog.Info("nix cache enabled",
+			"dir", dir,
+			"listen", fmt.Sprintf("%s:%d", nixCacheCfg.GatewayHost, nixCacheCfg.Port),
+			"upstreams", nixCacheCfg.Upstreams,
+			"global_bytes", nixCacheCfg.GlobalBytes,
 		)
 	}
 
@@ -486,7 +517,7 @@ func (c *Cmd) Run() error {
 		PreviewIngress: orchFile.Preview.Listen,
 	}, ServiceOpts{
 		Provider:           p,
-		CreateOpts:         vm.CreateOpts{Image: image, MaxLifetime: maxLifetime, Network: imageCacheNet},
+		CreateOpts:         vm.CreateOpts{Image: image, MaxLifetime: maxLifetime, Network: cacheNet},
 		ProjectStore:       projtoml.New(projectsPath),
 		CredentialStore:    credStore,
 		SecretStore:        secrettoml.New(secretsPath),
@@ -685,6 +716,62 @@ func resolveImageCacheConfig(c orchcfg.ImageCache) (imageCacheResolved, error) {
 		n, err := projconfig.ParseSize(c.GlobalBytes)
 		if err != nil {
 			return imageCacheResolved{}, fmt.Errorf("global_bytes: %w", err)
+		}
+		out.GlobalBytes = n
+	}
+	return out, nil
+}
+
+// nixCacheResolved is the resolved nix-cache configuration applied by the
+// orchestrator at startup.
+type nixCacheResolved struct {
+	Enabled           bool
+	GatewayHost       string
+	Port              uint16
+	Upstreams         []string
+	TrustedPublicKeys []string
+	GlobalBytes       int64
+}
+
+const (
+	defaultNixCacheGlobalBytes = int64(20) * 1024 * 1024 * 1024 // 20 GiB
+	defaultNixCacheListenAddr  = "10.0.2.1:5001"
+)
+
+var defaultNixCacheUpstreams = []string{"https://cache.nixos.org"}
+
+func resolveNixCacheConfig(c orchcfg.NixCache) (nixCacheResolved, error) {
+	out := nixCacheResolved{
+		Enabled:     true,
+		Upstreams:   defaultNixCacheUpstreams,
+		GlobalBytes: defaultNixCacheGlobalBytes,
+	}
+	if c.Enabled != nil {
+		out.Enabled = *c.Enabled
+	}
+	listen := c.ListenAddr
+	if listen == "" {
+		listen = defaultNixCacheListenAddr
+	}
+	host, port, err := splitHostPort(listen)
+	if err != nil {
+		return nixCacheResolved{}, fmt.Errorf("listen_addr: %w", err)
+	}
+	out.GatewayHost = host
+	out.Port = port
+	if len(c.Upstreams) > 0 {
+		out.Upstreams = append([]string(nil), c.Upstreams...)
+	}
+	for _, u := range out.Upstreams {
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			return nixCacheResolved{}, fmt.Errorf("upstreams: %q must be an http(s) URL", u)
+		}
+	}
+	out.TrustedPublicKeys = append([]string(nil), c.TrustedPublicKeys...)
+	if c.GlobalBytes != "" {
+		n, err := projconfig.ParseSize(c.GlobalBytes)
+		if err != nil {
+			return nixCacheResolved{}, fmt.Errorf("global_bytes: %w", err)
 		}
 		out.GlobalBytes = n
 	}

@@ -113,6 +113,47 @@ kvarn image-cache evict --global 50G
 kvarn image-cache clear --repo library/python
 ```
 
+## Nix binary cache
+
+A dependency install downloads its closure from `cache.nixos.org`. That
+download goes through a host-side binary cache instead of leaving the host once
+per VM. The cache is listed as a substituter in the guest's Nix configuration
+at boot, ahead of the public caches it fronts, so it covers every Nix command a
+job runs: the `dependencies` install, and anything the agent runs with `nix
+shell` or `nix run` after it. The guest still unpacks each archive into its own
+store, so a warm install takes seconds rather than nothing.
+
+The cache is content-addressed. An archive is named by the hash of its bytes
+and is verified against that name before it is kept, and a store path's record
+never changes upstream, so there is nothing to expire and one cache serves
+every project on the host. Signatures pass through untouched; the guest checks
+them against the upstream's key as it would without the cache.
+
+```toml
+[nix-cache]
+enabled = true
+upstreams = ["https://cache.nixos.org"]
+global_bytes = "20G"
+```
+
+Adding an upstream that signs with its own key also needs that key in
+`trusted_public_keys`, or the guest refuses what the cache serves from it:
+
+```toml
+[nix-cache]
+upstreams = ["https://cache.nixos.org", "https://nix-community.cachix.org"]
+trusted_public_keys = ["nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="]
+```
+
+If the host cache cannot answer, Nix falls through to the upstream itself, so
+a job is never worse off for having it configured.
+
+```sh
+kvarn nix-cache stats
+kvarn nix-cache evict --global 20G
+kvarn nix-cache clear --all
+```
+
 ## VM disk image
 
 The VM disk image is resolved once and shared. Pre-seed it so the first job

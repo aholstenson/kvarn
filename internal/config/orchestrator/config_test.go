@@ -71,6 +71,35 @@ global_bytes = "20G"
 		Expect(cfg.Repos.GlobalBytes).To(Equal("20G"))
 	})
 
+	It("parses every nix-cache field", func() {
+		dir := GinkgoT().TempDir()
+		path := filepath.Join(dir, "orchestrator.toml")
+		Expect(os.WriteFile(path, []byte(`
+[nix-cache]
+enabled = false
+listen_addr = "10.0.2.1:5555"
+global_bytes = "5G"
+upstreams = ["https://cache.nixos.org", "https://nix-community.cachix.org"]
+trusted_public_keys = ["nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="]
+`), 0644)).To(Succeed())
+
+		cfg, err := orchcfg.Load(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.NixCache.Enabled).NotTo(BeNil())
+		Expect(*cfg.NixCache.Enabled).To(BeFalse())
+		Expect(cfg.NixCache.ListenAddr).To(Equal("10.0.2.1:5555"))
+		Expect(cfg.NixCache.GlobalBytes).To(Equal("5G"))
+		Expect(cfg.NixCache.Upstreams).To(Equal([]string{"https://cache.nixos.org", "https://nix-community.cachix.org"}))
+		Expect(cfg.NixCache.TrustedPublicKeys).To(HaveLen(1))
+	})
+
+	It("leaves nix-cache unset when the table is absent", func() {
+		cfg, err := orchcfg.Load(filepath.Join(GinkgoT().TempDir(), "missing.toml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.NixCache.Enabled).To(BeNil())
+		Expect(cfg.NixCache.Upstreams).To(BeEmpty())
+	})
+
 	It("leaves repos unset when the table is absent", func() {
 		cfg, err := orchcfg.Load(filepath.Join(GinkgoT().TempDir(), "missing.toml"))
 		Expect(err).NotTo(HaveOccurred())

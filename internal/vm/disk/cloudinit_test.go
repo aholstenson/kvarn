@@ -103,6 +103,64 @@ var _ = Describe("CreateCloudInitDisk", func() {
 		Expect(userData).To(ContainSubstring("insecure = true"))
 	})
 
+	It("writes a Nix substituter list when NixCacheAddr is set", func() {
+		path := GinkgoT().TempDir() + "/cidata.iso"
+
+		Expect(disk.CreateCloudInitDisk(path, disk.CloudInitOpts{
+			Token:                     "tok",
+			VsockPort:                 1024,
+			NixCacheAddr:              "10.0.2.1:5001",
+			NixCacheUpstreams:         []string{"https://cache.nixos.org", "https://nix-community.cachix.org/"},
+			NixCacheTrustedPublicKeys: []string{"nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="},
+		})).To(Succeed())
+
+		d, err := diskfs.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		defer d.Close()
+
+		fs, err := d.GetFilesystem(0)
+		Expect(err).NotTo(HaveOccurred())
+
+		userDataPath := "/user-data"
+		if _, err := fs.OpenFile(userDataPath, os.O_RDONLY); err != nil {
+			userDataPath = "/USER_DATA.;1"
+		}
+		userData := readISOFile(fs, userDataPath)
+		// The file overrides the image's /etc/nix/nix.conf without replacing
+		// it, so only the substituter list is written.
+		Expect(userData).To(ContainSubstring("/etc/xdg/nix/nix.conf"))
+		Expect(userData).NotTo(ContainSubstring("/etc/nix/nix.conf"))
+		// Host cache first, addressed by upstream hostname, then the upstreams
+		// themselves as the fallback.
+		Expect(userData).To(ContainSubstring("substituters = http://10.0.2.1:5001/cache.nixos.org http://10.0.2.1:5001/nix-community.cachix.org https://cache.nixos.org https://nix-community.cachix.org\n"))
+		Expect(userData).To(ContainSubstring("extra-trusted-public-keys = nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=\n"))
+	})
+
+	It("leaves Nix configuration alone when no cache is configured", func() {
+		path := GinkgoT().TempDir() + "/cidata.iso"
+
+		Expect(disk.CreateCloudInitDisk(path, disk.CloudInitOpts{
+			Token:             "tok",
+			VsockPort:         1024,
+			NixCacheUpstreams: []string{"https://cache.nixos.org"},
+		})).To(Succeed())
+
+		d, err := diskfs.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		defer d.Close()
+
+		fs, err := d.GetFilesystem(0)
+		Expect(err).NotTo(HaveOccurred())
+
+		userDataPath := "/user-data"
+		if _, err := fs.OpenFile(userDataPath, os.O_RDONLY); err != nil {
+			userDataPath = "/USER_DATA.;1"
+		}
+		userData := readISOFile(fs, userDataPath)
+		Expect(userData).NotTo(ContainSubstring("nix.conf"))
+		Expect(userData).NotTo(ContainSubstring("substituters"))
+	})
+
 	// The egress proxy CA is installed over the runner connection instead
 	// (sandbox.InstallProxyCA), which is the only way to order trust ahead
 	// of the first guest command that speaks TLS. A boot-time install here

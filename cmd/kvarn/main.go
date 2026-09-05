@@ -9,6 +9,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/cmd/key"
 	localcmd "github.com/aholstenson/kvarn/internal/cmd/local"
 	modescmd "github.com/aholstenson/kvarn/internal/cmd/modes"
+	nixcachecmd "github.com/aholstenson/kvarn/internal/cmd/nixcache"
 	previewcmd "github.com/aholstenson/kvarn/internal/cmd/preview"
 	queuecmd "github.com/aholstenson/kvarn/internal/cmd/queue"
 	repocmd "github.com/aholstenson/kvarn/internal/cmd/repo"
@@ -31,6 +32,7 @@ type CLI struct {
 	Image        imagecmd.Cmd      `cmd:"" help:"Manage the VM disk image."`
 	Cache        cachecmd.Cmd      `cmd:"" help:"Inspect and clear tool caches."`
 	ImageCache   imagecachecmd.Cmd `cmd:"" name:"image-cache" help:"Inspect and manage the pull-through OCI image cache."`
+	NixCache     nixcachecmd.Cmd   `cmd:"" name:"nix-cache" help:"Inspect and manage the pull-through Nix binary cache."`
 	Repo         repocmd.Cmd       `cmd:"" help:"Inspect and manage the host-side repository mirrors."`
 	Version      versioncmd.Cmd    `cmd:"" help:"Print the kvarn version and build details."`
 

@@ -146,6 +146,23 @@ image a job pulls goes through it.
 re-checked upstream; digests themselves are immutable and cached indefinitely.
 Inspect the store with `kvarn image-cache stats`.
 
+## `[nix-cache]`
+
+The pull-through Nix binary cache. It is reachable on the per-VM gateway and
+listed as a substituter in the guest's Nix configuration at boot, ahead of the
+upstreams it fronts, so every closure a job downloads goes through it.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | |
+| `listen_addr` | `host:port` | `10.0.2.1:5001` | |
+| `upstreams` | list of URLs | `["https://cache.nixos.org"]` | Each is addressed by its hostname, e.g. `http://10.0.2.1:5001/cache.nixos.org` inside the guest. |
+| `trusted_public_keys` | list of strings | unset | Signing keys added to the guest's trust list. The image already trusts `cache.nixos.org`. |
+| `global_bytes` | size | `20G` | LRU cap on the archives kept. Store path records are small and not swept. |
+
+The cache is content-addressed, so nothing in it expires. Inspect the store
+with `kvarn nix-cache stats`.
+
 ## `[repos]`
 
 Host-side bare mirrors, one per project, so concurrent jobs on one repository

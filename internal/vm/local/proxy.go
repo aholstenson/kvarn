@@ -46,19 +46,25 @@ func startProxy(ctx context.Context, n *link.Network, ca *egressproxy.CA, cfg vm
 	go func() { _ = p.ServeHTTP(ctx, httpLn) }()
 
 	if cfg.ImageCacheHandler != nil && cfg.ImageCachePort != 0 {
-		if err := startImageCache(ctx, n, cfg.ImageCacheHandler, cfg.ImageCachePort); err != nil {
+		if err := startGatewayHTTP(ctx, n, "image cache", cfg.ImageCacheHandler, cfg.ImageCachePort); err != nil {
 			return fmt.Errorf("start image cache: %w", err)
+		}
+	}
+	if cfg.NixCacheHandler != nil && cfg.NixCachePort != 0 {
+		if err := startGatewayHTTP(ctx, n, "nix cache", cfg.NixCacheHandler, cfg.NixCachePort); err != nil {
+			return fmt.Errorf("start nix cache: %w", err)
 		}
 	}
 
 	return nil
 }
 
-// startImageCache binds the shared image-cache HTTP handler to the per-VM
-// gateway IP at port so podman inside the VM can reach it via its mirror
-// config. Each VM gets its own listener (one per gvisor netstack), but all
-// listeners route to the same handler and on-disk store.
-func startImageCache(ctx context.Context, n *link.Network, handler http.Handler, port uint16) error {
+// startGatewayHTTP binds a shared HTTP handler to the per-VM gateway IP at
+// port so a client inside the VM can reach it at a fixed address: podman via
+// its mirror config, Nix via its substituter list. Each VM gets its own
+// listener (one per gvisor netstack), but all listeners route to the same
+// handler and on-disk store.
+func startGatewayHTTP(ctx context.Context, n *link.Network, name string, handler http.Handler, port uint16) error {
 	ln, err := n.Listen(port)
 	if err != nil {
 		return fmt.Errorf("listen %d: %w", port, err)
@@ -75,7 +81,7 @@ func startImageCache(ctx context.Context, n *link.Network, handler http.Handler,
 	}()
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Debug("image cache server stopped", "error", err)
+			slog.Debug(name+" server stopped", "error", err)
 		}
 	}()
 	return nil

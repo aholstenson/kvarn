@@ -123,6 +123,27 @@ type NetworkConfig struct {
 	// configured to mirror. The cloud-init layer turns this list into
 	// one [[registry]] block per entry pointing at the gateway:port.
 	ImageCacheUpstreams []string
+
+	// NixCacheHandler, when non-nil, is bound on the per-VM gateway IP at
+	// NixCachePort so Nix inside the VM can use it as a substituter in front
+	// of the public binary caches. One handler serves every VM: the cache is
+	// content-addressed and shared across projects.
+	NixCacheHandler http.Handler
+
+	// NixCachePort is the TCP port for NixCacheHandler on the gateway IP.
+	// Ignored when NixCacheHandler is nil.
+	NixCachePort uint16
+
+	// NixCacheUpstreams lists the binary cache URLs the handler pulls
+	// through, e.g. "https://cache.nixos.org". The cloud-init layer lists
+	// one substituter per entry at the gateway, followed by the upstreams
+	// themselves so a guest still installs when the host cache is unavailable.
+	NixCacheUpstreams []string
+
+	// NixCacheTrustedPublicKeys are added to the guest's trusted signing
+	// keys. The image already trusts cache.nixos.org; an operator who adds
+	// another upstream lists its key here or the guest rejects what it serves.
+	NixCacheTrustedPublicKeys []string
 }
 
 type Provider interface {

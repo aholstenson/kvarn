@@ -50,6 +50,7 @@ half-written nor lose the other's edit.
 | `~/.cache/kvarn/images/<version>/<arch>/disk.qcow2` | Downloaded VM disk images. | `kvarn image` |
 | `~/.cache/kvarn/repos/<project>/` | Per-project bare Git mirrors. | `kvarn repo` |
 | `~/.cache/kvarn/image-cache/` | Pull-through OCI image cache. | `kvarn image-cache` |
+| `~/.cache/kvarn/nix-cache/` | Pull-through Nix binary cache. | `kvarn nix-cache` |
 | `~/.cache/kvarn/` (tool layers) | Per-project tool caches restored into each VM. | `kvarn cache` |
 | `~/.config/kvarn/sessions.db` | Session history and event logs. | Pruned by `[sessions].retention` |
 | `~/.config/kvarn/previews.db` | Preview environments and the hostnames that route to them. | `kvarn preview` |

@@ -3,6 +3,7 @@ package disk
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -36,6 +37,22 @@ type CloudInitOpts struct {
 	// (e.g. "docker.io", "ghcr.io"). One [[registry]] block is emitted per
 	// entry. Ignored when ImageCacheAddr is empty.
 	ImageCacheUpstreams []string
+
+	// NixCacheAddr is the "host:port" of the in-VM pull-through Nix binary
+	// cache. When non-empty together with NixCacheUpstreams, cloud-init
+	// writes a Nix configuration file that lists the cache as a substituter
+	// ahead of the upstreams it fronts.
+	NixCacheAddr string
+
+	// NixCacheUpstreams are the binary cache URLs the host cache pulls
+	// through (e.g. "https://cache.nixos.org"). Each becomes one substituter
+	// at NixCacheAddr, addressed by the upstream's hostname, followed by the
+	// upstream URL itself as the fallback. Ignored when NixCacheAddr is empty.
+	NixCacheUpstreams []string
+
+	// NixCacheTrustedPublicKeys are appended to the guest's trusted signing
+	// keys. Ignored when NixCacheAddr is empty.
+	NixCacheTrustedPublicKeys []string
 }
 
 // CreateCloudInitDisk creates an ISO9660 image with the NoCloud datasource
@@ -154,7 +171,56 @@ func buildUserData(opts CloudInitOpts) string {
 			fmt.Fprintf(&b, "      insecure = true\n")
 		}
 	}
+	if opts.NixCacheAddr != "" && len(opts.NixCacheUpstreams) > 0 {
+		// Nix reads /etc/xdg/nix/nix.conf after /etc/nix/nix.conf and lets it
+		// override settings, so the image's own nix.conf stays untouched and
+		// the substituter list is the only thing set here. The host cache is
+		// listed first and reports a lower priority than the upstreams, so
+		// Nix asks it first either way; the upstreams stay in the list so a
+		// guest still installs when the host cache cannot answer.
+		//
+		// Each substituter carries the upstream hostname as a path suffix
+		// (e.g. "http://10.0.2.1:5001/cache.nixos.org"), which is what the
+		// cache handler routes on. Plain HTTP is safe because the cache only
+		// listens on the gateway IP inside this VM's private netstack, and
+		// the guest verifies signatures against the upstream's key anyway.
+		b.WriteString("  - path: /etc/xdg/nix/nix.conf\n")
+		b.WriteString("    permissions: '0644'\n")
+		b.WriteString("    content: |\n")
+		b.WriteString("      substituters =")
+		for _, ups := range opts.NixCacheUpstreams {
+			host := upstreamHost(ups)
+			if host == "" {
+				continue
+			}
+			fmt.Fprintf(&b, " http://%s/%s", opts.NixCacheAddr, host)
+		}
+		for _, ups := range opts.NixCacheUpstreams {
+			if upstreamHost(ups) == "" {
+				continue
+			}
+			fmt.Fprintf(&b, " %s", strings.TrimRight(ups, "/"))
+		}
+		b.WriteString("\n")
+		if len(opts.NixCacheTrustedPublicKeys) > 0 {
+			b.WriteString("      extra-trusted-public-keys =")
+			for _, key := range opts.NixCacheTrustedPublicKeys {
+				fmt.Fprintf(&b, " %s", key)
+			}
+			b.WriteString("\n")
+		}
+	}
 	return b.String()
+}
+
+// upstreamHost returns the hostname of a binary cache URL, or "" when the
+// value is not a URL with one.
+func upstreamHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 func buildNetworkConfig() string {

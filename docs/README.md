@@ -16,7 +16,7 @@ Goal-oriented recipes for an operator running the orchestrator.
 - [Manage secrets](how-to/manage-secrets.md) — give a job credentials without giving them to the agent.
 - [Control job costs](how-to/control-job-costs.md) — budgets, warnings, and validation retries.
 - [Tune host capacity](how-to/tune-host-capacity.md) — the admission pool, queue, per-tenant caps, priority.
-- [Speed up job startup](how-to/speed-up-job-startup.md) — repository mirrors, tool caches, the OCI image cache.
+- [Speed up job startup](how-to/speed-up-job-startup.md) — repository mirrors, tool caches, the OCI image cache, the Nix binary cache.
 - [Take a host out of service](how-to/take-a-host-out-of-service.md) — drain it, let running jobs finish, then stop it.
 - [Follow up on a pull request](how-to/follow-up-on-a-pull-request.md) — feedback runs, watching and cancelling.
 - [Preview environments](how-to/preview-environments.md) — look at what a branch does, at a stable URL.

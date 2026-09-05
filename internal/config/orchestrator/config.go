@@ -19,6 +19,7 @@ type Config struct {
 	Scheduler  Scheduler  `toml:"scheduler"`
 	Cache      Cache      `toml:"cache"`
 	ImageCache ImageCache `toml:"image-cache"`
+	NixCache   NixCache   `toml:"nix-cache"`
 	Sessions   Sessions   `toml:"sessions"`
 	Repos      Repos      `toml:"repos"`
 	Preview    Preview    `toml:"preview"`
@@ -129,6 +130,21 @@ type ImageCache struct {
 	GlobalBytes    string   `toml:"global_bytes,omitempty"`
 	Upstreams      []string `toml:"upstreams,omitempty"`
 	ManifestTagTTL string   `toml:"manifest_tag_ttl,omitempty"`
+}
+
+// NixCache mirrors the [nix-cache] table: configuration for the pull-through
+// Nix binary cache that sits on the per-VM gateway next to the image cache.
+// Empty fields fall through to the built-in defaults applied by the CLI
+// layer.
+type NixCache struct {
+	Enabled     *bool  `toml:"enabled,omitempty"`
+	ListenAddr  string `toml:"listen_addr,omitempty"`
+	GlobalBytes string `toml:"global_bytes,omitempty"`
+	// Upstreams are binary cache URLs, e.g. "https://cache.nixos.org".
+	Upstreams []string `toml:"upstreams,omitempty"`
+	// TrustedPublicKeys are signing keys the guest trusts in addition to the
+	// cache.nixos.org key built into the image, one per extra upstream.
+	TrustedPublicKeys []string `toml:"trusted_public_keys,omitempty"`
 }
 
 // Cache mirrors the [cache] table: the disk quotas for the tool-cache LRU
