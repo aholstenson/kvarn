@@ -678,7 +678,7 @@ var _ = Describe("Preview manager", func() {
 	})
 
 	Describe("eviction", func() {
-		It("evicts the least-recently-requested preview when at max_concurrent", func() {
+		It("evicts the preview nobody has looked at for longest when at max_concurrent", func() {
 			mgr = build(PreviewPolicy{MaxConcurrent: 2})
 
 			first := bootAndWait(mgr, "proj", "a")
@@ -687,13 +687,13 @@ var _ = Describe("Preview manager", func() {
 
 			// Touch the older one so it is the more recently wanted of the two.
 			clock.advance(time.Minute)
-			mgr.Touch(ctx, first.ID)
+			mgr.Touch(ctx, first.ID, preview.ActivityAttention)
 
 			clock.advance(time.Minute)
 			third := bootAndWait(mgr, "proj", "c")
 
 			Expect(mgr.IsLive(third.ID)).To(BeTrue())
-			Expect(mgr.IsLive(second.ID)).To(BeFalse(), "the least-recently-requested preview should have been evicted")
+			Expect(mgr.IsLive(second.ID)).To(BeFalse(), "the least-recently-attended preview should have been evicted")
 			Expect(mgr.IsLive(first.ID)).To(BeTrue())
 
 			got, err := store.Get(ctx, second.ID)
@@ -745,6 +745,28 @@ var _ = Describe("Preview manager", func() {
 			}).Should(ContainSubstring(ErrAtCapacity.Error()))
 		})
 
+		It("gives up a preview kept busy by background traffic before an attended one", func() {
+			mgr = build(PreviewPolicy{MaxConcurrent: 2})
+
+			polled := bootAndWait(mgr, "proj", "a")
+			clock.advance(time.Minute)
+			attended := bootAndWait(mgr, "proj", "b")
+
+			// The forgotten tab is the more recently *requested* of the two, and
+			// still the one to give up: nobody is looking at it.
+			clock.advance(time.Minute)
+			mgr.Touch(ctx, attended.ID, preview.ActivityAttention)
+			clock.advance(time.Minute)
+			mgr.Touch(ctx, polled.ID, preview.ActivityBackground)
+
+			clock.advance(time.Minute)
+			third := bootAndWait(mgr, "proj", "c")
+
+			Expect(mgr.IsLive(third.ID)).To(BeTrue())
+			Expect(mgr.IsLive(polled.ID)).To(BeFalse())
+			Expect(mgr.IsLive(attended.ID)).To(BeTrue())
+		})
+
 		It("never picks the preview being booted as the eviction victim", func() {
 			mgr = build(PreviewPolicy{MaxConcurrent: 1})
 			resident := bootAndWait(mgr, "proj", "a")
@@ -777,13 +799,54 @@ var _ = Describe("Preview manager", func() {
 			Expect(got.State).To(Equal(preview.StateStopped))
 		})
 
-		It("keeps a preview alive while requests keep arriving", func() {
-			mgr = build(PreviewPolicy{IdleTimeout: 30 * time.Minute})
+		It("keeps a preview alive while somebody keeps looking at it", func() {
+			mgr = build(PreviewPolicy{IdleTimeout: 30 * time.Minute, UnattendedTimeout: 30 * time.Minute})
 			p := bootAndWait(mgr, "proj", "main")
 
 			for range 5 {
 				clock.advance(20 * time.Minute)
-				mgr.Touch(ctx, p.ID)
+				mgr.Touch(ctx, p.ID, preview.ActivityAttention)
+				mgr.Reap(ctx)
+			}
+			Expect(mgr.IsLive(p.ID)).To(BeTrue())
+		})
+
+		It("stops a preview kept busy by background traffic alone", func() {
+			// The scenario the unattended timeout exists for: a page left open
+			// in a tab nobody is looking at, polling often enough that the idle
+			// clock never expires.
+			mgr = build(PreviewPolicy{IdleTimeout: 30 * time.Minute, UnattendedTimeout: time.Hour})
+			p := bootAndWait(mgr, "proj", "main")
+
+			poll := func(times int) {
+				for range times {
+					clock.advance(10 * time.Minute)
+					mgr.Touch(ctx, p.ID, preview.ActivityBackground)
+					mgr.Reap(ctx)
+				}
+			}
+
+			// The polling holds the idle clock off well past its 30 minutes.
+			poll(5)
+			Expect(mgr.IsLive(p.ID)).To(BeTrue())
+
+			// It buys nothing past the unattended timeout.
+			poll(2)
+			Expect(mgr.IsLive(p.ID)).To(BeFalse())
+
+			got, err := store.Get(ctx, p.ID)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.State).To(Equal(preview.StateStopped))
+		})
+
+		It("never reaps as unattended while attention keeps arriving", func() {
+			mgr = build(PreviewPolicy{IdleTimeout: 30 * time.Minute, UnattendedTimeout: time.Hour})
+			p := bootAndWait(mgr, "proj", "main")
+
+			for range 10 {
+				clock.advance(10 * time.Minute)
+				mgr.Touch(ctx, p.ID, preview.ActivityBackground)
+				mgr.Touch(ctx, p.ID, preview.ActivityAttention)
 				mgr.Reap(ctx)
 			}
 			Expect(mgr.IsLive(p.ID)).To(BeTrue())
@@ -795,7 +858,7 @@ var _ = Describe("Preview manager", func() {
 
 			for range 8 {
 				clock.advance(30 * time.Minute)
-				mgr.Touch(ctx, p.ID)
+				mgr.Touch(ctx, p.ID, preview.ActivityAttention)
 				mgr.Reap(ctx)
 			}
 			Expect(mgr.IsLive(p.ID)).To(BeFalse())

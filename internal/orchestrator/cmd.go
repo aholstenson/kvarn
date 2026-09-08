@@ -579,15 +579,30 @@ func resolvePreviewPolicy(cfg orchcfg.Preview) (PreviewPolicy, error) {
 	}
 
 	policy := PreviewPolicy{
-		Domain:        strings.Trim(cfg.Domain, "."),
-		IdleTimeout:   defaultPreviewIdleTimeout,
-		MaxLifetime:   defaultPreviewMaxLifetime,
-		MaxConcurrent: defaultPreviewMaxConcurrent,
+		Domain:            strings.Trim(cfg.Domain, "."),
+		IdleTimeout:       defaultPreviewIdleTimeout,
+		UnattendedTimeout: defaultPreviewIdleTimeout,
+		MaxLifetime:       defaultPreviewMaxLifetime,
+		MaxConcurrent:     defaultPreviewMaxConcurrent,
 	}
 
 	var err error
 	if policy.IdleTimeout, err = resolvePreviewDuration(cfg.IdleTimeout, "idle_timeout", defaultPreviewIdleTimeout); err != nil {
 		return PreviewPolicy{}, err
+	}
+	// Unattended reaping defaults to the idle timeout, so out of the box a
+	// preview stops the same length of time after a person stops looking at it
+	// as it would after the traffic stopped. Raising it is how an operator buys
+	// slack for an application whose ordinary use produces no navigations —
+	// a single-page app a person reads without submitting anything.
+	if policy.UnattendedTimeout, err = resolvePreviewDuration(
+		cfg.UnattendedTimeout, "unattended_timeout", policy.IdleTimeout); err != nil {
+		return PreviewPolicy{}, err
+	}
+	if policy.IdleTimeout == 0 {
+		// "Never reap on idle" is an answer about the whole clock, not just the
+		// half of it that counts plain traffic.
+		policy.UnattendedTimeout = 0
 	}
 	if policy.MaxLifetime, err = resolvePreviewDuration(cfg.MaxLifetime, "max_lifetime", defaultPreviewMaxLifetime); err != nil {
 		return PreviewPolicy{}, err

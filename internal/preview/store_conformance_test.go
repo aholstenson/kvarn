@@ -273,20 +273,37 @@ func DescribeStore(name string, newStore func() preview.Store) bool {
 			Expect(store.Delete(ctx, "nope")).To(MatchError(preview.ErrNotFound))
 		})
 
-		It("stamps the last-request time", func() {
+		It("stamps both times for a touch that carried attention", func() {
 			Expect(store.Put(ctx, makePreview("proj/main", "proj", "main", preview.StateRunning, base,
 				"main.preview.example.com"))).To(Succeed())
 
 			at := base.Add(3 * time.Minute)
-			Expect(store.TouchRequest(ctx, "proj/main", at)).To(Succeed())
+			Expect(store.TouchRequest(ctx, "proj/main", at, preview.ActivityAttention)).To(Succeed())
 
 			got, err := store.Get(ctx, "proj/main")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got.LastRequestAt).To(BeTemporally("==", at))
+			Expect(got.LastAttentionAt).To(BeTemporally("==", at))
+		})
+
+		It("leaves the last-attention time where it was for background traffic", func() {
+			Expect(store.Put(ctx, makePreview("proj/main", "proj", "main", preview.StateRunning, base,
+				"main.preview.example.com"))).To(Succeed())
+
+			attended := base.Add(3 * time.Minute)
+			Expect(store.TouchRequest(ctx, "proj/main", attended, preview.ActivityAttention)).To(Succeed())
+
+			polled := base.Add(90 * time.Minute)
+			Expect(store.TouchRequest(ctx, "proj/main", polled, preview.ActivityBackground)).To(Succeed())
+
+			got, err := store.Get(ctx, "proj/main")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.LastRequestAt).To(BeTemporally("==", polled))
+			Expect(got.LastAttentionAt).To(BeTemporally("==", attended))
 		})
 
 		It("ignores a touch for a preview that is gone", func() {
-			Expect(store.TouchRequest(ctx, "nope", base)).To(Succeed())
+			Expect(store.TouchRequest(ctx, "nope", base, preview.ActivityAttention)).To(Succeed())
 		})
 
 		It("resets live previews to stopped and clears their VM fields", func() {

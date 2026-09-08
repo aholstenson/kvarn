@@ -46,6 +46,12 @@ type Preview struct {
 	// (e.g. "30m"). The next request boots it again. "0" never reaps on idle;
 	// empty takes the built-in default.
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
+	// UnattendedTimeout stops a preview this long after the last request that
+	// said somebody was looking at it (e.g. "1h"), however much other traffic
+	// has arrived since. It is what bounds a page left open in a background
+	// tab, whose polling would otherwise keep IdleTimeout from ever expiring.
+	// "0" disables it; empty takes IdleTimeout's value.
+	UnattendedTimeout string `toml:"unattended_timeout,omitempty"`
 	// MaxLifetime stops a preview this long after it booted regardless of
 	// traffic (e.g. "8h"), so a preview somebody keeps poking at is still
 	// rebuilt from the ref eventually. "0" disables the cap; empty takes the

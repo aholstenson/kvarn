@@ -122,9 +122,9 @@ func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO previews (
 		    id, project, ref, pr, auto_start_host, state, sites_json, session_id, error,
-		    created_at, updated_at, started_at, last_request_at, expires_at,
+		    created_at, updated_at, started_at, last_request_at, last_attention_at, expires_at,
 		    state_saved_at, state_bytes, state_error, fork
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		    project = excluded.project,
 		    ref = excluded.ref,
@@ -137,6 +137,7 @@ func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
 		    updated_at = excluded.updated_at,
 		    started_at = excluded.started_at,
 		    last_request_at = excluded.last_request_at,
+		    last_attention_at = excluded.last_attention_at,
 		    expires_at = excluded.expires_at,
 		    state_saved_at = excluded.state_saved_at,
 		    state_bytes = excluded.state_bytes,
@@ -145,7 +146,7 @@ func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
 		p.ID, p.Project, p.Ref, p.PR, preview.NormalizeHost(p.AutoStartHost),
 		string(p.State), string(sitesJSON), p.SessionID, p.Error,
 		toMicros(p.CreatedAt), toMicros(p.UpdatedAt), toMicros(p.StartedAt),
-		toMicros(p.LastRequestAt), toMicros(p.ExpiresAt),
+		toMicros(p.LastRequestAt), toMicros(p.LastAttentionAt), toMicros(p.ExpiresAt),
 		toMicros(p.StateSavedAt), p.StateBytes, p.StateError, p.Fork,
 	); err != nil {
 		return fmt.Errorf("upsert preview: %w", err)
@@ -176,20 +177,21 @@ func (s *Store) Put(ctx context.Context, p *preview.Preview) error {
 }
 
 const previewColumns = `id, project, ref, pr, auto_start_host, state, sites_json, session_id, error, ` +
-	`created_at, updated_at, started_at, last_request_at, expires_at, ` +
+	`created_at, updated_at, started_at, last_request_at, last_attention_at, expires_at, ` +
 	`state_saved_at, state_bytes, state_error, fork`
 
 // scanPreview reads one row in previewColumns order.
 func scanPreview(row interface{ Scan(...any) error }) (*preview.Preview, error) {
 	var (
-		p                                                         preview.Preview
-		state, sitesJSON                                          string
-		createdAt, updatedAt, startedAt, lastRequestAt, expiresAt int64
-		stateSavedAt                                              int64
+		p                                         preview.Preview
+		state, sitesJSON                          string
+		createdAt, updatedAt, startedAt           int64
+		lastRequestAt, lastAttentionAt, expiresAt int64
+		stateSavedAt                              int64
 	)
 	if err := row.Scan(&p.ID, &p.Project, &p.Ref, &p.PR, &p.AutoStartHost,
 		&state, &sitesJSON, &p.SessionID, &p.Error,
-		&createdAt, &updatedAt, &startedAt, &lastRequestAt, &expiresAt,
+		&createdAt, &updatedAt, &startedAt, &lastRequestAt, &lastAttentionAt, &expiresAt,
 		&stateSavedAt, &p.StateBytes, &p.StateError, &p.Fork); err != nil {
 		return nil, err
 	}
@@ -202,6 +204,7 @@ func scanPreview(row interface{ Scan(...any) error }) (*preview.Preview, error) 
 	p.UpdatedAt = fromMicros(updatedAt)
 	p.StartedAt = fromMicros(startedAt)
 	p.LastRequestAt = fromMicros(lastRequestAt)
+	p.LastAttentionAt = fromMicros(lastAttentionAt)
 	p.ExpiresAt = fromMicros(expiresAt)
 	return &p, nil
 }
@@ -268,9 +271,19 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *Store) TouchRequest(ctx context.Context, id string, at time.Time) error {
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE previews SET last_request_at = ? WHERE id = ?`, toMicros(at), id); err != nil {
+func (s *Store) TouchRequest(ctx context.Context, id string, at time.Time, act preview.Activity) error {
+	// One statement for both grades: last_attention_at only moves when the
+	// request carried attention, so background traffic cannot advance it.
+	us := toMicros(at)
+	attention := us
+	if act != preview.ActivityAttention {
+		attention = 0
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE previews
+		SET last_request_at = ?,
+		    last_attention_at = MAX(last_attention_at, ?)
+		WHERE id = ?`, us, attention, id); err != nil {
 		return fmt.Errorf("touch preview: %w", err)
 	}
 	return nil

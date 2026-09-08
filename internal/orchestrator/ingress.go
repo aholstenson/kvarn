@@ -138,7 +138,7 @@ func (h *previewIngress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Stamp before anything else: idle reaping measures this, and a request
 	// that is about to sit on a slow upstream is still a request.
-	mgr.Touch(r.Context(), p.ID)
+	mgr.Touch(r.Context(), p.ID, requestActivity(r))
 
 	if r.URL.Path == previewStatusPath && !mgr.IsLive(p.ID) {
 		h.writeStatus(w, r, p)
@@ -160,6 +160,50 @@ func (h *previewIngress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.proxy(w, r, p, site)
+}
+
+// requestActivity grades what a request says about whether a person is looking
+// at the preview. It is the input to the unattended timeout, and it decides
+// which preview is given up first when the host runs out of room.
+//
+// Fetch metadata is the signal, because it is the one thing that separates a
+// page a person navigated to from the requests that page then makes on its own.
+// A browser sets Sec-Fetch-Dest to "document" only for a top-level navigation;
+// a poll from a background tab sets "empty", however often it fires and
+// whatever method it uses. So the headers decide whenever they are present,
+// including for a POST — a GraphQL poll is a POST, and reading the method first
+// would let one hold a VM up forever.
+//
+// Nothing sends fetch metadata but a browser, so its absence is the fallback
+// rather than a verdict: a form submission from a client that sends none is
+// somebody acting, and an Accept header asking for HTML is somebody's address
+// bar. What is left — a bare GET asking for anything, which is every crawler,
+// uptime monitor and `curl` — is background.
+func requestActivity(r *http.Request) preview.Activity {
+	switch r.Header.Get("Sec-Fetch-Dest") {
+	case "":
+		// Fall through to the fallbacks below.
+	case "document", "iframe", "frame", "object", "embed":
+		// A document arriving in a frame is still a document somebody put on
+		// screen.
+		return preview.ActivityAttention
+	default:
+		return preview.ActivityBackground
+	}
+	if strings.EqualFold(r.Header.Get("Sec-Fetch-Mode"), "navigate") {
+		return preview.ActivityAttention
+	}
+
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		// Safe methods say nothing on their own; a monitor uses them too.
+	default:
+		return preview.ActivityAttention
+	}
+	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		return preview.ActivityAttention
+	}
+	return preview.ActivityBackground
 }
 
 // autoStart tries to bring a preview into being for a hostname nothing claims

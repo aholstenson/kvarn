@@ -74,6 +74,13 @@ type PreviewPolicy struct {
 	// IdleTimeout stops a preview that has served no request for this long.
 	// Zero never reaps on idle.
 	IdleTimeout time.Duration
+	// UnattendedTimeout stops a preview this long after the last request that
+	// said a person was looking at it, however much other traffic has arrived
+	// since. It is what bounds a page left polling in a background tab, which
+	// keeps IdleTimeout from ever expiring on its own. Zero disables it, and it
+	// is always zero when IdleTimeout is, because reaping the unattended is a
+	// refinement of idle reaping rather than a second policy.
+	UnattendedTimeout time.Duration
 	// MaxLifetime stops a preview this long after it booted, whatever its
 	// traffic. Zero disables the cap.
 	MaxLifetime time.Duration
@@ -335,13 +342,14 @@ func (m *previewManager) logBuffer(id string) *preview.LogBuffer {
 	return buf
 }
 
-// Touch stamps a preview's last-request time. Called by ingress on every
-// request, so it does the cheapest write the store offers.
-func (m *previewManager) Touch(ctx context.Context, id string) {
+// Touch stamps a preview's last-request time, and its last-attention time when
+// the request carried attention. Called by ingress on every request, so it does
+// the cheapest write the store offers.
+func (m *previewManager) Touch(ctx context.Context, id string, act preview.Activity) {
 	if !m.enabled() {
 		return
 	}
-	if err := m.store.TouchRequest(ctx, id, m.now().UTC()); err != nil {
+	if err := m.store.TouchRequest(ctx, id, m.now().UTC(), act); err != nil {
 		m.log.Warn("could not stamp preview request time", "preview", id, "error", err)
 	}
 }
@@ -544,7 +552,12 @@ func (m *previewManager) startBoot(ctx context.Context, id string) error {
 	p.State = preview.StateBooting
 	p.Error = ""
 	p.UpdatedAt = now
+	// A boot is somebody asking for the preview, whether the ask came from a
+	// browser or from `kvarn preview up`, so it counts as attention. Without
+	// this an explicitly started preview would be reaped as unattended before
+	// anybody had a chance to open it.
 	p.LastRequestAt = now
+	p.LastAttentionAt = now
 	if err := m.store.Put(ctx, p); err != nil {
 		unclaim()
 		return err
@@ -626,6 +639,9 @@ func (m *previewManager) runBoot(ctx context.Context, p *preview.Preview, logs *
 	if p.LastRequestAt.IsZero() {
 		p.LastRequestAt = now
 	}
+	if p.LastAttentionAt.IsZero() {
+		p.LastAttentionAt = now
+	}
 	p.ExpiresAt = time.Time{}
 	if m.policy.MaxLifetime > 0 {
 		p.ExpiresAt = instance.startedAt.Add(m.policy.MaxLifetime)
@@ -686,13 +702,18 @@ func (m *previewManager) makeRoom(ctx context.Context, exclude string) error {
 	}
 }
 
-// evictIdle stops the least-recently-requested running preview, returning its
-// ID, or "" when there is nothing to evict.
+// evictIdle stops the running preview nobody has looked at for longest,
+// returning its ID, or "" when there is nothing to evict.
 //
-// "Least recently requested" rather than "oldest" because the question being
-// answered is which preview somebody is least likely to be looking at right
-// now. A preview booted an hour ago and refreshed a second ago is in use; one
-// booted a minute ago and untouched since is not.
+// Attention orders this rather than age, because the question being answered is
+// which preview somebody is least likely to be looking at right now. A preview
+// booted an hour ago and refreshed a second ago is in use; one booted a minute
+// ago and untouched since is not.
+//
+// Attention rather than plain traffic for the same reason the idle clock uses
+// it: a forgotten tab polling in the background looks busy from the request
+// stream alone, and ranking on that gives up a preview a person is reading to
+// keep one nobody is.
 func (m *previewManager) evictIdle(ctx context.Context, exclude string) string {
 	previews, err := m.store.List(ctx)
 	if err != nil {
@@ -717,13 +738,18 @@ func (m *previewManager) evictIdle(ctx context.Context, exclude string) string {
 		return ""
 	}
 	sort.Slice(candidates, func(i, j int) bool {
-		li, lj := lastRequest(byID[candidates[i]]), lastRequest(byID[candidates[j]])
-		if li.Equal(lj) {
-			// Ties go to the lexically first ID so eviction is deterministic
-			// rather than dependent on map iteration order.
-			return candidates[i] < candidates[j]
+		pi, pj := byID[candidates[i]], byID[candidates[j]]
+		if ai, aj := lastAttention(pi), lastAttention(pj); !ai.Equal(aj) {
+			return ai.Before(aj)
 		}
-		return li.Before(lj)
+		// Two previews nobody has looked at since the same moment are separated
+		// by their traffic, which at least says which is still being spoken to.
+		if ri, rj := lastRequest(pi), lastRequest(pj); !ri.Equal(rj) {
+			return ri.Before(rj)
+		}
+		// Remaining ties go to the lexically first ID so eviction is
+		// deterministic rather than dependent on map iteration order.
+		return candidates[i] < candidates[j]
 	})
 
 	victim := candidates[0]
@@ -734,8 +760,8 @@ func (m *previewManager) evictIdle(ctx context.Context, exclude string) string {
 	return victim
 }
 
-// lastRequest is the ordering key for eviction, tolerant of a preview that has
-// gone missing from the store between listing and sorting.
+// lastRequest is when a preview was last spoken to at all, tolerant of a
+// preview that has gone missing from the store between listing and sorting.
 func lastRequest(p *preview.Preview) time.Time {
 	if p == nil {
 		return time.Time{}
@@ -744,6 +770,23 @@ func lastRequest(p *preview.Preview) time.Time {
 		return p.CreatedAt
 	}
 	return p.LastRequestAt
+}
+
+// lastAttention is when a person was last plausibly looking at a preview.
+//
+// A preview with no attention recorded falls back to its last request. That is
+// what a row written before attention was tracked looks like, and it is also
+// the honest answer for one an operator started by hand and nobody has opened:
+// the alternative reads as "unattended since the epoch" and reaps a preview
+// somebody asked for a moment ago.
+func lastAttention(p *preview.Preview) time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	if p.LastAttentionAt.IsZero() {
+		return lastRequest(p)
+	}
+	return p.LastAttentionAt
 }
 
 // takeInstance hands a preview's in-memory half to exactly one caller. The
@@ -1148,7 +1191,7 @@ func (m *previewManager) StartReaper(ctx context.Context) {
 	if !m.enabled() {
 		return
 	}
-	if m.policy.IdleTimeout > 0 || m.policy.MaxLifetime > 0 {
+	if m.policy.IdleTimeout > 0 || m.policy.UnattendedTimeout > 0 || m.policy.MaxLifetime > 0 {
 		go func() {
 			t := time.NewTicker(previewReapInterval)
 			defer t.Stop()
@@ -1229,6 +1272,12 @@ func (m *previewManager) Reap(ctx context.Context) {
 			reason = fmt.Sprintf("reached its maximum lifetime of %s", m.policy.MaxLifetime)
 		case m.policy.IdleTimeout > 0 && now.Sub(lastRequest(p)) >= m.policy.IdleTimeout:
 			reason = fmt.Sprintf("idle for %s", m.policy.IdleTimeout)
+		case m.policy.UnattendedTimeout > 0 && now.Sub(lastAttention(p)) >= m.policy.UnattendedTimeout:
+			// Traffic is still arriving — the clause above did not fire — but
+			// none of it says a person is there. The two reasons are worded
+			// apart so a preview that stopped under a page still polling in a
+			// background tab is diagnosable from the log alone.
+			reason = fmt.Sprintf("unattended for %s", m.policy.UnattendedTimeout)
 		}
 		if reason == "" {
 			continue

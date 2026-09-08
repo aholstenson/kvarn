@@ -28,6 +28,7 @@ var _ = Describe("resolvePreviewPolicy", func() {
 		Expect(policy.Enabled()).To(BeTrue())
 		Expect(policy.Domain).To(Equal("preview.example.com"))
 		Expect(policy.IdleTimeout).To(Equal(defaultPreviewIdleTimeout))
+		Expect(policy.UnattendedTimeout).To(Equal(defaultPreviewIdleTimeout))
 		Expect(policy.MaxLifetime).To(Equal(defaultPreviewMaxLifetime))
 		Expect(policy.MaxConcurrent).To(Equal(defaultPreviewMaxConcurrent))
 		Expect(policy.MaxMemoryBytes).To(BeZero())
@@ -39,19 +40,21 @@ var _ = Describe("resolvePreviewPolicy", func() {
 
 	It("reads every field the operator set", func() {
 		policy, err := resolvePreviewPolicy(orchcfg.Preview{
-			Domain:         "preview.example.com",
-			Listen:         "100.64.0.1:8080",
-			IdleTimeout:    "45m",
-			MaxLifetime:    "12h",
-			MaxConcurrent:  ptr(5),
-			MaxMemory:      "8G",
-			MaxDisk:        "64G",
-			StateTimeout:   "5m",
-			StateRetention: "168h",
-			MaxStateSize:   "5G",
+			Domain:            "preview.example.com",
+			Listen:            "100.64.0.1:8080",
+			IdleTimeout:       "45m",
+			UnattendedTimeout: "2h",
+			MaxLifetime:       "12h",
+			MaxConcurrent:     ptr(5),
+			MaxMemory:         "8G",
+			MaxDisk:           "64G",
+			StateTimeout:      "5m",
+			StateRetention:    "168h",
+			MaxStateSize:      "5G",
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(policy.IdleTimeout).To(Equal(45 * time.Minute))
+		Expect(policy.UnattendedTimeout).To(Equal(2 * time.Hour))
 		Expect(policy.MaxLifetime).To(Equal(12 * time.Hour))
 		Expect(policy.MaxConcurrent).To(Equal(5))
 		Expect(policy.MaxMemoryBytes).To(Equal(uint64(8) * 1024 * 1024 * 1024))
@@ -84,6 +87,50 @@ var _ = Describe("resolvePreviewPolicy", func() {
 		Expect(policy.MaxConcurrent).To(BeZero())
 	})
 
+	It("takes the idle timeout as the unattended timeout when only one is set", func() {
+		policy, err := resolvePreviewPolicy(orchcfg.Preview{
+			Domain:      "preview.example.com",
+			Listen:      "100.64.0.1:8080",
+			IdleTimeout: "45m",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(policy.UnattendedTimeout).To(Equal(45 * time.Minute))
+	})
+
+	It("lets background traffic hold a preview open when the unattended timeout is longer", func() {
+		policy, err := resolvePreviewPolicy(orchcfg.Preview{
+			Domain:            "preview.example.com",
+			Listen:            "100.64.0.1:8080",
+			IdleTimeout:       "30m",
+			UnattendedTimeout: "4h",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(policy.UnattendedTimeout).To(Equal(4 * time.Hour))
+	})
+
+	It("stops reaping the unattended when idle reaping is off altogether", func() {
+		policy, err := resolvePreviewPolicy(orchcfg.Preview{
+			Domain:            "preview.example.com",
+			Listen:            "100.64.0.1:8080",
+			IdleTimeout:       "0",
+			UnattendedTimeout: "1h",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(policy.IdleTimeout).To(BeZero())
+		Expect(policy.UnattendedTimeout).To(BeZero())
+	})
+
+	It("treats an explicit zero unattended timeout as background traffic being enough", func() {
+		policy, err := resolvePreviewPolicy(orchcfg.Preview{
+			Domain:            "preview.example.com",
+			Listen:            "100.64.0.1:8080",
+			UnattendedTimeout: "0",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(policy.IdleTimeout).To(Equal(defaultPreviewIdleTimeout))
+		Expect(policy.UnattendedTimeout).To(BeZero())
+	})
+
 	It("treats a zero retention as never pruning saved state", func() {
 		policy, err := resolvePreviewPolicy(orchcfg.Preview{
 			Domain:         "preview.example.com",
@@ -113,6 +160,8 @@ var _ = Describe("resolvePreviewPolicy", func() {
 		},
 		Entry("an unparseable idle timeout", orchcfg.Preview{IdleTimeout: "half an hour"}, "idle_timeout"),
 		Entry("a negative idle timeout", orchcfg.Preview{IdleTimeout: "-5m"}, "must be non-negative"),
+		Entry("an unparseable unattended timeout", orchcfg.Preview{UnattendedTimeout: "a while"}, "unattended_timeout"),
+		Entry("a negative unattended timeout", orchcfg.Preview{UnattendedTimeout: "-1h"}, "must be non-negative"),
 		Entry("an unparseable max lifetime", orchcfg.Preview{MaxLifetime: "forever"}, "max_lifetime"),
 		Entry("a negative max_concurrent", orchcfg.Preview{MaxConcurrent: ptr(-1)}, "must not be negative"),
 		Entry("an unparseable max memory", orchcfg.Preview{MaxMemory: "lots"}, "max_memory"),

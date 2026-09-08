@@ -365,12 +365,42 @@ exits.
 
 - **Idle.** No request for `idle_timeout` (default 30 minutes). The next request
   boots it again, so an idle preview costs a database row rather than a VM.
+- **Unattended.** Nothing that says a person is looking at it for
+  `unattended_timeout` (defaults to `idle_timeout`), however much other traffic
+  has arrived. See below.
 - **Age.** `max_lifetime` after it booted (default 8 hours), whatever its
   traffic — so a preview somebody keeps poking at is still re-derived from the
   branch eventually.
 - **Capacity.** Reaching `max_concurrent`, or a full scheduler pool, evicts the
-  least-recently-requested idle preview to make room. Only a host where
+  preview nobody has looked at for longest to make room. Only a host where
   everything running is in active use answers with a holding page instead.
+
+### Traffic is not attention
+
+A page left open in a background tab keeps polling. So do uptime monitors and
+crawlers. That traffic resets the idle clock, so on request count alone a
+preview nobody has looked at since yesterday morning stays up until
+`max_lifetime` — a VM for nobody, and one that can push a preview somebody is
+reading out of a full host.
+
+kvarn therefore grades each request by what it says about whether a person is
+there. A top-level page navigation is attention; so is a form somebody
+submitted. A page's own assets, an XHR poll and a health check are not. The
+signal is the browser's fetch metadata (`Sec-Fetch-Dest`), which distinguishes a
+document a person opened from the requests that document then makes by itself —
+including for a `POST`, since a GraphQL poll is one. A client that sends no
+fetch metadata is read from its method and `Accept` header instead: a
+submission, or a request asking for HTML, counts; a bare `GET` asking for
+anything does not.
+
+Attention drives `unattended_timeout` and the eviction order. It never affects
+routing, and every request still keeps a preview alive while it is being served.
+
+**When to raise `unattended_timeout`:** an application whose ordinary use
+produces no navigations. A single-page app that somebody reads without
+submitting anything makes one document request and then only XHR, which is
+indistinguishable from polling. Give it a longer leash, or `"0"` to let any
+traffic hold it open the way it used to.
 - **Drain or restart.** A preview cannot migrate — it is a VM inside the
   orchestrator process, reachable only through the network that process owns —
   so `kvarn queue drain` stops previews outright, and a restart resets every

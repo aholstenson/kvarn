@@ -112,7 +112,7 @@ func (m *memStore) Delete(_ context.Context, id string) error {
 	return nil
 }
 
-func (m *memStore) TouchRequest(_ context.Context, id string, at time.Time) error {
+func (m *memStore) TouchRequest(_ context.Context, id string, at time.Time, act Activity) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, ok := m.previews[id]
@@ -120,6 +120,9 @@ func (m *memStore) TouchRequest(_ context.Context, id string, at time.Time) erro
 		return nil
 	}
 	p.LastRequestAt = at
+	if act == ActivityAttention {
+		p.LastAttentionAt = at
+	}
 	return nil
 }
 

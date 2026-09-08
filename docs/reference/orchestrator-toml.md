@@ -208,6 +208,7 @@ unimplemented.
 | `domain` | hostname | unset | Base domain preview hostnames are formed under. Required to enable previews. |
 | `listen` | `host:port` | unset | Address the plain-HTTP ingress listener binds. Required to enable previews. |
 | `idle_timeout` | duration | `30m` | Stop a preview that has served no request for this long. `"0"` never reaps on idle. |
+| `unattended_timeout` | duration | `idle_timeout` | Stop a preview this long after the last request that said somebody was looking at it, whatever other traffic has arrived since. `"0"` lets any traffic hold a preview open. Forced to `"0"` when `idle_timeout` is. |
 | `max_lifetime` | duration | `8h` | Stop a preview this long after it booted, whatever its traffic. `"0"` disables the cap. |
 | `max_concurrent` | int | `3` | How many previews may run at once. `0` is unbounded. |
 | `max_memory` | size | unset | Ceiling on one preview VM's memory, below what its `kvarn.yml` asks for. |
@@ -225,10 +226,25 @@ authentication, so bind it to an address only your fronting layer can reach — 
 tailnet IP, or loopback behind Caddy — and let that layer handle certificates
 and access control. There is no ACME client in kvarn.
 
-Reaching `max_concurrent` does not refuse the next preview outright: the
-least-recently-requested idle preview is stopped to make room, and only a host
-where everything running is in active use answers with a holding page. The same
-happens when the scheduler's capacity pool has no room for another VM.
+**Two clocks stop an idle preview, and they measure different things.**
+`idle_timeout` runs on all traffic; `unattended_timeout` runs only on the
+requests that say a person is there — a page navigation, or something they
+submitted. A page left open in a background tab keeps polling on its own, which
+holds `idle_timeout` off indefinitely, so `unattended_timeout` is what bounds
+it. Whichever expires first stops the preview.
+
+Raise `unattended_timeout` above `idle_timeout` for an application whose
+ordinary use produces no navigations — a single-page app somebody reads without
+submitting anything, whose every request after the first page load is an XHR
+that cannot be told from a poll. Set it to `"0"` to go back to any traffic being
+enough.
+
+Reaching `max_concurrent` does not refuse the next preview outright: the preview
+nobody has looked at for longest is stopped to make room, and only a host where
+everything running is in active use answers with a holding page. The same
+happens when the scheduler's capacity pool has no room for another VM. That
+ordering uses the same attention signal, so a forgotten tab's polling does not
+buy its preview a place at the expense of one somebody is reading.
 
 Stopping a preview — by idle timeout, lifetime cap or eviction — leaves its
 record and hostnames in place, so the next request boots it again. The database
@@ -248,6 +264,7 @@ by hand.
 domain = "preview.example.com"
 listen = "100.64.0.1:8080"
 idle_timeout = "30m"
+unattended_timeout = "30m"
 max_lifetime = "8h"
 max_concurrent = 3
 max_memory = "8G"

@@ -58,6 +58,26 @@ func (s State) IsLive() bool {
 	return s == StateBooting || s == StateRunning || s == StateStopping
 }
 
+// Activity grades what one request says about whether a person is at the other
+// end of it.
+//
+// The distinction exists because "a request arrived" is a poor answer to "is
+// anybody looking at this". A page left open in a background tab keeps polling,
+// and so do uptime monitors and crawlers; treating that as attention holds a VM
+// up for as long as the lifetime cap allows, for nobody. So a preview's idle
+// clock runs on attention, and ordinary traffic only says the preview is still
+// being spoken to.
+type Activity int
+
+const (
+	// ActivityBackground is traffic that arrives whether or not a person is
+	// there: a page's assets, an XHR poll, a health check, a crawler.
+	ActivityBackground Activity = iota
+	// ActivityAttention is a request a person produces by being present — a
+	// document navigation, or something they submitted.
+	ActivityAttention
+)
+
 // Site is one address a preview answers on, with its hostname already resolved
 // against the project's domain. Several sites may share a port when one
 // virtual-hosting server answers under several names.
@@ -106,9 +126,15 @@ type Preview struct {
 	UpdatedAt time.Time
 	// StartedAt is when the current VM booted; zero when nothing is running.
 	StartedAt time.Time
-	// LastRequestAt is stamped by ingress on every request and is what idle
-	// reaping measures.
+	// LastRequestAt is stamped by ingress on every request, whatever its
+	// Activity, and is what idle reaping measures.
 	LastRequestAt time.Time
+	// LastAttentionAt is stamped only by the requests ingress grades as
+	// ActivityAttention, so it answers a narrower question than LastRequestAt:
+	// when a person was last plausibly looking at this preview. Zero means none
+	// has been seen, which is also how a row written before the field existed
+	// reads; callers fall back to LastRequestAt.
+	LastAttentionAt time.Time
 	// ExpiresAt is the hard deadline the current VM is stopped at regardless of
 	// traffic. Zero means no cap.
 	ExpiresAt time.Time
@@ -221,12 +247,12 @@ type Store interface {
 	List(ctx context.Context) ([]*Preview, error)
 	// Delete removes a preview and releases its hostnames, or ErrNotFound.
 	Delete(ctx context.Context, id string) error
-	// TouchRequest stamps a preview's last-request time, which is what idle
-	// reaping measures. It is a dedicated operation because ingress calls it on
-	// every request and must not read-modify-write the whole row to do it.
-	// A preview that no longer exists is not an error: the request raced a
-	// delete and there is nothing to record.
-	TouchRequest(ctx context.Context, id string, at time.Time) error
+	// TouchRequest stamps a preview's last-request time, and its last-attention
+	// time as well when act is ActivityAttention. It is a dedicated operation
+	// because ingress calls it on every request and must not read-modify-write
+	// the whole row to do it. A preview that no longer exists is not an error:
+	// the request raced a delete and there is nothing to record.
+	TouchRequest(ctx context.Context, id string, at time.Time, act Activity) error
 	// ResetLive moves every non-stopped preview back to stopped, clearing the
 	// VM-lifetime fields. It is startup reconciliation: the VMs those rows
 	// referred to died with the previous process, so the rows have to say
