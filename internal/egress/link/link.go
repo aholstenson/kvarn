@@ -72,12 +72,20 @@ type Network struct {
 	stk *stack.Stack
 	nic tcpip.NICID
 
+	// seen is what the DNS forwarder answered, kept so a connection on a port
+	// that carries no hostname can still be attributed to a name.
+	seen *resolutions
+
 	mu           sync.Mutex
 	tcpListeners map[uint16]*gonet.TCPListener
 	closed       bool
 
 	cancel context.CancelFunc
 }
+
+// HostnamesFor returns the names the DNS forwarder answered with this address,
+// most recently looked up first. It satisfies the egress proxy's Resolver.
+func (n *Network) HostnamesFor(ip string) []string { return n.seen.lookup(ip) }
 
 // New constructs a Network and attaches the link endpoint to a fresh
 // gvisor stack. It does not return until the stack is ready to accept
@@ -129,6 +137,7 @@ func New(cfg Config) (*Network, error) {
 		log:          log,
 		stk:          s,
 		nic:          nicID,
+		seen:         newResolutions(),
 		tcpListeners: make(map[uint16]*gonet.TCPListener),
 	}
 	return n, nil
@@ -266,6 +275,7 @@ func (n *Network) startDNS(ctx context.Context) (interface{ Close() error }, err
 		conn:    conn,
 		allowed: n.cfg.AllowedDNS,
 		aliases: normalizeAliases(n.cfg.HostAliases),
+		seen:    n.seen,
 		log:     n.log,
 	}
 	go srv.run(ctx)

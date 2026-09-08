@@ -24,7 +24,12 @@ type dnsForwarder struct {
 	conn    net.PacketConn
 	allowed []string // exact and "*.suffix"; nil means allow everything
 	aliases map[string]string
-	log     *slog.Logger
+	// seen records every address handed to the guest against the name it was
+	// answered for, so a later connection carrying no hostname of its own can
+	// still be judged by name. Aliases are left out: they point inside the VM,
+	// which egress control has nothing to say about.
+	seen *resolutions
+	log  *slog.Logger
 }
 
 func (d *dnsForwarder) run(ctx context.Context) {
@@ -130,6 +135,17 @@ func (d *dnsForwarder) localAddress(name string) (net.IP, bool) {
 	return bestIP, bestIP != nil
 }
 
+// remember attributes every address in an answer to the name it answered, so
+// the egress proxy can name a raw TCP connection aimed at one of them.
+func (d *dnsForwarder) remember(name string, ips []net.IP) {
+	if d.seen == nil {
+		return
+	}
+	for _, ip := range ips {
+		d.seen.record(ip, name)
+	}
+}
+
 func (d *dnsForwarder) permit(name string) bool {
 	if len(d.allowed) == 0 {
 		return true
@@ -162,12 +178,14 @@ func (d *dnsForwarder) forward(ctx context.Context, req []byte, name string, qty
 		if err != nil {
 			return nil, err
 		}
+		d.remember(name, ips)
 		return buildAnswer(req, name, qtype, ips), nil
 	case qtypeAAAA:
 		ips, err := net.DefaultResolver.LookupIP(ctx, "ip6", name)
 		if err != nil {
 			return nil, err
 		}
+		d.remember(name, ips)
 		return buildAnswer(req, name, qtype, ips), nil
 	default:
 		// Other RR types fall through to NXDOMAIN; fine for our use case.

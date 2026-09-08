@@ -235,6 +235,7 @@ func (s *Service) bootPreview(ctx context.Context, p *preview.Preview, logs *pre
 		Transferer:    s.transferer,
 		SourceDir:     cloneDir,
 		PristineClone: true,
+		Preview:       true,
 		WorkingDir:    s.workspaceDir,
 		Registry:      s.registry,
 		BridgeHandler: s.bridgeHandler,

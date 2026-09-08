@@ -42,6 +42,13 @@ type Preview struct {
 	// are ordinary steps, run in order, and retried until they pass or the boot
 	// gives up.
 	Ready []Step `yaml:"ready,omitempty"`
+	// Network is added to the top-level `network:` block while a preview runs,
+	// and nowhere else. A preview serves the application to people, so it
+	// reaches payment sandboxes, identity providers and staging databases that
+	// building and testing the same branch never touch. Widening the top-level
+	// block would hand the same reach to every job, which is a larger blast
+	// radius than the need calls for.
+	Network Network `yaml:"network,omitempty"`
 	// State is what survives the preview being stopped. Without it a preview
 	// holds nothing: it is stopped when it goes idle, destroyed, and re-derived
 	// from the branch on the next request, which loses whatever a reviewer
@@ -336,8 +343,8 @@ const EnvVarStateDir = "KVARN_PREVIEW_STATE_DIR"
 // happens at resolution.
 func (p *Preview) validate(cachePaths []string) error {
 	if len(p.Sites) == 0 {
-		if len(p.Setup) > 0 || len(p.Serve) > 0 || len(p.Ready) > 0 || p.State.Declared() {
-			return errors.New("declares setup, serve, ready or state but no sites")
+		if len(p.Setup) > 0 || len(p.Serve) > 0 || len(p.Ready) > 0 || p.State.Declared() || p.Network.Declared() {
+			return errors.New("declares setup, serve, ready, state or network but no sites")
 		}
 		return nil
 	}
@@ -404,6 +411,9 @@ func (p *Preview) validate(cachePaths []string) error {
 		return err
 	}
 	if err := validatePreviewSteps("ready check", p.Ready); err != nil {
+		return err
+	}
+	if err := validateNetwork("network", p.Network); err != nil {
 		return err
 	}
 	return p.State.validate(cachePaths)

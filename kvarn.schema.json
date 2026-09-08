@@ -39,32 +39,7 @@
         }
       }
     },
-    "network": {
-      "description": "Network controls for the VM: what it may reach, and what names resolve inside it.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "allowed_hosts": {
-          "description": "Additional hostnames or IPs allowed for outbound TCP connections (ports 80/443). Common infrastructure hosts are always allowed.",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "pattern": "^[a-zA-Z0-9._-]+$"
-          }
-        },
-        "host_aliases": {
-          "description": "Hostnames mapped to the IP they resolve to inside the VM. Intended for local development names pointing at 127.0.0.1. A key is one literal hostname or a \"*.domain\" wildcard matching any subdomain; each value must be an IP address.",
-          "type": "object",
-          "propertyNames": {
-            "pattern": "^(\\*\\.)?[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$"
-          },
-          "additionalProperties": {
-            "type": "string",
-            "minLength": 1
-          }
-        }
-      }
-    },
+    "network": { "$ref": "#/$defs/network" },
     "cache": {
       "description": "Cache configuration for persisting tool artifacts across VM runs.",
       "type": "object",
@@ -195,9 +170,11 @@
           "type": "array",
           "items": { "$ref": "#/$defs/step" }
         },
-        "state": {
-          "$ref": "#/$defs/previewState"
-        }
+        "network": {
+          "description": "Network controls added while the preview runs, on top of the top-level network block. A preview serves the application to people, so it reaches services building the same branch never touches.",
+          "$ref": "#/$defs/network"
+        },
+        "state": { "$ref": "#/$defs/previewState" }
       }
     }
   },
@@ -401,6 +378,64 @@
           "items": {
             "type": "string",
             "enum": ["none", "original-task", "pr-metadata", "pr-diff"]
+          }
+        }
+      }
+    },
+    "allowedHost": {
+      "description": "One allowlist entry: a host pattern, the TCP ports it opens, and what happens to TLS on port 443. A bare string is the host pattern on ports 80 and 443 with TLS inspected.",
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(\\*\\.)?[a-zA-Z0-9:._-]+$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["host"],
+          "properties": {
+            "host": {
+              "description": "Hostname, IP address, or \"*.domain\" wildcard matching any subdomain.",
+              "type": "string",
+              "pattern": "^(\\*\\.)?[a-zA-Z0-9:._-]+$"
+            },
+            "ports": {
+              "description": "TCP ports the VM may open to this host. Defaults to [80, 443]. A port outside those two carries raw bytes with no inspection.",
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            },
+            "tls": {
+              "description": "What happens to TLS on port 443: \"inspect\" terminates it so a managed secret can be injected, \"passthrough\" splices the bytes untouched for a host that pins its certificate. Only valid when the entry opens port 443.",
+              "type": "string",
+              "enum": ["inspect", "passthrough"]
+            }
+          }
+        }
+      ]
+    },
+    "network": {
+      "description": "Network controls for the VM: what it may reach, and what names resolve inside it.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowed_hosts": {
+          "description": "Hosts the VM may reach outbound, on top of the infrastructure hosts always allowed. An entry is a bare host pattern (ports 80 and 443, TLS inspected) or an object naming ports and a TLS mode.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/allowedHost" }
+        },
+        "host_aliases": {
+          "description": "Hostnames mapped to the IP they resolve to inside the VM. Intended for local development names pointing at 127.0.0.1. A key is one literal hostname or a \"*.domain\" wildcard matching any subdomain; each value must be an IP address.",
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^(\\*\\.)?[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }

@@ -358,7 +358,7 @@ preview:
 preview:
   serve:
     - { name: Web, run: npm start }
-`, "declares setup, serve, ready or state but no sites"),
+`, "declares setup, serve, ready, state or network but no sites"),
 			Entry("a ready check with no run command",
 				`
 preview:
@@ -506,7 +506,7 @@ preview:
   state:
     paths:
       - ~/data
-`, "declares setup, serve, ready or state but no sites"),
+`, "declares setup, serve, ready, state or network but no sites"),
 		)
 	})
 })

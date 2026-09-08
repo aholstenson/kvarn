@@ -14,6 +14,7 @@ import (
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/dispatch"
+	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 	"github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
 	"github.com/aholstenson/kvarn/internal/sandbox/transfer"
@@ -147,6 +148,12 @@ type Opts struct {
 	// PristineClone is set, which installs its own filter.
 	SkipFile func(relPath string, isDir bool) bool
 
+	// Preview declares that this VM serves a preview environment rather than
+	// running a job. It is what brings the repository's `preview.network`
+	// block into effect: the wider reach a served application needs belongs to
+	// the preview alone, not to every job on the same repository.
+	Preview bool
+
 	// PristineClone declares that SourceDir is a clone whose worktree is
 	// exactly HEAD, with nothing uncommitted. Only the repository is then
 	// shipped and the worktree is checked out in the guest, which halves the
@@ -233,6 +240,10 @@ type Session struct {
 	cacheLayers   []cache.Layer
 	onEvent       func(Event)
 
+	// preview records that this VM serves a preview, so a refused connection
+	// points at the block that would have allowed it.
+	preview bool
+
 	deniedMu    sync.Mutex
 	deniedHosts []string
 
@@ -283,8 +294,15 @@ func (s *Session) annotateEgress(err error) error {
 	if len(denied) == 0 {
 		return err
 	}
-	return fmt.Errorf("%w (egress denied: %s — add the host to network.allowed_hosts in kvarn.yml if the job needs it)",
-		err, strings.Join(denied, ", "))
+	field := "network.allowed_hosts"
+	if s.preview {
+		// The preview's own block is the narrower place to add it, and adding
+		// it there is what keeps every job on the repository from gaining the
+		// same reach.
+		field = "preview.network.allowed_hosts"
+	}
+	return fmt.Errorf("%w (egress denied: %s — add the host to %s in kvarn.yml if it is needed)",
+		err, strings.Join(denied, ", "), field)
 }
 
 // BareProxy returns the underlying BridgeProxy that talks directly to the VM,
@@ -438,6 +456,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 
 	sess := &Session{
 		WorkingDir: workingDir,
+		preview:    opts.Preview,
 	}
 
 	// On error, clean up everything accumulated so far.
@@ -506,12 +525,21 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		createOpts.MemoryBytes = opts.Config.MemoryBytes()
 	}
 
-	// Build the egress proxy's allowlist before VM creation so the
-	// netstack and proxy come up with the right hosts permitted.
-	var allowedHosts []string
+	// Build the egress proxy's allowlist before VM creation. The ports it opens
+	// decide which listeners the netstack binds, so it has to be complete
+	// before the VM exists rather than grown as the run goes on.
+	var rules []egressproxy.Rule
 	if opts.Config != nil {
-		allowedHosts = append(allowedHosts, opts.Config.Network.AllowedHosts...)
+		rules = append(rules, egressRules(opts.Config.Network)...)
+		// A preview serves the application to people, so it reaches services
+		// that building the same branch never touches. Those hosts are open
+		// only here, which is what keeps a job's reach narrower than a
+		// preview's.
+		if opts.Preview {
+			rules = append(rules, egressRules(opts.Config.Preview.Network)...)
+		}
 	}
+	var allowedHosts []string
 	if len(deps) > 0 {
 		// Substituters Nix talks to for any flake evaluation.
 		allowedHosts = append(allowedHosts,
@@ -525,7 +553,8 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 		}
 	}
 	allowedHosts = append(allowedHosts, aug.Hosts...)
-	createOpts.Network.AllowedHosts = append(createOpts.Network.AllowedHosts, allowedHosts...)
+	rules = append(rules, egressproxy.HostRules(allowedHosts)...)
+	createOpts.Network.AllowedHosts = append(createOpts.Network.AllowedHosts, rules...)
 	// Every alias goes to the VM's DNS forwarder, wildcard or not, so the two
 	// resolution paths in the guest agree on the names they both cover. Only
 	// the exact ones can also become /etc/hosts lines.

@@ -527,6 +527,42 @@ For the container's data to survive a stop, put its volume under
 `$KVARN_PREVIEW_STATE_DIR` and declare `preview.state` — see
 [keeping state between boots](#keeping-state-between-boots).
 
+## Let a preview reach outside
+
+A served application talks to things a build never does: a payment sandbox, an
+identity provider, a staging API, a hosted database. Those hosts go in
+[`preview.network`](../reference/kvarn-yml.md#previewnetwork), which is added to
+the top-level `network:` block while the preview runs and nowhere else.
+
+```yaml
+preview:
+  sites:
+    web: { port: 3000 }
+  network:
+    allowed_hosts:
+      - "*.stripe.com"
+      - auth.example.com
+      - host: db.staging.example.com
+        ports: [5432]
+```
+
+Two things are worth knowing when you write this block:
+
+- **A port other than 80 or 443 is carried through unread.** Kvarn matches it by
+  the name the VM resolved, so an IP literal in a connection string only works
+  if you allow that address outright. Prefer a name.
+- **A host that pins its certificate needs `tls: passthrough`.** Kvarn otherwise
+  terminates TLS with its own CA, which is what lets it inject a managed secret;
+  passthrough gives that up in exchange for the handshake working.
+
+Keep these out of the top-level `network:` block. Putting them there hands the
+same reach to every job on the repository, including the ones an agent runs,
+which is a wider blast radius than a preview's own needs call for.
+
+A preview that dies with "unexpected EOF" or a reset connection is usually this:
+kvarn names the refused host in the failure it reports, so the message tells you
+what to add.
+
 ## When something does not work
 
 **The hostname 404s.** Nothing is registered for it. Previews are not created

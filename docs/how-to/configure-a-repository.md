@@ -102,7 +102,25 @@ network:
     - "*.internal.example.com"
 ```
 
-Entries are hostnames, IPs, or a `*.domain` wildcard — no scheme, path or port.
+A bare entry is a hostname, an IP, or a `*.domain` wildcard — no scheme, path or
+port — and opens ports 80 and 443.
+
+A build that needs another port, or a host that will not tolerate having its TLS
+inspected, writes the entry as a mapping instead:
+
+```yaml
+network:
+  allowed_hosts:
+    - host: db.staging.example.com
+      ports: [5432]
+    - host: api.pinned.example.com
+      tls: passthrough
+```
+
+See [`network`](../reference/kvarn-yml.md#network) for what each field changes.
+A host only a preview needs belongs in
+[`preview.network`](../reference/kvarn-yml.md#previewnetwork) rather than here,
+so the reach does not extend to every job.
 
 ## Size the VM only when you need to
 

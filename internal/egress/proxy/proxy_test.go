@@ -30,33 +30,33 @@ func (s staticDialer) DialContext(ctx context.Context, network, _ string) (net.C
 
 var _ = Describe("Allowlist", func() {
 	It("matches exact and wildcard entries", func() {
-		a := proxy.NewAllowlist([]string{
+		a := proxy.NewHostAllowlist([]string{
 			"github.com",
 			"*.example.com",
 		})
-		Expect(a.Permit("github.com")).To(BeTrue())
-		Expect(a.Permit("GitHub.com")).To(BeTrue())
-		Expect(a.Permit("api.github.com")).To(BeFalse())
-		Expect(a.Permit("foo.example.com")).To(BeTrue())
-		Expect(a.Permit("a.b.example.com")).To(BeTrue())
-		Expect(a.Permit("example.com")).To(BeFalse())
-		Expect(a.Permit("evil.com")).To(BeFalse())
+		Expect(a.Permit("github.com", 443)).To(BeTrue())
+		Expect(a.Permit("GitHub.com", 443)).To(BeTrue())
+		Expect(a.Permit("api.github.com", 443)).To(BeFalse())
+		Expect(a.Permit("foo.example.com", 443)).To(BeTrue())
+		Expect(a.Permit("a.b.example.com", 443)).To(BeTrue())
+		Expect(a.Permit("example.com", 443)).To(BeFalse())
+		Expect(a.Permit("evil.com", 443)).To(BeFalse())
 	})
 
 	It("permits every host a GitHub release download passes through", func() {
 		// github.com answers a release asset request with a 302 the client
 		// follows as a fresh connection, so allowing github.com alone leaves
 		// every `gh release download`-shaped fetch failing at the redirect.
-		a := proxy.NewAllowlist(proxy.DefaultAllowedHosts)
-		Expect(a.Permit("github.com")).To(BeTrue())
-		Expect(a.Permit("release-assets.githubusercontent.com")).To(BeTrue())
-		Expect(a.Permit("objects.githubusercontent.com")).To(BeTrue())
+		a := proxy.NewHostAllowlist(proxy.DefaultAllowedHosts)
+		Expect(a.Permit("github.com", 443)).To(BeTrue())
+		Expect(a.Permit("release-assets.githubusercontent.com", 443)).To(BeTrue())
+		Expect(a.Permit("objects.githubusercontent.com", 443)).To(BeTrue())
 	})
 
 	It("strips port and trailing dot", func() {
-		a := proxy.NewAllowlist([]string{"foo.com"})
-		Expect(a.Permit("foo.com.")).To(BeTrue())
-		Expect(a.Permit("foo.com:443")).To(BeTrue())
+		a := proxy.NewHostAllowlist([]string{"foo.com"})
+		Expect(a.Permit("foo.com.", 443)).To(BeTrue())
+		Expect(a.Permit("foo.com:443", 443)).To(BeTrue())
 	})
 })
 
@@ -123,7 +123,7 @@ var _ = Describe("Proxy ServeHTTPS", func() {
 		upHost := strings.TrimPrefix(upstream.URL, "https://")
 
 		p := proxy.New(proxy.Config{
-			Allowlist: proxy.NewAllowlist([]string{"api.github.com"}),
+			Allowlist: proxy.NewHostAllowlist([]string{"api.github.com"}),
 			CA:        ca,
 			Injector: proxy.InjectorFunc(func(req *http.Request, host string) error {
 				req.Header.Set("Authorization", "Bearer kvarn-fake-"+host)

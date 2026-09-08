@@ -26,7 +26,7 @@ The home directory is `/home/kvarn`.
 | `validation` | object | Steps run after the agent. |
 | `modes` | map | Agent modes this repository defines, beside the built-in ones. |
 | `pull_request` | object | What the pull requests, commits and comments a run produces should say. |
-| `preview` | object | Preview environments: which hostnames are served from which ports, what to run to bring them up, and what survives being stopped. |
+| `preview` | object | Preview environments: which hostnames are served from which ports, what to run to bring them up, what they may reach, and what survives being stopped. |
 
 All keys are optional; a repository with no `kvarn.yml` gets a bare VM with no
 setup and no validation.
@@ -95,10 +95,11 @@ network:
     - 10.0.0.5
 ```
 
-Outbound TCP (ports 80 and 443) is denied unless the host matches the
-allowlist, on top of the defaults needed to fetch dependencies. Entries are
-hostnames, IP addresses, or a `*.domain` wildcard that matches any subdomain.
-Schemes, paths and ports are rejected.
+Outbound TCP is denied unless the host matches the allowlist, on top of the
+defaults needed to fetch dependencies. A bare entry is a hostname, an IP
+address, or a `*.domain` wildcard that matches any subdomain, and opens ports 80
+and 443. Schemes, paths and ports written into the string are rejected — a port
+belongs in the `ports` field below.
 
 A denied connection is closed without an answer, so the program inside the VM
 reports a truncated download or a reset connection rather than a refusal. Kvarn
@@ -108,6 +109,46 @@ dies on "unexpected EOF" still tells you which host to add here.
 Matching is per hostname, and a redirect is a new connection to a new host: a
 download that starts at an allowed host and redirects to a CDN needs the CDN
 allowed too.
+
+### Ports and TLS
+
+An entry written as a mapping can open other ports and ask to be left alone:
+
+```yaml
+network:
+  allowed_hosts:
+    - api.example.com
+    - host: db.staging.example.com
+      ports: [5432]
+    - host: smtp.example.com
+      ports: [587]
+    - host: api.pinned.example.com
+      tls: passthrough
+```
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `host` | — | Required. Same syntax as a bare entry. |
+| `ports` | `[80, 443]` | TCP ports the VM may open to this host. |
+| `tls` | `inspect` | `inspect` or `passthrough`. Governs port 443 only, so an entry that sets it must also list 443. |
+
+**Ports 80 and 443 are read as HTTP.** Kvarn terminates the connection, applies
+any [managed secret](#secrets) scoped to the host, and forwards the request. Every
+other port is carried through byte for byte: there is no HTTP on it to read, so
+nothing is inspected and no secret can be injected.
+
+**A connection on one of those other ports is matched by the name the VM
+resolved.** Nothing in a Postgres or SMTP stream says which host it is for, so
+kvarn uses the address: the guest asked kvarn's own DNS forwarder for it moments
+earlier, and that answer is what ties the connection back to a name in this
+file. An IP literal typed straight into a connection string has no such name, so
+it only gets through if the address itself is an entry here.
+
+**`tls: passthrough` splices the bytes instead of terminating them.** It is what
+a host needs when it pins the certificate its client must see, or asks for a
+client certificate kvarn cannot present. The cost is that nothing reads the
+traffic, so a managed secret scoped to that host is never substituted into it
+and the request never appears in the run's record.
 
 ### `network.host_aliases`
 
@@ -605,6 +646,38 @@ attempt would fail a preview that is merely still starting.
 
 Requests arriving before the checks pass get a holding page rather than a
 connection error.
+
+### `preview.network`
+
+A [`network`](#network) block that applies while the preview runs, and nowhere
+else. It takes the same fields — `allowed_hosts` with the same entry forms, and
+`host_aliases` — and is added to the top-level block rather than replacing it.
+
+```yaml
+network:
+  allowed_hosts:
+    - api.example.com
+
+preview:
+  sites:
+    web: { port: 3000 }
+  network:
+    allowed_hosts:
+      - "*.stripe.com"
+      - host: db.staging.example.com
+        ports: [5432]
+```
+
+A preview serves the application to people, so it reaches payment sandboxes,
+identity providers and staging databases that building and testing the same
+branch never touch. Putting those in the top-level block would hand the same
+reach to every job on the repository, including the ones an agent runs. This
+block is how a preview gets what it needs without widening that.
+
+The reach still belongs to code from the branch, exactly as a job's does. What
+differs is the blast radius, not the trust: a preview is a longer-lived VM that
+takes traffic from the internet, so what it may reach is worth deciding
+separately rather than by inheritance.
 
 ### `preview.state`
 

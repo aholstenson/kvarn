@@ -70,7 +70,7 @@ func (e *placeholderEntry) permit(host string) bool {
 	if e.allow == nil {
 		return true
 	}
-	return e.allow.Permit(host)
+	return e.allow.PermitAny(host)
 }
 
 // PlaceholderInjector substitutes per-job placeholder strings in outbound
@@ -102,7 +102,7 @@ func NewPlaceholderInjector(secrets map[string]ManagedSecret, log *slog.Logger) 
 		}
 		e := placeholderEntry{placeholder: ph, value: ms.Value, scheme: scheme}
 		if len(ms.Hosts) > 0 {
-			e.allow = NewAllowlist(ms.Hosts)
+			e.allow = NewHostAllowlist(ms.Hosts)
 		}
 		entries = append(entries, e)
 	}

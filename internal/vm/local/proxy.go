@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -20,16 +21,20 @@ import (
 // starts proxy goroutines bound to those listeners. The listeners outlive
 // only as long as ctx; cancelling it tears them down.
 func startProxy(ctx context.Context, n *link.Network, ca *egressproxy.CA, cfg vm.NetworkConfig) error {
-	hosts := append([]string(nil), egressproxy.DefaultAllowedHosts...)
-	hosts = append(hosts, cfg.AllowedHosts...)
+	rules := egressproxy.HostRules(egressproxy.DefaultAllowedHosts)
+	rules = append(rules, cfg.AllowedHosts...)
 
-	allowlist := egressproxy.NewAllowlist(hosts)
+	allowlist := egressproxy.NewAllowlist(rules)
 	p := egressproxy.New(egressproxy.Config{
 		Allowlist: allowlist,
 		CA:        ca,
 		Injector:  cfg.SecretInjector,
-		Logger:    slog.Default(),
-		OnDenied:  cfg.OnEgressDenied,
+		// The netstack's DNS forwarder is what named every address the guest
+		// holds, so it is what can name a connection on a port with no
+		// hostname in it.
+		Resolver: n,
+		Logger:   slog.Default(),
+		OnDenied: cfg.OnEgressDenied,
 	})
 
 	httpsLn, err := n.ListenAny(443)
@@ -45,15 +50,39 @@ func startProxy(ctx context.Context, n *link.Network, ca *egressproxy.CA, cfg vm
 	go func() { _ = p.ServeHTTPS(ctx, httpsLn) }()
 	go func() { _ = p.ServeHTTP(ctx, httpLn) }()
 
+	// The gateway caches bind before the project's own ports, because a guest
+	// that cannot reach them installs nothing at all.
+	reserved := map[uint16]string{}
 	if cfg.ImageCacheHandler != nil && cfg.ImageCachePort != 0 {
 		if err := startGatewayHTTP(ctx, n, "image cache", cfg.ImageCacheHandler, cfg.ImageCachePort); err != nil {
 			return fmt.Errorf("start image cache: %w", err)
 		}
+		reserved[cfg.ImageCachePort] = "the container image cache"
 	}
 	if cfg.NixCacheHandler != nil && cfg.NixCachePort != 0 {
 		if err := startGatewayHTTP(ctx, n, "nix cache", cfg.NixCacheHandler, cfg.NixCachePort); err != nil {
 			return fmt.Errorf("start nix cache: %w", err)
 		}
+		reserved[cfg.NixCachePort] = "the Nix binary cache"
+	}
+
+	// One listener per port the project opened beyond HTTP. Binding them here,
+	// rather than on demand, is what makes a connection to an unopened port
+	// fail immediately instead of hanging: nothing is listening, so the
+	// netstack answers the SYN itself.
+	for _, port := range allowlist.ExtraPorts() {
+		// A port the gateway already serves cannot also carry egress, and
+		// saying so beats a bind error nobody can trace back to kvarn.yml.
+		if owner, taken := reserved[port]; taken {
+			return fmt.Errorf(
+				"network.allowed_hosts opens port %d, which this host serves %s on; move that cache to another port or drop the entry",
+				port, owner)
+		}
+		ln, err := n.ListenAny(port)
+		if err != nil {
+			return fmt.Errorf("listen %d: %w", port, err)
+		}
+		go func(ln net.Listener, port uint16) { _ = p.ServeTCP(ctx, ln, port) }(ln, port)
 	}
 
 	return nil

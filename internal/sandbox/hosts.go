@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
+	"github.com/aholstenson/kvarn/internal/project"
 )
 
 const (
@@ -41,9 +43,29 @@ func (o Opts) hostAliases() map[string]string {
 	}
 	if o.Config != nil {
 		add(o.Config.Network.HostAliases)
+		if o.Preview {
+			add(o.Config.Preview.Network.HostAliases)
+		}
 	}
 	add(o.HostAliases)
 	return merged
+}
+
+// egressRules turns one kvarn.yml `network:` block into the allowlist rules the
+// proxy is built from.
+func egressRules(n project.Network) []egressproxy.Rule {
+	if len(n.AllowedHosts) == 0 {
+		return nil
+	}
+	rules := make([]egressproxy.Rule, 0, len(n.AllowedHosts))
+	for _, entry := range n.AllowedHosts {
+		rules = append(rules, egressproxy.Rule{
+			Host:        entry.Host,
+			Ports:       entry.EffectivePorts(),
+			Passthrough: entry.Passthrough(),
+		})
+	}
+	return rules
 }
 
 // exactHostAliases keeps the entries naming one literal host, which are the

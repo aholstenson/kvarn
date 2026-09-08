@@ -799,10 +799,10 @@ setup:
 `)
 		cfg, err := project.Load(dir)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.Network.AllowedHosts).To(Equal([]string{
-			"proxy.golang.org",
-			"ghcr.io",
-			"my-registry.example.com",
+		Expect(cfg.Network.AllowedHosts).To(Equal([]project.AllowedHost{
+			{Host: "proxy.golang.org"},
+			{Host: "ghcr.io"},
+			{Host: "my-registry.example.com"},
 		}))
 	})
 

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,16 +27,32 @@ func (n netDialer) DialContext(ctx context.Context, network, addr string) (net.C
 	return n.d.DialContext(ctx, network, addr)
 }
 
+// Resolver answers which hostnames the VM was told an address belongs to. It
+// is how a connection on a port that carries no hostname of its own — a
+// database, a mail relay — is still judged by name: the guest asked the VM's
+// own DNS forwarder for the address moments earlier, and that answer is the
+// only honest link between the packet and the name in kvarn.yml.
+type Resolver interface {
+	// HostnamesFor returns the names answered with this address, newest first,
+	// or nothing when the address was never handed out.
+	HostnamesFor(ip string) []string
+}
+
 // Proxy is a host-side egress proxy. It accepts plaintext HTTP on one
 // listener and TLS-CONNECT-style TLS traffic on another. SNI / Host header
 // is consulted against the allowlist; allowed traffic is terminated, the
 // SecretInjector runs, and the request is forwarded to the real upstream.
+//
+// Ports beyond 80 and 443 are served by ServeTCP, which carries the bytes
+// through untouched — there is no HTTP on them to read, so there is nothing to
+// inspect or inject.
 type Proxy struct {
 	allowlist   *Allowlist
 	ca          *CA
 	injector    SecretInjector
 	dialer      Dialer
 	upstreamTLS *tls.Config
+	resolver    Resolver
 	log         *slog.Logger
 	onDenied    func(host string)
 }
@@ -47,7 +64,11 @@ type Config struct {
 	Injector    SecretInjector
 	Dialer      Dialer
 	UpstreamTLS *tls.Config // nil = system default; ServerName is set per-host
-	Logger      *slog.Logger
+	// Resolver names the address a raw TCP connection is aimed at. ServeTCP
+	// denies every connection without one, since it would otherwise have no
+	// way to tell an allowed database from any other address on the internet.
+	Resolver Resolver
+	Logger   *slog.Logger
 	// OnDenied, if set, is called with the hostname of every refused
 	// connection. A refusal is a closed socket and nothing else, which reaches
 	// the client as a truncated connection rather than as an explanation; this
@@ -73,6 +94,7 @@ func New(cfg Config) *Proxy {
 		injector:    cfg.Injector,
 		dialer:      d,
 		upstreamTLS: cfg.UpstreamTLS,
+		resolver:    cfg.Resolver,
 		log:         log,
 		onDenied:    cfg.OnDenied,
 	}
@@ -97,6 +119,86 @@ func (p *Proxy) ServeHTTPS(ctx context.Context, ln net.Listener) error {
 // ServeHTTP reads the Host header from a plaintext HTTP request and forwards.
 func (p *Proxy) ServeHTTP(ctx context.Context, ln net.Listener) error {
 	return p.serve(ctx, ln, p.handlePlain)
+}
+
+// ServeTCP carries connections on a port the proxy does not read HTTP on —
+// a database, a message broker, a mail relay. The bytes pass through untouched
+// in both directions.
+//
+// Nothing in the stream names its destination, so the allowlist is applied to
+// the address the connection is aimed at, resolved back to the names the VM's
+// DNS forwarder answered with it. An address the guest never looked up is
+// denied: an IP literal typed straight into a connection string is exactly the
+// case the allowlist exists to catch.
+func (p *Proxy) ServeTCP(ctx context.Context, ln net.Listener, port uint16) error {
+	return p.serve(ctx, ln, func(ctx context.Context, conn net.Conn) {
+		p.handleTCP(ctx, conn, port)
+	})
+}
+
+func (p *Proxy) handleTCP(ctx context.Context, conn net.Conn, port uint16) {
+	defer conn.Close()
+
+	// The netstack accepts these on a wildcard listener, so the local address
+	// is the destination the guest aimed at rather than an address of ours.
+	dest, _, err := net.SplitHostPort(conn.LocalAddr().String())
+	if err != nil {
+		p.log.Debug("tcp destination unreadable", "port", port, "error", err)
+		return
+	}
+
+	// Every name the address answers to, and the address itself. Listing an IP
+	// directly is a deliberate act, so it is honoured here the same way a name
+	// is; what the resolver guards against is an address nobody declared.
+	var candidates []string
+	if p.resolver != nil {
+		candidates = p.resolver.HostnamesFor(dest)
+	}
+	candidates = append(candidates, dest)
+
+	host := ""
+	for _, name := range candidates {
+		if p.allowlist.Permit(name, port) {
+			host = name
+			break
+		}
+	}
+	if host == "" {
+		// Report the first name the address is known by, since that is the one
+		// the reader would have to add. With no name, the address itself is all
+		// there is to report — and the only thing that would allow it.
+		p.deny(candidates[0])
+		return
+	}
+
+	// Dial the address the guest resolved, not the name: the two could differ
+	// if the record changed in between, and the allowlist decision was made
+	// about this address.
+	upstream, err := p.dialer.DialContext(ctx, "tcp", net.JoinHostPort(dest, strconv.Itoa(int(port))))
+	if err != nil {
+		p.log.Info("upstream dial failed", "host", host, "port", port, "error", err)
+		return
+	}
+	defer upstream.Close()
+
+	p.log.Debug("egress tcp", "host", host, "port", port)
+	splice(conn, upstream)
+}
+
+// splice copies bytes both ways until either side is done, then unblocks the
+// other by closing both. Neither end is a request the proxy understands, so
+// there is nothing to do but carry them.
+func splice(client, upstream net.Conn) {
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(upstream, client)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(client, upstream)
+		done <- struct{}{}
+	}()
+	<-done
 }
 
 func (p *Proxy) serve(ctx context.Context, ln net.Listener, handle func(context.Context, net.Conn)) error {
@@ -125,8 +227,25 @@ func (p *Proxy) handleTLS(ctx context.Context, raw net.Conn) {
 	}
 	raw.SetReadDeadline(time.Time{})
 
-	if !p.allowlist.Permit(host) {
+	rule, ok := p.allowlist.Lookup(host, 443)
+	if !ok {
 		p.deny(host)
+		return
+	}
+
+	// A host named for passthrough is one that inspection breaks: it pins the
+	// certificate the client must see, or wants a client certificate the proxy
+	// cannot present. Splice the bytes and let the two ends do their own
+	// handshake. No secret can be injected into traffic nobody reads.
+	if rule.Passthrough {
+		upstream, err := p.dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, "443"))
+		if err != nil {
+			p.log.Info("upstream dial failed", "host", host, "error", err)
+			return
+		}
+		defer upstream.Close()
+		p.log.Debug("egress passthrough", "host", host, "port", 443)
+		splice(peeked, upstream)
 		return
 	}
 
@@ -185,7 +304,7 @@ func (p *Proxy) handlePlain(ctx context.Context, raw net.Conn) {
 	if host == "" {
 		host = stripPort(req.URL.Host)
 	}
-	if !p.allowlist.Permit(host) {
+	if !p.allowlist.Permit(host, 80) {
 		p.deny(host)
 		writeForbidden(raw)
 		return

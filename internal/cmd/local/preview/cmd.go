@@ -231,6 +231,7 @@ func (c *Cmd) Run() error {
 		Transferer:    &transfer.StreamingTransferer{},
 		SourceDir:     c.Dir,
 		SkipFile:      skipFile,
+		Preview:       true,
 		CacheProvider: cacheProvider,
 		ProjectID:     projectID,
 		Secrets:       secretEnv,

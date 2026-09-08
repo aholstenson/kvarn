@@ -86,10 +86,15 @@ type CreateOpts struct {
 
 // NetworkConfig configures the per-VM userspace network and egress proxy.
 type NetworkConfig struct {
-	// AllowedHosts is the resolved superset of hosts the VM is permitted
-	// to reach over HTTP/HTTPS. Wildcard entries ("*.example.com") are
-	// honoured by the proxy's allowlist.
-	AllowedHosts []string
+	// AllowedHosts is the resolved superset of what the VM is permitted to
+	// reach: a host pattern per entry, the TCP ports it opens, and whether TLS
+	// on 443 is inspected. Wildcard entries ("*.example.com") are honoured by
+	// the proxy's allowlist.
+	//
+	// The ports decide which listeners the VM's netstack binds, so this has to
+	// be complete before the VM starts. A port added afterwards has nothing
+	// listening on it.
+	AllowedHosts []egressproxy.Rule
 
 	// HostAliases maps names to the IP addresses they resolve to inside the
 	// VM, from the project's `network.host_aliases`. A key is one literal

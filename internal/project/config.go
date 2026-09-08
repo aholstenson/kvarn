@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -150,9 +151,71 @@ type CacheEntry struct {
 	Bucket    string   `yaml:"bucket,omitempty"`
 }
 
+// TLS modes an allowlist entry may ask for on port 443.
+const (
+	// TLSInspect terminates TLS with kvarn's own CA, which is what lets the
+	// egress proxy substitute a managed secret into the request and report
+	// what was reached. It is the default.
+	TLSInspect = "inspect"
+	// TLSPassthrough splices the bytes through untouched. It is the only way
+	// to reach a host that pins its certificate or asks for a client one, and
+	// the cost is that no secret can be injected into that traffic.
+	TLSPassthrough = "passthrough"
+)
+
+// DefaultAllowedPorts are the ports an allowlist entry covers when it names
+// none. They are the two the egress proxy understands as HTTP.
+var DefaultAllowedPorts = []uint16{80, 443}
+
+// AllowedHost is one entry in an `allowed_hosts` list: a host pattern, the TCP
+// ports the VM may reach it on, and what happens to TLS on port 443.
+//
+// An entry may be written as a bare scalar (`- api.example.com`), which is the
+// common case — HTTP and HTTPS, inspected — or as a mapping when it needs a
+// port the proxy does not serve by default or has to be left alone.
+type AllowedHost struct {
+	// Host is the pattern the entry matches: one literal hostname, an IP
+	// address, or the "*.domain" wildcard form matching any subdomain.
+	Host string `yaml:"host"`
+	// Ports are the TCP ports the VM may open to this host. Empty means
+	// DefaultAllowedPorts. A port outside 80 and 443 is carried straight
+	// through with no inspection, since there is no HTTP there to read.
+	Ports []uint16 `yaml:"ports,omitempty"`
+	// TLS is TLSInspect or TLSPassthrough, and governs port 443 alone.
+	TLS string `yaml:"tls,omitempty"`
+}
+
+// UnmarshalYAML accepts either a scalar (a bare host pattern) or a mapping with
+// host/ports/tls fields.
+func (h *AllowedHost) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		return value.Decode(&h.Host)
+	}
+	// Use an alias type to avoid recursing into this method.
+	type rawHost AllowedHost
+	var raw rawHost
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*h = AllowedHost(raw)
+	return nil
+}
+
+// EffectivePorts is the ports the entry covers, with the default applied.
+func (h AllowedHost) EffectivePorts() []uint16 {
+	if len(h.Ports) == 0 {
+		return DefaultAllowedPorts
+	}
+	return h.Ports
+}
+
+// Passthrough reports whether TLS to this host is spliced rather than
+// terminated.
+func (h AllowedHost) Passthrough() bool { return h.TLS == TLSPassthrough }
+
 // Network defines network egress controls for the VM.
 type Network struct {
-	AllowedHosts []string `yaml:"allowed_hosts,omitempty"`
+	AllowedHosts []AllowedHost `yaml:"allowed_hosts,omitempty"`
 
 	// HostAliases maps a hostname to the IP address it resolves to inside the
 	// VM. Its purpose is local development names — a dev server on 127.0.0.1
@@ -163,6 +226,11 @@ type Network struct {
 	// machinery in the guest (see ExactHostAliases), but they are one key here
 	// because they are one idea to whoever writes the file.
 	HostAliases map[string]string `yaml:"host_aliases,omitempty"`
+}
+
+// Declared reports whether the block says anything at all.
+func (n Network) Declared() bool {
+	return len(n.AllowedHosts) > 0 || len(n.HostAliases) > 0
 }
 
 // ExactHostAliases returns the entries naming one literal host, which are the
@@ -598,6 +666,52 @@ func validateCachePath(field, original string) (string, error) {
 	return norm, nil
 }
 
+// validateNetwork checks one `network:` block. The field prefix names where the
+// block sits, so the same rules can report against `network` or
+// `preview.network` without either having to restate them.
+func validateNetwork(field string, n Network) error {
+	hosts := field + ".allowed_hosts"
+	for _, entry := range n.AllowedHosts {
+		if err := validateHostPattern(hosts, entry.Host); err != nil {
+			return err
+		}
+		for _, port := range entry.Ports {
+			if port == 0 {
+				return fmt.Errorf("%s entry %q lists port 0, which names nothing", hosts, entry.Host)
+			}
+		}
+		switch entry.TLS {
+		case "", TLSInspect, TLSPassthrough:
+		default:
+			return fmt.Errorf("%s entry %q has tls %q, want %q or %q",
+				hosts, entry.Host, entry.TLS, TLSInspect, TLSPassthrough)
+		}
+		// The TLS mode decides what happens when the proxy terminates a
+		// connection on 443. An entry that does not open 443 has nowhere to
+		// apply it, and silently ignoring the field would hide the mistake.
+		if entry.TLS != "" && !slices.Contains(entry.EffectivePorts(), 443) {
+			return fmt.Errorf("%s entry %q sets tls but does not list port 443, which is the only port it governs", hosts, entry.Host)
+		}
+	}
+
+	// The value of a host alias is stricter than an allowlist entry: it is the
+	// literal address the name resolves to, so a hostname there would resolve
+	// to nothing.
+	aliases := field + ".host_aliases"
+	for name, addr := range n.HostAliases {
+		if err := validateHostName(aliases, name); err != nil {
+			return err
+		}
+		if strings.TrimSpace(addr) == "" {
+			return fmt.Errorf("%s entry %q has an empty address", aliases, name)
+		}
+		if net.ParseIP(strings.TrimSpace(addr)) == nil {
+			return fmt.Errorf("%s entry %q must map to an IP address, got %q", aliases, name, addr)
+		}
+	}
+	return nil
+}
+
 // validateHostPattern validates a single host entry from an allowlist (either
 // network.allowed_hosts or a secret's scoping `hosts:`). It accepts hostnames,
 // IP addresses, and the "*.domain" wildcard form, and rejects schemes, paths,
@@ -875,26 +989,8 @@ func (c *Config) validate() error {
 		}
 	}
 
-	// Validate network allowed_hosts.
-	for _, host := range c.Network.AllowedHosts {
-		if err := validateHostPattern("network.allowed_hosts", host); err != nil {
-			return err
-		}
-	}
-
-	// Validate network host_aliases. The value is stricter than an allowlist
-	// entry: it is the literal address the name resolves to, so a hostname
-	// there would resolve to nothing.
-	for name, addr := range c.Network.HostAliases {
-		if err := validateHostName("network.host_aliases", name); err != nil {
-			return err
-		}
-		if strings.TrimSpace(addr) == "" {
-			return fmt.Errorf("network.host_aliases entry %q has an empty address", name)
-		}
-		if net.ParseIP(strings.TrimSpace(addr)) == nil {
-			return fmt.Errorf("network.host_aliases entry %q must map to an IP address, got %q", name, addr)
-		}
+	if err := validateNetwork("network", c.Network); err != nil {
+		return err
 	}
 
 	// Validate cache paths (unkeyed) and entries (keyed overrides). Normalize
