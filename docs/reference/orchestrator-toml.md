@@ -207,7 +207,7 @@ unimplemented.
 | --- | --- | --- | --- |
 | `domain` | hostname | unset | Base domain preview hostnames are formed under. Required to enable previews. |
 | `listen` | `host:port` | unset | Address the plain-HTTP ingress listener binds. Required to enable previews. |
-| `idle_timeout` | duration | `30m` | Stop a preview that has served no request for this long. `"0"` never reaps on idle. |
+| `idle_timeout` | duration | `30m` | Stop a preview that has served no request for this long. A request still open — a WebSocket, an SSE stream — counts as being served throughout. `"0"` never reaps on idle. |
 | `unattended_timeout` | duration | `idle_timeout` | Stop a preview this long after the last request that said somebody was looking at it, whatever other traffic has arrived since. `"0"` lets any traffic hold a preview open. Forced to `"0"` when `idle_timeout` is. |
 | `max_lifetime` | duration | `8h` | Stop a preview this long after it booted, whatever its traffic. `"0"` disables the cap. |
 | `max_concurrent` | int | `3` | How many previews may run at once. `0` is unbounded. |

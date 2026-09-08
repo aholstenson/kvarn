@@ -790,6 +790,42 @@ var _ = Describe("Preview ingress", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(after.LastRequestAt.IsZero()).To(BeFalse())
 		})
+
+		It("holds off the idle reaper for as long as a stream is open", func() {
+			// The stream stands in for SSE or a WebSocket: one request that
+			// stays open long past the idle timeout, and the only traffic the
+			// preview gets.
+			streaming := make(chan struct{})
+			closed := make(chan struct{})
+			upstreamHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				close(streaming)
+				<-closed
+			})
+
+			clock := newPreviewClock()
+			svc.previews.now = clock.Now
+			svc.previews.policy.IdleTimeout = 30 * time.Minute
+			p := registerRunning()
+
+			// Headers arrive as soon as the guest flushes them, so this returns
+			// with the body — and the ingress's proxy call — still open.
+			resp := xhrGet("/events")
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+			Eventually(streaming).Should(BeClosed())
+			Expect(svc.previews.serving(p.ID)).To(BeTrue())
+
+			clock.advance(4 * time.Hour)
+			svc.previews.Reap(ctx)
+			Expect(svc.previews.IsLive(p.ID)).To(BeTrue())
+
+			close(closed)
+			Eventually(func() bool { return svc.previews.serving(p.ID) }).Should(BeFalse())
+			svc.previews.Reap(ctx)
+			Expect(svc.previews.IsLive(p.ID)).To(BeFalse())
+		})
 	})
 
 	Describe("when previews are not configured", func() {

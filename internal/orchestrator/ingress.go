@@ -534,7 +534,16 @@ func previewPoolKey(host string, port uint16) string {
 }
 
 // proxy forwards the request into the guest.
+//
+// The request counts as in flight for as long as this call runs, which for a
+// WebSocket or an SSE stream is as long as the connection lasts. That is what
+// keeps the idle reaper off a preview whose only traffic is one long-lived
+// stream: the stamp taken at the handshake would otherwise be the last thing
+// the reaper ever saw from it.
 func (h *previewIngress) proxy(w http.ResponseWriter, r *http.Request, p *preview.Preview, site preview.Site) {
+	done := h.svc.previews.BeginRequest(p.ID)
+	defer done()
+
 	ctx := context.WithValue(r.Context(), proxyTargetKey{}, proxyTarget{preview: p, site: site})
 	h.guestProxy.ServeHTTP(w, r.WithContext(ctx))
 }

@@ -262,7 +262,13 @@ type previewManager struct {
 	booting map[string]*previewBootCall
 	// logs are the per-preview ring buffers. They outlive an individual boot so
 	// `kvarn preview logs` can still explain a preview that just crashed.
-	logs     map[string]*preview.LogBuffer
+	logs map[string]*preview.LogBuffer
+	// inFlight counts the requests ingress currently has open against each
+	// preview, and is what keeps the idle clock off a preview that is serving
+	// one. It is a count rather than a timestamp because the question is
+	// whether anything is open now, and a WebSocket or an SSE stream is one
+	// request that stays open for hours.
+	inFlight map[string]int
 	draining bool
 }
 
@@ -276,14 +282,15 @@ type previewBootCall struct {
 // yields a manager that reports previews as disabled.
 func newPreviewManager(store preview.Store, policy PreviewPolicy, boot previewBooter) *previewManager {
 	return &previewManager{
-		store:   store,
-		policy:  policy,
-		boot:    boot,
-		now:     time.Now,
-		log:     slog.With("component", "preview"),
-		live:    make(map[string]*previewInstance),
-		booting: make(map[string]*previewBootCall),
-		logs:    make(map[string]*preview.LogBuffer),
+		store:    store,
+		policy:   policy,
+		boot:     boot,
+		now:      time.Now,
+		log:      slog.With("component", "preview"),
+		live:     make(map[string]*previewInstance),
+		booting:  make(map[string]*previewBootCall),
+		logs:     make(map[string]*preview.LogBuffer),
+		inFlight: make(map[string]int),
 	}
 }
 
@@ -352,6 +359,50 @@ func (m *previewManager) Touch(ctx context.Context, id string, act preview.Activ
 	if err := m.store.TouchRequest(ctx, id, m.now().UTC(), act); err != nil {
 		m.log.Warn("could not stamp preview request time", "preview", id, "error", err)
 	}
+}
+
+// BeginRequest marks a request in flight against a preview and returns the
+// function that ends it. The caller must always call that function, so it goes
+// in a defer.
+//
+// It exists because a request is not always a moment. A WebSocket or an SSE
+// stream is one request that stays open for hours, and a preview whose only
+// traffic is such a stream would otherwise look untouched since the handshake
+// and be reaped as idle with the connection still healthy.
+//
+// It suppresses the idle clock and nothing else. A stream is traffic, not
+// attention — a page in a tab nobody is looking at holds one open just as
+// readily — so the unattended timeout still applies, and a preview that is
+// streaming to nobody still stops.
+func (m *previewManager) BeginRequest(id string) func() {
+	if !m.enabled() {
+		return func() {}
+	}
+	m.mu.Lock()
+	m.inFlight[id]++
+	m.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if m.inFlight[id] <= 1 {
+				// Drop the key rather than leaving a zero behind: previews come
+				// and go, and nothing else would ever clean it up.
+				delete(m.inFlight, id)
+				return
+			}
+			m.inFlight[id]--
+		})
+	}
+}
+
+// serving reports whether ingress has a request open against a preview.
+func (m *previewManager) serving(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.inFlight[id] > 0
 }
 
 // previewOrigin is what the caller of Register knows about why the preview
@@ -1270,7 +1321,7 @@ func (m *previewManager) Reap(ctx context.Context) {
 		switch {
 		case m.policy.MaxLifetime > 0 && !p.ExpiresAt.IsZero() && !now.Before(p.ExpiresAt):
 			reason = fmt.Sprintf("reached its maximum lifetime of %s", m.policy.MaxLifetime)
-		case m.policy.IdleTimeout > 0 && now.Sub(lastRequest(p)) >= m.policy.IdleTimeout:
+		case m.policy.IdleTimeout > 0 && !m.serving(id) && now.Sub(lastRequest(p)) >= m.policy.IdleTimeout:
 			reason = fmt.Sprintf("idle for %s", m.policy.IdleTimeout)
 		case m.policy.UnattendedTimeout > 0 && now.Sub(lastAttention(p)) >= m.policy.UnattendedTimeout:
 			// Traffic is still arriving — the clause above did not fire — but

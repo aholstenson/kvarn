@@ -852,6 +852,51 @@ var _ = Describe("Preview manager", func() {
 			Expect(mgr.IsLive(p.ID)).To(BeTrue())
 		})
 
+		It("does not reap a preview with a request still open", func() {
+			// A WebSocket or an SSE stream is one request that outlives the
+			// idle timeout by design; the handshake's stamp is the last thing
+			// the reaper would otherwise see from it.
+			mgr = build(PreviewPolicy{IdleTimeout: 30 * time.Minute})
+			p := bootAndWait(mgr, "proj", "main")
+
+			done := mgr.BeginRequest(p.ID)
+			clock.advance(4 * time.Hour)
+			mgr.Reap(ctx)
+			Expect(mgr.IsLive(p.ID)).To(BeTrue())
+
+			// The stream ends; the preview is idle from that point like any
+			// other, and the next sweep takes it down.
+			done()
+			mgr.Reap(ctx)
+			Expect(mgr.IsLive(p.ID)).To(BeFalse())
+		})
+
+		It("reaps a preview streaming to nobody once the unattended timeout passes", func() {
+			mgr = build(PreviewPolicy{IdleTimeout: 30 * time.Minute, UnattendedTimeout: time.Hour})
+			p := bootAndWait(mgr, "proj", "main")
+
+			defer mgr.BeginRequest(p.ID)()
+			clock.advance(90 * time.Minute)
+			mgr.Reap(ctx)
+			Expect(mgr.IsLive(p.ID)).To(BeFalse())
+		})
+
+		It("keeps the preview up until the last of several open requests ends", func() {
+			mgr = build(PreviewPolicy{IdleTimeout: 30 * time.Minute})
+			p := bootAndWait(mgr, "proj", "main")
+
+			first, second := mgr.BeginRequest(p.ID), mgr.BeginRequest(p.ID)
+			clock.advance(time.Hour)
+
+			first()
+			mgr.Reap(ctx)
+			Expect(mgr.IsLive(p.ID)).To(BeTrue())
+
+			second()
+			mgr.Reap(ctx)
+			Expect(mgr.IsLive(p.ID)).To(BeFalse())
+		})
+
 		It("stops a preview that has outlived max_lifetime whatever its traffic", func() {
 			mgr = build(PreviewPolicy{IdleTimeout: time.Hour, MaxLifetime: 4 * time.Hour})
 			p := bootAndWait(mgr, "proj", "main")

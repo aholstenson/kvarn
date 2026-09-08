@@ -364,7 +364,9 @@ exits.
 ## What stops a preview
 
 - **Idle.** No request for `idle_timeout` (default 30 minutes). The next request
-  boots it again, so an idle preview costs a database row rather than a VM.
+  boots it again, so an idle preview costs a database row rather than a VM. A
+  request still being served does not count as silence, so a WebSocket or an SSE
+  stream holds this off for as long as it stays connected.
 - **Unattended.** Nothing that says a person is looking at it for
   `unattended_timeout` (defaults to `idle_timeout`), however much other traffic
   has arrived. See below.
@@ -395,6 +397,11 @@ anything does not.
 
 Attention drives `unattended_timeout` and the eviction order. It never affects
 routing, and every request still keeps a preview alive while it is being served.
+
+A long-lived stream is traffic on both counts. It holds off `idle_timeout` for
+its whole life, and it says nothing about attention — a page in a hidden tab
+keeps its `EventSource` connected as readily as one somebody is watching — so
+`unattended_timeout` still applies to a preview streaming to nobody.
 
 **When to raise `unattended_timeout`:** an application whose ordinary use
 produces no navigations. A single-page app that somebody reads without
