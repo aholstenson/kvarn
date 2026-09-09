@@ -81,6 +81,13 @@ func (h *Handler) Register(ctx context.Context, req *connect.Request[v1.Register
 	}
 	defer pr.RegisteredOnce.Store(false)
 
+	// This stream is the only thing that drains CommandCh. Arming the signal
+	// here and firing it on the way out is what lets a caller whose command can
+	// no longer be delivered fail at once, rather than waiting out a deadline
+	// meant for a runner that is still answering.
+	pr.MarkConnected()
+	defer pr.MarkDisconnected()
+
 	// Bind the token to the peer's vsock CID for the lifetime of this
 	// Register stream so subsequent unary RPCs on the same token are
 	// rejected if they come from a different peer.

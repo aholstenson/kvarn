@@ -58,12 +58,24 @@ type commandWaiter struct {
 	outputCh chan *v1.OutputChunk // nil for non-SessionExec commands
 }
 
+// ErrRunnerDisconnected reports that the guest's runner is no longer attached
+// to the bridge, so the command could not be delivered or answered. It is
+// distinct from a deadline because it says something the caller can act on: no
+// amount of waiting will help, and every later command fails the same way until
+// a runner re-registers.
+var ErrRunnerDisconnected = errors.New("runner disconnected")
+
 // BridgeProxy implements RunnerProxy by sending commands through the bridge
 // channel mechanism (commandCh/resultCh) used by the orchestrator.
 type BridgeProxy struct {
 	commandCh chan<- *v1.RunnerCommand
 	runner    *dispatch.PendingRunner
 	nextID    atomic.Int64
+
+	// console is the guest's serial output, attached so a disconnect can be
+	// reported with the reason for it. The bridge itself only ever observes
+	// silence.
+	console atomic.Pointer[ConsoleTail]
 
 	mu      sync.Mutex
 	waiters map[string]*commandWaiter
@@ -268,6 +280,34 @@ func (p *BridgeProxy) ListProcesses(ctx context.Context, req *v1.ListProcessesRe
 	return resp, nil
 }
 
+// AttachConsole gives the proxy the guest's console tail, so a lost bridge is
+// reported with whatever the guest said before it went quiet.
+func (p *BridgeProxy) AttachConsole(tail *ConsoleTail) {
+	p.console.Store(tail)
+}
+
+// disconnected returns the signal for the runner's current bridge stream, or
+// nil when there is no runner to lose — a nil channel never fires in a select,
+// which leaves such a caller bounded by its own deadline as before.
+func (p *BridgeProxy) disconnected() <-chan struct{} {
+	if p.runner == nil {
+		return nil
+	}
+	return p.runner.Disconnected()
+}
+
+// disconnectError explains a lost bridge, quoting the end of the guest's
+// console when there is one. An OOM kill or a panic is recorded there and
+// nowhere else, so the diagnosis travels with the failure rather than being
+// something to go looking for afterwards.
+func (p *BridgeProxy) disconnectError() error {
+	tail := p.console.Load().String()
+	if tail == "" {
+		return ErrRunnerDisconnected
+	}
+	return fmt.Errorf("%w; last guest console output:\n%s", ErrRunnerDisconnected, tail)
+}
+
 // registerWaiter creates a per-command waiter and stores it in the map.
 func (p *BridgeProxy) registerWaiter(commandID string, wantOutput bool) *commandWaiter {
 	w := &commandWaiter{
@@ -294,11 +334,19 @@ func (p *BridgeProxy) nextCommandID() string {
 }
 
 func (p *BridgeProxy) sendAndWait(ctx context.Context, cmd *v1.RunnerCommand) (*v1.CommandResult, error) {
+	// Captured before the send, so the signal waited on belongs to the stream
+	// this command goes out on. A runner that drops and is replaced leaves this
+	// command unanswerable even though the token has a live runner again.
+	gone := p.disconnected()
+
 	w := p.registerWaiter(cmd.CommandId, false)
 	defer p.removeWaiter(cmd.CommandId)
 
 	select {
 	case p.commandCh <- cmd:
+	case <-gone:
+		slog.Warn("runner disconnected before command was sent", "command_id", cmd.CommandId)
+		return nil, p.disconnectError()
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -307,14 +355,30 @@ func (p *BridgeProxy) sendAndWait(ctx context.Context, cmd *v1.RunnerCommand) (*
 
 	select {
 	case result := <-w.resultCh:
-		if result.Error != "" {
-			return nil, fmt.Errorf("runner error: %s", result.Error)
+		return commandResult(result)
+	case <-gone:
+		// A result that landed just as the stream ended is still a result;
+		// select picks a ready case at random, so it is checked for explicitly
+		// rather than reported as a disconnect.
+		select {
+		case result := <-w.resultCh:
+			return commandResult(result)
+		default:
 		}
-		return result, nil
+		slog.Warn("runner disconnected while waiting for result", "command_id", cmd.CommandId)
+		return nil, p.disconnectError()
 	case <-ctx.Done():
 		slog.Warn("command timed out waiting for result", "command_id", cmd.CommandId)
 		return nil, ctx.Err()
 	}
+}
+
+// commandResult unwraps the runner's own error out of a delivered result.
+func commandResult(result *v1.CommandResult) (*v1.CommandResult, error) {
+	if result.Error != "" {
+		return nil, fmt.Errorf("runner error: %s", result.Error)
+	}
+	return result, nil
 }
 
 func (p *BridgeProxy) CreateSession(ctx context.Context, req *v1.CreateSessionRequest) (*v1.CreateSessionResponse, error) {
@@ -338,11 +402,16 @@ func (p *BridgeProxy) SessionExec(ctx context.Context, req *v1.SessionExecReques
 		Command:   &v1.RunnerCommand_SessionExec{SessionExec: req},
 	}
 
+	gone := p.disconnected()
+
 	w := p.registerWaiter(cmd.CommandId, true)
 	defer p.removeWaiter(cmd.CommandId)
 
 	select {
 	case p.commandCh <- cmd:
+	case <-gone:
+		slog.Warn("runner disconnected before session exec was sent", "command_id", cmd.CommandId)
+		return nil, p.disconnectError()
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -357,31 +426,49 @@ func (p *BridgeProxy) SessionExec(ctx context.Context, req *v1.SessionExecReques
 				onOutput(chunk.Stdout, chunk.Stderr)
 			}
 		case result := <-w.resultCh:
-			// Drain any remaining output chunks (non-blocking).
-			for {
-				select {
-				case chunk := <-w.outputCh:
-					if onOutput != nil {
-						onOutput(chunk.Stdout, chunk.Stderr)
-					}
-				default:
-					goto drained
-				}
+			return sessionExecResult(w, result, onOutput)
+		case <-gone:
+			// A result that landed just as the stream ended is still a result;
+			// select picks a ready case at random, so it is checked for
+			// explicitly rather than reported as a disconnect.
+			select {
+			case result := <-w.resultCh:
+				return sessionExecResult(w, result, onOutput)
+			default:
 			}
-		drained:
-			if result.Error != "" {
-				return nil, fmt.Errorf("runner error: %s", result.Error)
-			}
-			resp := result.GetSessionExec()
-			if resp == nil {
-				return nil, errors.New("unexpected result type")
-			}
-			return resp, nil
+			slog.Warn("runner disconnected during session exec", "command_id", cmd.CommandId)
+			return nil, p.disconnectError()
 		case <-ctx.Done():
 			slog.Warn("session exec timed out", "command_id", cmd.CommandId)
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// sessionExecResult delivers the output chunks still queued behind a result
+// before unwrapping it, so the caller sees everything the command printed
+// rather than losing whatever arrived in the same instant as its exit.
+func sessionExecResult(w *commandWaiter, result *v1.CommandResult, onOutput OutputCallback) (*v1.SessionExecResponse, error) {
+	for {
+		select {
+		case chunk := <-w.outputCh:
+			if onOutput != nil {
+				onOutput(chunk.Stdout, chunk.Stderr)
+			}
+			continue
+		default:
+		}
+		break
+	}
+
+	if result.Error != "" {
+		return nil, fmt.Errorf("runner error: %s", result.Error)
+	}
+	resp := result.GetSessionExec()
+	if resp == nil {
+		return nil, errors.New("unexpected result type")
+	}
+	return resp, nil
 }
 
 func (p *BridgeProxy) CloseSession(ctx context.Context, req *v1.CloseSessionRequest) (*v1.CloseSessionResponse, error) {

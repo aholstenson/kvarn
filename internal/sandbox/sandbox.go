@@ -516,7 +516,14 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 
 	createOpts := opts.CreateOpts
 	createOpts.Token = token
+	// The console is the guest's only voice once the runner stops answering, so
+	// it is retained as well as emitted: the tail is what a lost bridge is
+	// reported with, and the debug log is where the whole stream can be read
+	// back when the tail is not enough.
+	console := NewConsoleTail()
 	createOpts.OnConsoleOutput = func(output string) {
+		console.Add(output)
+		slog.Debug("guest console", "output", strings.TrimRight(output, "\n"))
 		emit(opts, ConsoleOutputEvent{Output: output})
 	}
 	if opts.Config != nil {
@@ -608,6 +615,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 
 	// Build proxy for sending commands to the runner.
 	proxy := NewBridgeProxy(pr.CommandCh, pr.ResultCh, pr.OutputCh, pr)
+	proxy.AttachConsole(console)
 	sess.bareProxy = proxy
 
 	// Establish trust in the egress proxy before anything below it opens a

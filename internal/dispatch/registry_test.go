@@ -32,6 +32,58 @@ var _ = Describe("Registry", func() {
 		})
 	})
 
+	Describe("Disconnect signal", func() {
+		It("reports nothing before a runner has ever attached", func() {
+			pr, err := r.Register("token-1")
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(pr.Disconnected()).To(BeNil())
+		})
+
+		It("stays open while the runner's stream is attached", func() {
+			pr, err := r.Register("token-1")
+			Expect(err).NotTo(HaveOccurred())
+
+			pr.MarkConnected()
+
+			Expect(pr.Disconnected()).NotTo(BeNil())
+			Consistently(pr.Disconnected()).ShouldNot(BeClosed())
+		})
+
+		It("fires when the stream ends, and stays fired", func() {
+			pr, err := r.Register("token-1")
+			Expect(err).NotTo(HaveOccurred())
+
+			pr.MarkConnected()
+			pr.MarkDisconnected()
+
+			Expect(pr.Disconnected()).To(BeClosed())
+			// A caller arriving after the runner died must see the same answer
+			// as one that was already waiting.
+			Expect(pr.Disconnected()).To(BeClosed())
+		})
+
+		It("tolerates the stream ending twice", func() {
+			pr, err := r.Register("token-1")
+			Expect(err).NotTo(HaveOccurred())
+
+			pr.MarkConnected()
+			pr.MarkDisconnected()
+			Expect(pr.MarkDisconnected).NotTo(Panic())
+		})
+
+		It("arms a fresh signal when a restarted runner re-registers", func() {
+			pr, err := r.Register("token-1")
+			Expect(err).NotTo(HaveOccurred())
+
+			pr.MarkConnected()
+			pr.MarkDisconnected()
+			pr.MarkConnected()
+
+			Expect(pr.Disconnected()).NotTo(BeClosed())
+		})
+	})
+
 	Describe("Duplicate rejection", func() {
 		It("rejects registering the same token twice", func() {
 			_, err := r.Register("token-1")

@@ -65,11 +65,59 @@ type PendingRunner struct {
 	mu        sync.Mutex
 	transfers map[string]*PendingTransfer
 	conns     map[string]*PendingConn
+	// disconnected is closed when the Register stream that owned this runner
+	// returns, and stays closed until a new stream installs a fresh channel.
+	// Leaving the closed channel in place is what makes a command issued after
+	// the runner died fail as immediately as one that was already in flight.
+	//
+	// It is nil until the first Register. Nothing has been lost yet at that
+	// point, and a nil channel never fires in a select, so a caller waiting
+	// before the runner has ever attached waits on its own deadline as before.
+	disconnected chan struct{}
 }
 
 // MarkReady signals that the runner is connected. Safe to call multiple times.
 func (pr *PendingRunner) MarkReady() {
 	pr.doneOnce.Do(func() { close(pr.DoneCh) })
+}
+
+// MarkConnected arms the disconnect signal for a newly opened Register stream.
+// Every send to CommandCh depends on that stream being read, so the stream
+// opening is the moment there is something for callers to lose.
+func (pr *PendingRunner) MarkConnected() {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	pr.disconnected = make(chan struct{})
+}
+
+// MarkDisconnected reports that the Register stream has ended. Nothing drains
+// CommandCh once it has, so commands sent to it can never be answered and the
+// callers waiting on them are told immediately instead of waiting out their
+// own deadlines. Safe to call more than once.
+func (pr *PendingRunner) MarkDisconnected() {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	if pr.disconnected == nil {
+		return
+	}
+	select {
+	case <-pr.disconnected:
+	default:
+		close(pr.disconnected)
+	}
+}
+
+// Disconnected returns a channel closed while the runner has no Register
+// stream, or nil if no stream has ever been opened.
+//
+// Callers capture it once, before they send: a command handed to a stream that
+// later drops is lost even if a restarted runner takes the token afterwards, so
+// the signal a caller waits on has to be the one belonging to the stream it
+// sent on.
+func (pr *PendingRunner) Disconnected() <-chan struct{} {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	return pr.disconnected
 }
 
 // RegisterTransfer registers a pending file transfer by ID.
