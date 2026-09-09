@@ -175,6 +175,27 @@ var _ = Describe("Shell Sessions", func() {
 			}
 		})
 
+		It("gives the command an empty stdin rather than the shell's own", func() {
+			// The shell reads its script from a pipe that stays open for the
+			// life of the session. A command reading stdin to EOF — a container
+			// exec attached to stdin, a tool waiting on a prompt — would block
+			// on that pipe until its timeout; on /dev/null it returns at once.
+			id := createSession()
+			resp, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+				SessionId:      id,
+				Command:        "cat; echo done",
+				TimeoutSeconds: 5,
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.TimedOut).To(BeFalse())
+			Expect(resp.Msg.Stdout).To(Equal("done\n"))
+			Expect(resp.Msg.ExitCode).To(Equal(int32(0)))
+
+			// The shell itself still reads the commands that follow.
+			resp2 := sessionExec(id, "echo next")
+			Expect(resp2.Stdout).To(Equal("next\n"))
+		})
+
 		It("reports a timeout as a result rather than an error", func() {
 			id := createSession()
 			resp, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{

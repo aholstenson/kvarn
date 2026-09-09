@@ -76,10 +76,15 @@ func (s *shellSession) spawn() error {
 		return fmt.Errorf("stdin pipe: %w", err)
 	}
 
-	// Discard stdout/stderr from the shell process itself;
-	// all output is captured via temp files.
-	s.cmd.Stdout = io.Discard
-	s.cmd.Stderr = io.Discard
+	// The shell's own stdout and stderr go to /dev/null; all output is captured
+	// via temp files. They are left nil rather than set to io.Discard, because
+	// a writer that is not a file makes exec open a pipe and Wait block until
+	// every holder of that pipe has closed it. The holders are not only the
+	// shell: anything the login profile forks and leaves behind inherits the
+	// pipe, and outlives the group kill that ends the shell. Wait would then
+	// never return, and a timeout would hold the session mutex forever.
+	s.cmd.Stdout = nil
+	s.cmd.Stderr = nil
 
 	if err := s.cmd.Start(); err != nil {
 		return fmt.Errorf("start shell: %w", err)
@@ -240,10 +245,19 @@ func (s *shellSession) Execute(ctx context.Context, command string, timeout time
 	// from killing the shell when the sourced command fails. POSIX
 	// specifies that `set -e` is suppressed for commands in AND-OR lists,
 	// so the shell survives a non-zero exit and we can capture the code.
+	//
+	// The command reads stdin from /dev/null. The shell's own stdin is the
+	// pipe this script arrives on, and a command that inherited it would see
+	// a stream that never ends: a container exec attached to stdin, a package
+	// manager waiting on a prompt, anything that reads until EOF blocks there
+	// until the timeout kills it, though the same command in a terminal
+	// returns at once. It could also consume the next script written to the
+	// pipe. Redirecting the sourced file's stdin scopes both away from the
+	// shell, which goes on reading its script from the pipe as before.
 	script := fmt.Sprintf(
 		"{\n"+
 			"exec 1>%s.stdout 2>%s.stderr\n"+
-			". %s && __st=0 || __st=$?\n"+
+			". %s </dev/null && __st=0 || __st=$?\n"+
 			"case $- in *e*) __had_e=1; set +e;; *) __had_e=0;; esac\n"+
 			"pwd >%s.pwd\n"+
 			"echo $__st >%s.status\n"+
@@ -273,16 +287,16 @@ func (s *shellSession) Execute(ctx context.Context, command string, timeout time
 	for {
 		if _, statErr := os.Stat(statusPath); statErr == nil {
 			// Deliver any remaining output before returning.
-			s.deliverNewOutput(prefix, &stdoutOffset, &stderrOffset, onOutput)
+			s.deliverNewOutput(prefix, &stdoutOffset, &stderrOffset, onOutput, true)
 			break
 		}
 
-		s.deliverNewOutput(prefix, &stdoutOffset, &stderrOffset, onOutput)
+		s.deliverNewOutput(prefix, &stdoutOffset, &stderrOffset, onOutput, false)
 
 		select {
 		case <-s.waitCh:
 			// Shell died (e.g., user command called `exit`).
-			s.deliverNewOutput(prefix, &stdoutOffset, &stderrOffset, onOutput)
+			s.deliverNewOutput(prefix, &stdoutOffset, &stderrOffset, onOutput, true)
 
 			s.collectOutput(prefix, maxOutput, &result)
 			s.cleanupFiles(prefix)
@@ -304,7 +318,7 @@ func (s *shellSession) Execute(ctx context.Context, command string, timeout time
 
 		case <-ctx.Done():
 			// Timeout: deliver remaining output before cleanup.
-			s.deliverNewOutput(prefix, &stdoutOffset, &stderrOffset, onOutput)
+			s.deliverNewOutput(prefix, &stdoutOffset, &stderrOffset, onOutput, true)
 
 			s.collectOutput(prefix, maxOutput, &result)
 			s.cleanupFiles(prefix)
@@ -344,7 +358,12 @@ func (s *shellSession) Execute(ctx context.Context, command string, timeout time
 
 // deliverNewOutput reads any new bytes from the stdout/stderr files since the
 // last call and delivers them via the callback.
-func (s *shellSession) deliverNewOutput(prefix string, stdoutOffset, stderrOffset *int64, onOutput OutputCallback) {
+//
+// A file is read while the command is still writing it, so a read can end
+// between the bytes of one character. Those bytes are held back for the next
+// read rather than delivered as a broken character, unless final says the
+// command is done and nothing more will arrive to complete them.
+func (s *shellSession) deliverNewOutput(prefix string, stdoutOffset, stderrOffset *int64, onOutput OutputCallback, final bool) {
 	if onOutput == nil {
 		return
 	}
@@ -352,7 +371,7 @@ func (s *shellSession) deliverNewOutput(prefix string, stdoutOffset, stderrOffse
 	var newStdout, newStderr string
 
 	if f, err := os.Open(prefix + ".stdout"); err == nil {
-		if data, err := readFrom(f, *stdoutOffset); err == nil && len(data) > 0 {
+		if data, err := readFrom(f, *stdoutOffset, final); err == nil && len(data) > 0 {
 			newStdout = string(data)
 			*stdoutOffset += int64(len(data))
 		}
@@ -360,7 +379,7 @@ func (s *shellSession) deliverNewOutput(prefix string, stdoutOffset, stderrOffse
 	}
 
 	if f, err := os.Open(prefix + ".stderr"); err == nil {
-		if data, err := readFrom(f, *stderrOffset); err == nil && len(data) > 0 {
+		if data, err := readFrom(f, *stderrOffset, final); err == nil && len(data) > 0 {
 			newStderr = string(data)
 			*stderrOffset += int64(len(data))
 		}
@@ -372,8 +391,9 @@ func (s *shellSession) deliverNewOutput(prefix string, stdoutOffset, stderrOffse
 	}
 }
 
-// readFrom reads all bytes from a file starting at offset.
-func readFrom(f *os.File, offset int64) ([]byte, error) {
+// readFrom reads all bytes from a file starting at offset. Unless complete,
+// an unfinished UTF-8 sequence at the end is left for a later read.
+func readFrom(f *os.File, offset int64, complete bool) ([]byte, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -383,7 +403,11 @@ func readFrom(f *os.File, offset int64) ([]byte, error) {
 	}
 	buf := make([]byte, info.Size()-offset)
 	n, err := f.ReadAt(buf, offset)
-	return buf[:n], err
+	buf = buf[:n]
+	if !complete {
+		buf = buf[:len(buf)-incompleteRuneTail(buf)]
+	}
+	return buf, err
 }
 
 func (s *shellSession) cleanupFiles(prefix string) {

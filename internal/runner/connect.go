@@ -120,8 +120,14 @@ receive:
 			defer func() { <-slots }()
 
 			result := handleCommand(ctx, h, client, token, cmd)
+			// A result that cannot be encoded is a result the host waits for
+			// until its own deadline, so nothing leaves here that the wire could
+			// refuse.
+			sanitizeForWire(result)
 			if _, err := client.ReportResult(ctx, connect.NewRequest(result)); err != nil {
-				failConnection(fmt.Errorf("report result for command %s: %w", cmd.CommandId, err))
+				slog.Error("failed to report command result; closing the connection",
+					"command_id", cmd.CommandId, "command", commandKind(cmd), "error", err)
+				failConnection(fmt.Errorf("report result for command %s (%s): %w", cmd.CommandId, commandKind(cmd), err))
 			}
 		}()
 	}
@@ -210,8 +216,8 @@ func handleCommand(
 			client.ReportOutput(ctx, connect.NewRequest(&v1.OutputChunk{
 				CommandId: cmd.CommandId,
 				Token:     token,
-				Stdout:    stdout,
-				Stderr:    stderr,
+				Stdout:    validText(stdout),
+				Stderr:    validText(stderr),
 			}))
 		}
 		resp, execErr := h.SessionExecWithOutput(ctx, c.SessionExec, onOutput)
@@ -228,8 +234,8 @@ func handleCommand(
 			client.ReportOutput(ctx, connect.NewRequest(&v1.OutputChunk{
 				CommandId: processID,
 				Token:     token,
-				Stdout:    stdout,
-				Stderr:    stderr,
+				Stdout:    validText(stdout),
+				Stderr:    validText(stderr),
 			}))
 		}
 		onExit := func(processID string, exitCode int32, exitErr error) {
@@ -299,6 +305,15 @@ func handleCommand(
 	}
 
 	return result
+}
+
+// commandKind names the kind of command for a log line, so a failure to report
+// says what was being reported without dumping the command itself.
+func commandKind(cmd *v1.RunnerCommand) string {
+	if cmd.Command == nil {
+		return "unknown"
+	}
+	return string(cmd.ProtoReflect().WhichOneof(cmd.ProtoReflect().Descriptor().Oneofs().ByName("command")).Name())
 }
 
 // handleDownloadFile calls DownloadFile on the orchestrator and writes the

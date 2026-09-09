@@ -35,6 +35,14 @@ const DefaultExecTimeout uint32 = 300
 // is.
 const execWaitDelay = 2 * time.Second
 
+// suCommandFlag is how a command is handed to su when it must stay in the
+// process group su was started in. The plain -c flag makes su run the command
+// in a new session, which puts it in a process group of its own: a kill sent
+// to su's group then reaches su and nothing else, and the command it was meant
+// for runs on. A shell fed over stdin, which is how a session's shell is
+// started, stays in su's group without this.
+const suCommandFlag = "--session-command"
+
 // maxSessions is the maximum number of concurrent shell sessions per handler.
 const maxSessions = 16
 
@@ -202,7 +210,7 @@ func (h *Handler) Exec(ctx context.Context, req *connect.Request[v1.ExecRequest]
 			if msg.WorkingDir != "" {
 				shellCmd = fmt.Sprintf("cd %q && %s", msg.WorkingDir, msg.Command)
 			}
-			cmd = exec.CommandContext(ctx, "su", "-l", "-s", "/bin/sh", "-c", shellCmd, "--", "kvarn")
+			cmd = exec.CommandContext(ctx, "su", "-l", "-s", "/bin/sh", suCommandFlag, shellCmd, "--", "kvarn")
 		} else {
 			// Use "exec $@" pattern to avoid shell-escaping issues:
 			// su runs sh -c 'exec "$@"' with the real command as positional args.
@@ -211,7 +219,7 @@ func (h *Handler) Exec(ctx context.Context, req *connect.Request[v1.ExecRequest]
 			if msg.WorkingDir != "" {
 				shellScript = fmt.Sprintf("cd %q && exec \"$@\"", msg.WorkingDir)
 			}
-			args := []string{"-l", "-s", "/bin/sh", "-c", shellScript, "--", "kvarn", "sh", msg.Command}
+			args := []string{"-l", "-s", "/bin/sh", suCommandFlag, shellScript, "--", "kvarn", "sh", msg.Command}
 			args = append(args, msg.Args...)
 			cmd = exec.CommandContext(ctx, "su", args...)
 		}

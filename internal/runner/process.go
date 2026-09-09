@@ -107,12 +107,14 @@ func (h *Handler) StartProcessWithCallbacks(_ context.Context, msg *v1.StartProc
 
 	var cmd *exec.Cmd
 	if h.kvarnCred != nil {
-		cmd = exec.Command("su", "-l", "-s", "/bin/sh", "-c", script, "--", "kvarn")
+		cmd = exec.Command("su", "-l", "-s", "/bin/sh", suCommandFlag, script, "--", "kvarn")
 	} else {
 		cmd = exec.Command("sh", "-l", "-c", script)
 	}
 	// Own process group: the shell exec's into the server, but anything it
-	// forks along the way is only reachable as a group.
+	// forks along the way is only reachable as a group. Stopping signals
+	// that group, so the server has to be in it rather than in a session of
+	// its own, which is what suCommandFlag guarantees.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"syscall"
 )
 
 // Env var names. The token must never be passed on argv because /proc/<pid>/cmdline
@@ -67,5 +68,28 @@ func Connect() error {
 		return errors.New("either KVARN_BRIDGE_VSOCK_PORT or KVARN_BRIDGE_ADDR must be set")
 	}
 
-	return connectToOrchestrator(context.Background(), httpClient, addr, token)
+	if err := connectToOrchestrator(context.Background(), httpClient, addr, token); err != nil {
+		reportFatalToConsole(err)
+		return err
+	}
+	return nil
+}
+
+// consoleDevice is the guest's kernel console, which the host tails while the
+// VM runs.
+const consoleDevice = "/dev/console"
+
+// reportFatalToConsole writes the reason the runner is giving up to the serial
+// console. The runner's own log goes to the journal, which stays inside the
+// VM; the console is what the host quotes when it reports the runner gone, so
+// this is the one line that turns "runner disconnected" into a cause. The
+// runner cannot come back after this: the token it registered with was
+// unlinked at startup, so the restarted service has nothing to connect with.
+func reportFatalToConsole(err error) {
+	f, openErr := os.OpenFile(consoleDevice, os.O_WRONLY|syscall.O_NOCTTY, 0)
+	if openErr != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "kvarn-runner: fatal: %v\n", err)
 }
