@@ -119,6 +119,29 @@ reconnects from the last sequence number it saw, replaying the gap from the
 durable event log. That is why a slow terminal cannot produce a session
 transcript with an invisible hole in it.
 
+### Reading the stream
+
+Each model call is bracketed, so it is always clear whether the run is waiting
+on the model or on a tool:
+
+```
+[llm] step 12: calling anthropic/claude-sonnet-4-6
+[llm] step 12: responding after 6.3s
+[llm] step 12: done after 21.4s
+=> read_file {"path":"internal/egress/proxy/proxy.go"}
+```
+
+The time between `calling` and `done` belongs to the model. Everything after
+`done`, until the next `calling`, is tool work. A failed attempt at a call is
+reported while the run waits for the next one:
+
+```
+[llm] step 12: attempt 2/10 failed (anthropic 529), retrying in 1.2s
+```
+
+Retries are configured per model class in `agents.toml`; see
+[agents.toml](../reference/agents-toml.md).
+
 ## Cancelling
 
 ```sh
@@ -147,7 +170,11 @@ and hourly, and their events cascade:
 retention = "2160h"   # 90 days; "0" keeps them forever
 ```
 
-Durable history covers state changes, agent messages and tool use, step results,
-cost, the created pull request, and VM info. High-volume telemetry — VM console
-output, step stdout/stderr, transfer and cache progress — is streamed live to
-watchers but not persisted.
+Durable history covers state changes, agent messages and tool use, the start and
+end of each model call and every retried attempt at one, step results, cost, the
+created pull request, and VM info. Every event carries the time it happened, so
+replayed history shows the same durations a live watcher saw. High-volume
+telemetry — VM console output, step stdout/stderr, transfer and cache progress —
+is streamed live to watchers but not persisted, and neither is the marker that a
+model call has started producing output: the start and end of the call are
+recorded, which is what a reader of finished history measures between.

@@ -43,6 +43,11 @@ const ModelMain = string(ClassBalanced)
 // The step budgets differ by tier because the tiers are used differently: a
 // fast agent searches, which is many cheap steps, while a reasoning agent
 // deliberates over a handful.
+//
+// The attempt budget is the same everywhere and far above a provider SDK's
+// usual three: a job runs unattended for many minutes and carries a
+// conversation that cannot be rebuilt, so a provider that is briefly
+// unavailable is worth waiting out rather than losing the run over.
 func DefaultModels() map[string]modelcfg.Entry {
 	return map[string]modelcfg.Entry{
 		string(ClassBalanced): {
@@ -50,21 +55,28 @@ func DefaultModels() map[string]modelcfg.Entry {
 			ReasoningEffort: llms.EffortMedium,
 			MaxOutputTokens: 16384,
 			MaxSteps:        100,
+			MaxAttempts:     defaultMaxAttempts,
 		},
 		string(ClassFast): {
 			ModelID:         "anthropic/claude-haiku-4-5",
 			ReasoningEffort: llms.EffortNone,
 			MaxOutputTokens: 8192,
 			MaxSteps:        100,
+			MaxAttempts:     defaultMaxAttempts,
 		},
 		string(ClassReasoning): {
 			ModelID:         "anthropic/claude-sonnet-4-6",
 			ReasoningEffort: llms.EffortHigh,
 			MaxOutputTokens: 16384,
 			MaxSteps:        50,
+			MaxAttempts:     defaultMaxAttempts,
 		},
 	}
 }
+
+// defaultMaxAttempts is how many times a model call is tried before it fails,
+// the first try included.
+const defaultMaxAttempts = 10
 
 // Models is the resolved model set a coding agent runs with: one entry per
 // class for the main loop, and one per sub-agent, already reduced from the

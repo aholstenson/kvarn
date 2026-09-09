@@ -137,6 +137,26 @@ max_steps = 40
 		Expect(*agents["explore"].MaxSteps).To(Equal(40))
 	})
 
+	It("reads an attempt budget, including one that forbids retrying", func() {
+		content := `[models.coder]
+max_attempts = 1
+
+[agents.explore]
+max_attempts = 20
+`
+		Expect(os.WriteFile(path, []byte(content), 0o644)).To(Succeed())
+
+		all, err := store.All(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(all["coder"].MaxAttempts).NotTo(BeNil())
+		Expect(*all["coder"].MaxAttempts).To(Equal(1))
+
+		agents, err := store.Agents(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(agents["explore"].MaxAttempts).NotTo(BeNil())
+		Expect(*agents["explore"].MaxAttempts).To(Equal(20))
+	})
+
 	It("returns an empty agent map when the file defines none", func() {
 		Expect(os.WriteFile(path, []byte("[models.coder]\nmodel = \"test/a\"\n"), 0o644)).To(Succeed())
 

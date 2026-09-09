@@ -589,6 +589,10 @@ func classifyChanges(ctx context.Context, runner sandbox.RunnerProxy, workdir st
 // calls to the same tool overlap, each ToolResult resolves the item of its
 // corresponding ToolUse.
 //
+// Each model call gets its own item too, opened when the request goes out and
+// closed when the model stops producing. It is what tells a waiting model apart
+// from a stuck tool: exactly one of the two is ever spinning.
+//
 // The returned finalize must be called once the agent run completes. The
 // underlying LLM stream does not emit a result event for a tool whose handler
 // returned an error (a sub-agent dispatch that fails is the common case), so
@@ -596,8 +600,33 @@ func classifyChanges(ctx context.Context, runner sandbox.RunnerProxy, workdir st
 // any still-pending items so nothing spins after the run is over.
 func makeProgressCallback(renderer *taskui.Renderer, toolCount *int) (func(agent.ProgressEvent), func()) {
 	pending := make(map[string][]*taskui.Item)
+	turns := make(map[string]*taskui.Item)
 	cb := func(event agent.ProgressEvent) {
 		switch e := event.(type) {
+		case agent.ProgressTurn:
+			switch e.Phase {
+			case agent.TurnStarted:
+				item := renderer.AddItem(turnLabel(e.AgentID, e.Step))
+				renderer.SetStatus(item, taskui.StatusRunning, e.Model)
+				turns[e.AgentID] = item
+			case agent.TurnResponding:
+				if item := turns[e.AgentID]; item != nil {
+					renderer.SetStatus(item, taskui.StatusRunning, "responding")
+				}
+			case agent.TurnEnded:
+				if item := turns[e.AgentID]; item != nil {
+					renderer.SetStatus(item, taskui.StatusPassed, "")
+					delete(turns, e.AgentID)
+				}
+			}
+		case agent.ProgressRetry:
+			line := fmt.Sprintf("attempt %d/%d failed (%s), retrying in %s",
+				e.Attempt, e.MaxAttempts, retryCause(e), e.Delay.Round(100*time.Millisecond))
+			if item := turns[e.AgentID]; item != nil {
+				renderer.AppendOutput(item, line)
+			} else {
+				renderer.AddNote(line)
+			}
 		case agent.ProgressToolUse:
 			*toolCount++
 			name := toolLabel(e.AgentID, e.ToolID)
@@ -637,8 +666,34 @@ func makeProgressCallback(renderer *taskui.Renderer, toolCount *int) (func(agent
 			}
 			delete(pending, key)
 		}
+		// A turn whose call failed never reaches its end event, so close it
+		// here rather than leave the model spinning after the run has stopped.
+		for key, item := range turns {
+			renderer.SetStatus(item, taskui.StatusFailed, "(no reply)")
+			delete(turns, key)
+		}
 	}
 	return cb, finalize
+}
+
+// turnLabel names a model call in the live render: which agent, which call.
+func turnLabel(agentID string, step int) string {
+	if agentID == "" {
+		return fmt.Sprintf("thinking · step %d", step)
+	}
+	return fmt.Sprintf("[%s] thinking · step %d", agentID, step)
+}
+
+// retryCause is the short reason a retry line shows: the status the provider
+// returned, or the error when it returned none.
+func retryCause(e agent.ProgressRetry) string {
+	if e.StatusCode != 0 {
+		return fmt.Sprintf("%s %d", e.Provider, e.StatusCode)
+	}
+	if e.Error != "" {
+		return firstLine(e.Error)
+	}
+	return e.Provider
 }
 
 func toolLabel(agentID, toolID string) string {

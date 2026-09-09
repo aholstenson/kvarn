@@ -143,6 +143,7 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 		mode:     mode,
 		mainCfg:  mainCfg,
 		textBufs: make(map[string]*strings.Builder),
+		turns:    make(map[string]*turnState),
 	}
 
 	opts := []llms.GenerateOption{
@@ -152,6 +153,7 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 		llms.WithMaxOutputTokens(maxOut),
 		llms.WithToolCallTimeout(hostToolCallTimeout),
 	}
+	opts = append(opts, retryOptions(mainCfg, c.handleRetry)...)
 	if mode.ReadOnly() {
 		opts = append(opts, llms.WithTools(toolkit.ReadOnlyTools()...))
 	} else {
@@ -191,6 +193,122 @@ type codingConversation struct {
 
 	streamMu sync.Mutex
 	textBufs map[string]*strings.Builder
+	turns    map[string]*turnState
+}
+
+// turnState is what the conversation remembers about the model call currently
+// in flight for one agent scope: which call it is, and whether the first token
+// has arrived. Both are needed because llms-go reports the start of a call and
+// its content as separate events, and a retry notice has to name the call it
+// belongs to.
+type turnState struct {
+	step      int
+	responded bool
+}
+
+// turn returns the state for an agent scope, creating it on first use.
+// Callers must hold streamMu.
+func (c *codingConversation) turn(agentID string) *turnState {
+	t, ok := c.turns[agentID]
+	if !ok {
+		t = &turnState{}
+		c.turns[agentID] = t
+	}
+	return t
+}
+
+// retryOptions builds the retry half of a generate call: how many attempts the
+// model gets, and where a failed one is reported. notify may be nil for a call
+// nobody is watching.
+//
+// Retries are configured per model entry rather than left at the llms-go
+// default because a job is long-running and unattended: a provider that is
+// briefly unavailable should cost the run a pause, not the whole conversation
+// that has been built up to that point.
+func retryOptions(cfg modelcfg.Entry, notify llms.RetryNotifyFunc) []llms.GenerateOption {
+	var opts []llms.GenerateOption
+	if cfg.MaxAttempts > 0 {
+		opts = append(opts, llms.WithMaxRetries(cfg.MaxAttempts-1))
+	}
+	if notify != nil {
+		opts = append(opts, llms.WithRetryNotify(notify))
+	}
+	return opts
+}
+
+// handleRetry reports a failed attempt as progress. llms-go calls it on the
+// goroutine that made the request, just before it waits, so the watcher learns
+// about the pause while it is still happening.
+func (c *codingConversation) handleRetry(ctx context.Context, notice llms.RetryNotice) {
+	agentID := streamAgentID(ctx)
+	c.streamMu.Lock()
+	step := c.turn(agentID).step
+	c.streamMu.Unlock()
+	c.reportRetry(agentID, step, notice)
+}
+
+// handleSummaryRetry reports a retry of the closing summary call. It carries no
+// step: the summary is a single call outside the agent loop, so a step number
+// taken from that loop would point at a turn this failure has nothing to do
+// with.
+func (c *codingConversation) handleSummaryRetry(_ context.Context, notice llms.RetryNotice) {
+	c.reportRetry("", 0, notice)
+}
+
+func (c *codingConversation) reportRetry(agentID string, step int, notice llms.RetryNotice) {
+	if c.agentCtx.OnProgress == nil {
+		return
+	}
+	errText := ""
+	if notice.Err != nil {
+		errText = notice.Err.Error()
+	}
+	c.agentCtx.OnProgress(agent.ProgressRetry{
+		AgentID:     agentID,
+		Step:        step,
+		Attempt:     notice.Attempt,
+		MaxAttempts: notice.MaxAttempts,
+		Delay:       notice.Delay,
+		StatusCode:  notice.StatusCode,
+		Provider:    notice.Provider,
+		Model:       notice.Model,
+		Error:       errText,
+	})
+}
+
+// markResponding reports the first token of a turn, once. Callers must hold
+// streamMu.
+func (c *codingConversation) markResponding(agentID string) {
+	t := c.turn(agentID)
+	if t.responded {
+		return
+	}
+	t.responded = true
+	c.agentCtx.OnProgress(agent.ProgressTurn{
+		AgentID: agentID,
+		Phase:   agent.TurnResponding,
+		Step:    t.step,
+		Model:   c.modelID(agentID),
+	})
+}
+
+// modelID names the model an agent scope runs on. Only the parent loop's model
+// is known here; a sub-agent reports the model on its own events, and naming
+// the parent's would be worse than naming none.
+func (c *codingConversation) modelID(agentID string) string {
+	if agentID != "" {
+		return ""
+	}
+	return c.mainCfg.ModelID
+}
+
+// streamAgentID names the agent a streaming or retry callback belongs to:
+// empty for the parent loop, the sub-agent run otherwise.
+func streamAgentID(ctx context.Context) string {
+	if scope, ok := llms.GetStreamScope(ctx); ok {
+		return scope.AgentID
+	}
+	return ""
 }
 
 // Run advances the session to its next stopping point: either the assistant
@@ -334,6 +452,7 @@ func (c *codingConversation) requestSummary(
 		llms.WithResponseSchema[AgentSummary](),
 		llms.WithMaxOutputTokens(summaryMaxOutputTokens),
 	}
+	opts = append(opts, retryOptions(c.mainCfg, c.handleSummaryRetry)...)
 	if c.mainCfg.ReasoningEffort != "" {
 		opts = append(opts, llms.WithReasoningEffort(c.mainCfg.ReasoningEffort))
 	}
@@ -362,14 +481,26 @@ func (c *codingConversation) Close() error {
 // long assistant message split across many TextChunk events still arrives at
 // the orchestrator as a single ProgressTextMessage at MessageEnd.
 func (c *codingConversation) handleStreamingEvent(ctx context.Context, event llms.StreamingEvent) error {
-	var agentID string
-	if scope, ok := llms.GetStreamScope(ctx); ok {
-		agentID = scope.AgentID
-	}
+	agentID := streamAgentID(ctx)
 	c.streamMu.Lock()
 	defer c.streamMu.Unlock()
 	switch e := event.(type) {
+	case llms.StreamingEventMessageStart:
+		t := c.turn(agentID)
+		t.step++
+		t.responded = false
+		c.agentCtx.OnProgress(agent.ProgressTurn{
+			AgentID: agentID,
+			Phase:   agent.TurnStarted,
+			Step:    t.step,
+			Model:   c.modelID(agentID),
+		})
+
+	case llms.StreamingEventThinking:
+		c.markResponding(agentID)
+
 	case llms.StreamingEventTextChunk:
+		c.markResponding(agentID)
 		buf, ok := c.textBufs[agentID]
 		if !ok {
 			buf = &strings.Builder{}
@@ -387,6 +518,17 @@ func (c *codingConversation) handleStreamingEvent(ctx context.Context, event llm
 			})
 			buf.Reset()
 		}
+		// Emitted whether or not the model produced text, because it is what
+		// closes the turn: a step that only calls tools would otherwise leave
+		// the watcher believing the model is still working.
+		t := c.turn(agentID)
+		c.agentCtx.OnProgress(agent.ProgressTurn{
+			AgentID: agentID,
+			Phase:   agent.TurnEnded,
+			Step:    t.step,
+			Model:   c.modelID(agentID),
+			Final:   e.Final,
+		})
 		if c.agentCtx.Cost != nil {
 			c.agentCtx.Cost.CheckBudget()
 		}

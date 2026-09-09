@@ -123,6 +123,39 @@ var _ = Describe("Manager", func() {
 		Expect(got.HeadBranch).To(Equal("feature/x"))
 	})
 
+	It("times every event it hands out, live and replayed", func() {
+		sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
+		Expect(err).NotTo(HaveOccurred())
+
+		ch, err := mgr.Watch(ctx, sess.ID, 0)
+		Expect(err).NotTo(HaveOccurred())
+
+		// A durable event is timed by the store, an ephemeral one by the
+		// broadcast; a watcher must be able to measure between them either way.
+		Expect(mgr.EmitEvent(ctx, sess.ID, session.AgentTurnEvent{
+			SessionID: sess.ID, Phase: session.AgentTurnStarted, Step: 1,
+		})).To(Succeed())
+		Expect(mgr.EmitEvent(ctx, sess.ID, session.AgentTurnEvent{
+			SessionID: sess.ID, Phase: session.AgentTurnResponding, Step: 1,
+		})).To(Succeed())
+
+		started := <-ch
+		Expect(started.Seq).To(BeNumerically(">", 0))
+		Expect(started.At).NotTo(BeZero())
+		responding := <-ch
+		Expect(responding.Seq).To(BeZero())
+		Expect(responding.At).NotTo(BeZero())
+
+		// Only the durable half is in history, and it kept its time.
+		events, err := mgr.ListEvents(ctx, sess.ID, 0, 0)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(events).To(HaveLen(1))
+		Expect(events[0].Event).To(Equal(session.AgentTurnEvent{
+			SessionID: sess.ID, Phase: session.AgentTurnStarted, Step: 1,
+		}))
+		Expect(events[0].At).To(BeTemporally("==", started.At))
+	})
+
 	It("returns error for unknown session", func() {
 		_, err := mgr.Get(ctx, "nope")
 		Expect(err).To(HaveOccurred())

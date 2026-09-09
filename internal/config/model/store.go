@@ -16,6 +16,11 @@ type Entry struct {
 	ReasoningEffort llms.Effort // "" = none
 	MaxOutputTokens int         // 0 = use caller default
 	MaxSteps        int         // 0 = use caller default
+	// MaxAttempts is how many times a single model call may be tried before it
+	// fails, the first try included. It counts attempts rather than retries so
+	// that "no retrying" is expressible as 1 and 0 keeps meaning "unset", the
+	// same as every other field here.
+	MaxAttempts int // 0 = use caller default
 }
 
 // RawEntry is the user-supplied override for a single model alias. Pointer
@@ -26,6 +31,7 @@ type RawEntry struct {
 	ReasoningEffort *llms.Effort
 	MaxOutputTokens *int
 	MaxSteps        *int
+	MaxAttempts     *int
 }
 
 // apply layers a user override onto an entry. A field the override does not
@@ -43,6 +49,9 @@ func (e Entry) apply(raw RawEntry) Entry {
 	}
 	if raw.MaxSteps != nil {
 		e.MaxSteps = *raw.MaxSteps
+	}
+	if raw.MaxAttempts != nil {
+		e.MaxAttempts = *raw.MaxAttempts
 	}
 	return e
 }

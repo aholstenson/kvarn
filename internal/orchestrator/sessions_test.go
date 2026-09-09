@@ -116,6 +116,110 @@ var _ = Describe("OrchestratorService persistent sessions", func() {
 		})
 	})
 
+	Describe("agent turn and retry events on the wire", func() {
+		It("carries the turn bracket, the retry and the time each happened", func() {
+			mgr := session.NewManager(session.NewMemStore())
+			sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(mgr.EmitEvent(ctx, sess.ID, session.AgentTurnEvent{
+				SessionID: sess.ID,
+				Phase:     session.AgentTurnStarted,
+				Step:      4,
+				Model:     "anthropic/claude-sonnet-4-6",
+			})).To(Succeed())
+			Expect(mgr.EmitEvent(ctx, sess.ID, session.AgentRetryEvent{
+				SessionID:   sess.ID,
+				Step:        4,
+				Attempt:     1,
+				MaxAttempts: 10,
+				Delay:       750 * time.Millisecond,
+				StatusCode:  529,
+				Provider:    "anthropic",
+				Error:       "overloaded",
+			})).To(Succeed())
+			Expect(mgr.EmitEvent(ctx, sess.ID, session.AgentTurnEvent{
+				SessionID: sess.ID,
+				Phase:     session.AgentTurnEnded,
+				Step:      4,
+				Final:     true,
+			})).To(Succeed())
+
+			addr := serveOrchestrator(orchestrator.NewServiceWithOpts(orchestrator.ServiceOpts{
+				SessionMgr:  mgr,
+				AuthEnabled: false,
+			}))
+			resp, err := client.NewOrchestrator(addr, "").ListSessionEvents(ctx,
+				connect.NewRequest(&v1.ListSessionEventsRequest{SessionId: sess.ID}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.Events).To(HaveLen(3))
+
+			started := resp.Msg.Events[0].GetAgentTurn()
+			Expect(started).NotTo(BeNil())
+			Expect(started.Phase).To(Equal(v1.AgentTurnPhase_AGENT_TURN_PHASE_STARTED))
+			Expect(started.Step).To(Equal(int32(4)))
+			Expect(started.Model).To(Equal("anthropic/claude-sonnet-4-6"))
+			Expect(resp.Msg.Events[0].Timestamp).NotTo(BeNil())
+
+			retry := resp.Msg.Events[1].GetAgentRetry()
+			Expect(retry).NotTo(BeNil())
+			Expect(retry.Attempt).To(Equal(int32(1)))
+			Expect(retry.MaxAttempts).To(Equal(int32(10)))
+			Expect(retry.DelayMs).To(Equal(int64(750)))
+			Expect(retry.StatusCode).To(Equal(int32(529)))
+			Expect(retry.Provider).To(Equal("anthropic"))
+
+			ended := resp.Msg.Events[2].GetAgentTurn()
+			Expect(ended).NotTo(BeNil())
+			Expect(ended.Phase).To(Equal(v1.AgentTurnPhase_AGENT_TURN_PHASE_ENDED))
+			Expect(ended.Final).To(BeTrue())
+		})
+
+		It("streams the responding phase live without recording it", func() {
+			mgr := session.NewManager(session.NewMemStore())
+			sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
+			Expect(err).NotTo(HaveOccurred())
+
+			addr := serveOrchestrator(orchestrator.NewServiceWithOpts(orchestrator.ServiceOpts{
+				SessionMgr:  mgr,
+				AuthEnabled: false,
+			}))
+			// Recorded before the watch so the replayed copy proves the server
+			// has subscribed. A live-only event emitted before that point would
+			// be broadcast to nobody, since nothing replays it.
+			Expect(mgr.UpdateState(ctx, sess.ID, session.StateRunning, "thinking")).To(Succeed())
+
+			oc := client.NewOrchestrator(addr, "")
+			watchCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			stream, err := oc.WatchSession(watchCtx, connect.NewRequest(&v1.WatchSessionRequest{SessionId: sess.ID}))
+			Expect(err).NotTo(HaveOccurred())
+			defer stream.Close()
+
+			Expect(stream.Receive()).To(BeTrue())
+			Expect(stream.Msg().GetStateChange()).NotTo(BeNil())
+
+			Expect(mgr.EmitEvent(ctx, sess.ID, session.AgentTurnEvent{
+				SessionID: sess.ID, Phase: session.AgentTurnResponding, Step: 1,
+			})).To(Succeed())
+
+			Expect(stream.Receive()).To(BeTrue())
+			live := stream.Msg().GetAgentTurn()
+			Expect(live).NotTo(BeNil())
+			Expect(live.Phase).To(Equal(v1.AgentTurnPhase_AGENT_TURN_PHASE_RESPONDING))
+			Expect(stream.Msg().Sequence).To(BeZero())
+			Expect(stream.Msg().Timestamp).NotTo(BeNil())
+
+			// History holds the state change and nothing else: the live-only
+			// phase was never recorded.
+			resp, err := oc.ListSessionEvents(ctx,
+				connect.NewRequest(&v1.ListSessionEventsRequest{SessionId: sess.ID}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.Events).To(HaveLen(1))
+			Expect(resp.Msg.Events[0].GetStateChange()).NotTo(BeNil())
+		})
+	})
+
 	Describe("ListSessions pagination with identity under-fill", func() {
 		It("fills each page with authorized rows despite interleaved denied projects", func() {
 			// Craft sessions with controlled timestamps so ordering is

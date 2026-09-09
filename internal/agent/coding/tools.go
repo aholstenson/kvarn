@@ -1345,6 +1345,10 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 	if cfg.ReasoningEffort != "" {
 		opts = append(opts, llms.WithReasoningEffort(cfg.ReasoningEffort))
 	}
+	// The sub-agent gets the same attempt budget as any other call. Nothing is
+	// watching it — the toolkit has no progress channel — so it retries
+	// quietly, and the parent sees only the tool call taking longer.
+	opts = append(opts, retryOptions(cfg, nil)...)
 	if parent := llms.GetExecutionContext(ctx); parent != nil {
 		opts = append(opts, llms.WithParentExecution(parent))
 	}

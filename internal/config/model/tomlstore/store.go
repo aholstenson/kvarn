@@ -17,6 +17,7 @@ type entryData struct {
 	ReasoningEffort *llms.Effort `toml:"reasoning_effort"`
 	MaxOutputTokens *int         `toml:"max_output_tokens"`
 	MaxSteps        *int         `toml:"max_steps"`
+	MaxAttempts     *int         `toml:"max_attempts"`
 }
 
 // raw converts a parsed block to the domain override. An absent key is a nil
@@ -27,6 +28,7 @@ func (e entryData) raw() modelcfg.RawEntry {
 		ReasoningEffort: e.ReasoningEffort,
 		MaxOutputTokens: e.MaxOutputTokens,
 		MaxSteps:        e.MaxSteps,
+		MaxAttempts:     e.MaxAttempts,
 	}
 }
 
@@ -38,6 +40,7 @@ type agentData struct {
 	ReasoningEffort *llms.Effort `toml:"reasoning_effort"`
 	MaxOutputTokens *int         `toml:"max_output_tokens"`
 	MaxSteps        *int         `toml:"max_steps"`
+	MaxAttempts     *int         `toml:"max_attempts"`
 }
 
 // jobDefaults mirrors a single [defaults.jobs.<mode>] block.
@@ -140,6 +143,7 @@ func New(path string) *Store {
 				ReasoningEffort: d.Raw.ReasoningEffort,
 				MaxOutputTokens: d.Raw.MaxOutputTokens,
 				MaxSteps:        d.Raw.MaxSteps,
+				MaxAttempts:     d.Raw.MaxAttempts,
 			}
 		},
 	)}
@@ -190,6 +194,7 @@ func (s *Store) Agents(ctx context.Context) (map[string]modelcfg.RawAgent, error
 				ReasoningEffort: a.ReasoningEffort,
 				MaxOutputTokens: a.MaxOutputTokens,
 				MaxSteps:        a.MaxSteps,
+				MaxAttempts:     a.MaxAttempts,
 			}.raw(),
 		}
 	}

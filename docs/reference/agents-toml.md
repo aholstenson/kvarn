@@ -47,10 +47,16 @@ reasoning_effort = "high"
 | `reasoning_effort` | string | One of `none`, `low`, `medium`, `high`. |
 | `max_output_tokens` | int | Cap on output tokens per request. |
 | `max_steps` | int | Cap on tool-call steps per agent run. |
+| `max_attempts` | int | How many times one model call may be tried before it fails, the first try included. Defaults to 10. Set it to `1` to fail on the first error. |
 
 Each key you set replaces the built-in value for that class; keys you leave out
 keep theirs. A `[models.<alias>]` block naming something other than the three
 classes above is an error, so a typo is reported rather than ignored.
+
+A retried call waits between attempts, longer each time, and honours a
+`Retry-After` the provider sends. Every attempt after the first is reported to
+anyone watching the job, so a run that is waiting out an overloaded provider
+says so rather than looking stalled.
 
 `--model` on `kvarn local job` and `kvarn orchestrator` selects which model the
 `coding-agent` class resolves to for that invocation.

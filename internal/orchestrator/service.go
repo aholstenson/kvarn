@@ -1577,6 +1577,34 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		MergeTarget: mergeTarget,
 		OnProgress: func(event agent.ProgressEvent) {
 			switch e := event.(type) {
+			case agent.ProgressTurn:
+				// The session message names what the run is doing right now.
+				// Only the start of a turn changes that answer: it replaces the
+				// tool the last state change named, which by then has finished.
+				if e.AgentID == "" && e.Phase == agent.TurnStarted {
+					s.sessionMgr.UpdateState(ctx, sessionID, session.StateRunning, "thinking")
+				}
+				s.sessionMgr.EmitEvent(ctx, sessionID, session.AgentTurnEvent{
+					SessionID: sessionID,
+					AgentID:   e.AgentID,
+					Phase:     turnPhaseToSession(e.Phase),
+					Step:      e.Step,
+					Model:     e.Model,
+					Final:     e.Final,
+				})
+			case agent.ProgressRetry:
+				s.sessionMgr.EmitEvent(ctx, sessionID, session.AgentRetryEvent{
+					SessionID:   sessionID,
+					AgentID:     e.AgentID,
+					Step:        e.Step,
+					Attempt:     e.Attempt,
+					MaxAttempts: e.MaxAttempts,
+					Delay:       e.Delay,
+					StatusCode:  e.StatusCode,
+					Provider:    e.Provider,
+					Model:       e.Model,
+					Error:       e.Error,
+				})
 			case agent.ProgressToolUse:
 				if e.AgentID == "" {
 					s.sessionMgr.UpdateState(ctx, sessionID, session.StateRunning, e.ToolID)
@@ -2536,7 +2564,7 @@ func (s *Service) WatchSession(ctx context.Context, req *connect.Request[v1.Watc
 	}
 
 	for we := range ch {
-		update := sessionEventToUpdate(we.Seq, we.Event)
+		update := sessionEventToUpdate(we)
 		if update != nil {
 			if err := stream.Send(update); err != nil {
 				return err
@@ -2578,7 +2606,7 @@ func (s *Service) ListSessionEvents(ctx context.Context, req *connect.Request[v1
 		lastSeq int64
 	)
 	for _, we := range events {
-		update := sessionEventToUpdate(we.Seq, we.Event)
+		update := sessionEventToUpdate(we)
 		if update == nil {
 			continue
 		}
@@ -2598,13 +2626,13 @@ const (
 	maxSessionEventsLimit     = 2000
 )
 
-// sessionEventToUpdate converts an internal session Event (with its durable
-// sequence; 0 for ephemeral) into the proto SessionUpdate. Returns nil for
-// events that have no wire representation. Shared by WatchSession streaming and
-// ListSessionEvents polling.
-func sessionEventToUpdate(seq int64, event session.Event) *v1.SessionUpdate {
+// sessionEventToUpdate converts an internal session event — with its durable
+// sequence (0 for ephemeral) and the time it happened — into the proto
+// SessionUpdate. Returns nil for events that have no wire representation.
+// Shared by WatchSession streaming and ListSessionEvents polling.
+func sessionEventToUpdate(we session.WatchEvent) *v1.SessionUpdate {
 	var update *v1.SessionUpdate
-	switch e := event.(type) {
+	switch e := we.Event.(type) {
 	case session.StateChangeEvent:
 		update = &v1.SessionUpdate{
 			SessionId: e.Session.ID,
@@ -2747,9 +2775,42 @@ func sessionEventToUpdate(seq int64, event session.Event) *v1.SessionUpdate {
 				},
 			},
 		}
+	case session.AgentTurnEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_AgentTurn{
+				AgentTurn: &v1.AgentTurn{
+					Phase:   turnPhaseToProto(e.Phase),
+					AgentId: e.AgentID,
+					Step:    int32(e.Step),
+					Final:   e.Final,
+					Model:   e.Model,
+				},
+			},
+		}
+	case session.AgentRetryEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_AgentRetry{
+				AgentRetry: &v1.AgentRetry{
+					AgentId:     e.AgentID,
+					Step:        int32(e.Step),
+					Attempt:     int32(e.Attempt),
+					MaxAttempts: int32(e.MaxAttempts),
+					DelayMs:     e.Delay.Milliseconds(),
+					StatusCode:  int32(e.StatusCode),
+					Provider:    e.Provider,
+					Model:       e.Model,
+					Error:       e.Error,
+				},
+			},
+		}
 	}
 	if update != nil {
-		update.Sequence = seq
+		update.Sequence = we.Seq
+		if !we.At.IsZero() {
+			update.Timestamp = timestamppb.New(we.At)
+		}
 	}
 	return update
 }
@@ -2882,6 +2943,32 @@ func managedSecrets(m map[string]secret.Managed) map[string]egressproxy.ManagedS
 		}
 	}
 	return out
+}
+
+func turnPhaseToSession(p agent.TurnPhase) session.AgentTurnPhase {
+	switch p {
+	case agent.TurnStarted:
+		return session.AgentTurnStarted
+	case agent.TurnResponding:
+		return session.AgentTurnResponding
+	case agent.TurnEnded:
+		return session.AgentTurnEnded
+	default:
+		return 0
+	}
+}
+
+func turnPhaseToProto(p session.AgentTurnPhase) v1.AgentTurnPhase {
+	switch p {
+	case session.AgentTurnStarted:
+		return v1.AgentTurnPhase_AGENT_TURN_PHASE_STARTED
+	case session.AgentTurnResponding:
+		return v1.AgentTurnPhase_AGENT_TURN_PHASE_RESPONDING
+	case session.AgentTurnEnded:
+		return v1.AgentTurnPhase_AGENT_TURN_PHASE_ENDED
+	default:
+		return v1.AgentTurnPhase_AGENT_TURN_PHASE_UNSPECIFIED
+	}
 }
 
 func stepPhaseToProto(sp session.StepPhase) v1.StepPhase {

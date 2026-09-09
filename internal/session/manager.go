@@ -184,7 +184,7 @@ func (m *manager) TransitionPending(ctx context.Context, id string, to PendingTr
 	defer seqLock.Unlock()
 	m.hub.mu.Lock()
 	defer m.hub.mu.Unlock()
-	m.broadcastLocked(id, WatchEvent{Seq: pe.Seq, Event: event})
+	m.broadcastLocked(id, WatchEvent{Seq: pe.Seq, At: pe.RecordedAt, Event: event})
 	return true, nil
 }
 
@@ -206,7 +206,7 @@ func (m *manager) RequeueRun(ctx context.Context, id string, opts RequeueOpts) (
 	defer seqLock.Unlock()
 	m.hub.mu.Lock()
 	defer m.hub.mu.Unlock()
-	m.broadcastLocked(id, WatchEvent{Seq: pe.Seq, Event: event})
+	m.broadcastLocked(id, WatchEvent{Seq: pe.Seq, At: pe.RecordedAt, Event: event})
 	return true, nil
 }
 
@@ -317,17 +317,21 @@ func (m *manager) persistAndBroadcast(ctx context.Context, id string, e Event) e
 	defer seqLock.Unlock()
 
 	seq := int64(0)
+	// An ephemeral event is never recorded, so the broadcast is the only time
+	// it has.
+	at := time.Now().UTC()
 	if durable {
 		pe, err := m.store.AppendEvent(ctx, id, kind, payload)
 		if err != nil {
 			return fmt.Errorf("append event: %w", err)
 		}
 		seq = pe.Seq
+		at = pe.RecordedAt
 	}
 
 	m.hub.mu.Lock()
 	defer m.hub.mu.Unlock()
-	m.broadcastLocked(id, WatchEvent{Seq: seq, Event: e})
+	m.broadcastLocked(id, WatchEvent{Seq: seq, At: at, Event: e})
 	return nil
 }
 
@@ -427,7 +431,7 @@ func (m *manager) feed(sub *subscriber, fromSeq, backlogMax int64, terminal bool
 				slog.Warn("session event decode failed", "session_id", sub.id, "seq", pe.Seq, "error", err)
 				continue
 			}
-			if !m.send(sub, WatchEvent{Seq: pe.Seq, Event: e}) {
+			if !m.send(sub, WatchEvent{Seq: pe.Seq, At: pe.RecordedAt, Event: e}) {
 				return
 			}
 		}
@@ -529,7 +533,7 @@ func (m *manager) ListEvents(ctx context.Context, id string, afterSeq int64, lim
 		if err != nil {
 			return nil, fmt.Errorf("decode event seq %d: %w", pe.Seq, err)
 		}
-		out = append(out, WatchEvent{Seq: pe.Seq, Event: e})
+		out = append(out, WatchEvent{Seq: pe.Seq, At: pe.RecordedAt, Event: e})
 	}
 	return out, nil
 }

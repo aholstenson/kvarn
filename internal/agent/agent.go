@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"time"
 
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
@@ -41,6 +42,60 @@ type ProgressToolResult struct {
 }
 
 func (ProgressToolResult) isProgressEvent() {}
+
+// TurnPhase marks where one model call stands in its lifecycle.
+type TurnPhase int
+
+const (
+	// TurnStarted is the request leaving for the provider.
+	TurnStarted TurnPhase = iota + 1
+	// TurnResponding is the first token coming back, so the wait on the
+	// provider is over.
+	TurnResponding
+	// TurnEnded is the model finishing its reply. Tool calls run after it.
+	TurnEnded
+)
+
+// ProgressTurn brackets one model call. It is what separates time spent
+// waiting on the model from time spent running a tool: without it the progress
+// stream is silent for as long as the model reasons, which looks exactly like
+// a tool that has hung.
+type ProgressTurn struct {
+	AgentID string // empty for the parent agent; sub-agent identifier otherwise
+	Phase   TurnPhase
+	// Step is the 1-based model call within this agent's conversation.
+	Step int
+	// Model is the model being called, as configured.
+	Model string
+	// Final is set on TurnEnded when the model ended the run rather than
+	// pausing for tools.
+	Final bool
+}
+
+func (ProgressTurn) isProgressEvent() {}
+
+// ProgressRetry reports one failed attempt at a model call and the pause
+// before the next one. It always falls between the turn's start and its first
+// token: a stream is never retried once it has produced output.
+type ProgressRetry struct {
+	AgentID string
+	// Step is the model call this attempt belongs to.
+	Step int
+	// Attempt is the 1-based attempt that failed; MaxAttempts is the total the
+	// call is allowed.
+	Attempt     int
+	MaxAttempts int
+	// Delay is how long the provider client waits before trying again.
+	Delay time.Duration
+	// StatusCode is the HTTP status of the failed attempt, 0 when the provider
+	// reported none.
+	StatusCode int
+	Provider   string
+	Model      string
+	Error      string
+}
+
+func (ProgressRetry) isProgressEvent() {}
 
 // ProgressCostUpdate carries a cost update for the running job. Kind reports
 // what the update represents: a soft warning (the WarnFraction was just

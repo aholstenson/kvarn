@@ -13,6 +13,10 @@ import (
 // Durable event kinds. Only these are persisted to the event log; every other
 // event is broadcast live-only. Keep this set in sync with the Store
 // conformance suite and the codec switch below.
+//
+// kindAgentTurn is the one kind a payload can decline: the responding phase is
+// a live-only marker that the wait on the provider is over, and history has the
+// started/ended pair to measure between.
 const (
 	kindStateChange     = "state_change"
 	kindAgentMessage    = "agent_message"
@@ -22,6 +26,8 @@ const (
 	kindCost            = "cost"
 	kindPullRequest     = "pull_request"
 	kindVMInfo          = "vm_info"
+	kindAgentTurn       = "agent_turn"
+	kindAgentRetry      = "agent_retry"
 )
 
 // payloadCap bounds the serialized size of a single persisted event payload.
@@ -202,6 +208,28 @@ type agentToolResultPayload struct {
 	Truncated bool   `json:"truncated,omitempty"`
 }
 
+type agentTurnPayload struct {
+	SessionID string `json:"session_id"`
+	AgentID   string `json:"agent_id,omitempty"`
+	Phase     int    `json:"phase"`
+	Step      int    `json:"step"`
+	Model     string `json:"model,omitempty"`
+	Final     bool   `json:"final,omitempty"`
+}
+
+type agentRetryPayload struct {
+	SessionID   string `json:"session_id"`
+	AgentID     string `json:"agent_id,omitempty"`
+	Step        int    `json:"step"`
+	Attempt     int    `json:"attempt"`
+	MaxAttempts int    `json:"max_attempts"`
+	DelayMs     int64  `json:"delay_ms"`
+	StatusCode  int    `json:"status_code,omitempty"`
+	Provider    string `json:"provider,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
 type stepResultPayload struct {
 	SessionID string `json:"session_id"`
 	Name      string `json:"name"`
@@ -312,6 +340,34 @@ func encodeEvent(e Event) (kind string, payload []byte, durable bool, err error)
 			p.Truncated = true
 		})
 		return kindAgentToolResult, b, true, err
+	case AgentTurnEvent:
+		p := agentTurnPayload{
+			SessionID: ev.SessionID,
+			AgentID:   ev.AgentID,
+			Phase:     int(ev.Phase),
+			Step:      ev.Step,
+			Model:     ev.Model,
+			Final:     ev.Final,
+		}
+		b, err := json.Marshal(p)
+		return kindAgentTurn, b, ev.Phase != AgentTurnResponding, err
+	case AgentRetryEvent:
+		p := agentRetryPayload{
+			SessionID:   ev.SessionID,
+			AgentID:     ev.AgentID,
+			Step:        ev.Step,
+			Attempt:     ev.Attempt,
+			MaxAttempts: ev.MaxAttempts,
+			DelayMs:     ev.Delay.Milliseconds(),
+			StatusCode:  ev.StatusCode,
+			Provider:    ev.Provider,
+			Model:       ev.Model,
+			Error:       ev.Error,
+		}
+		b, err := marshalCapped(&p, func(remaining int) {
+			p.Error = trimField(p.Error, remaining)
+		})
+		return kindAgentRetry, b, true, err
 	case StepResultEvent:
 		p := stepResultPayload{
 			SessionID: ev.SessionID,
@@ -401,6 +457,36 @@ func decodeEvent(kind string, payload []byte) (Event, error) {
 			return nil, err
 		}
 		return AgentToolResultEvent{SessionID: p.SessionID, AgentID: p.AgentID, ToolID: p.ToolID, Result: p.Result, IsError: p.IsError}, nil
+	case kindAgentTurn:
+		var p agentTurnPayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return nil, err
+		}
+		return AgentTurnEvent{
+			SessionID: p.SessionID,
+			AgentID:   p.AgentID,
+			Phase:     AgentTurnPhase(p.Phase),
+			Step:      p.Step,
+			Model:     p.Model,
+			Final:     p.Final,
+		}, nil
+	case kindAgentRetry:
+		var p agentRetryPayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return nil, err
+		}
+		return AgentRetryEvent{
+			SessionID:   p.SessionID,
+			AgentID:     p.AgentID,
+			Step:        p.Step,
+			Attempt:     p.Attempt,
+			MaxAttempts: p.MaxAttempts,
+			Delay:       time.Duration(p.DelayMs) * time.Millisecond,
+			StatusCode:  p.StatusCode,
+			Provider:    p.Provider,
+			Model:       p.Model,
+			Error:       p.Error,
+		}, nil
 	case kindStepResult:
 		var p stepResultPayload
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -484,6 +570,8 @@ func trimmableLen(v any) int {
 		return len(p.ArgumentsJSON)
 	case *agentToolResultPayload:
 		return len(p.Result)
+	case *agentRetryPayload:
+		return len(p.Error)
 	case *stepResultPayload:
 		return len(p.Stdout) + len(p.Stderr)
 	default:

@@ -280,6 +280,11 @@ message SessionUpdate {
   string project = 2;
   // Durable per-session sequence number; 0 for ephemeral (live-only) events.
   int64 sequence = 3;
+  // When the event happened: the time it was recorded for a durable event,
+  // the time it was broadcast for an ephemeral one. Carried on the wire so a
+  // client reading recorded history measures the same durations a client
+  // watching live does, rather than the times the two of them received it.
+  google.protobuf.Timestamp timestamp = 4;
 
   oneof event {
     StateChange state_change = 10;
@@ -294,6 +299,8 @@ message SessionUpdate {
     CacheProgress cache_progress = 19;
     PullRequestCreated pull_request_created = 20;
     CostUpdate cost_update = 21;
+    AgentTurn agent_turn = 22;
+    AgentRetry agent_retry = 23;
   }
 }
 
@@ -321,6 +328,57 @@ message AgentToolResult {
   string result = 2;
   bool is_error = 3;
   string agent_id = 4;
+}
+
+// AgentTurnPhase marks where one model call stands in its lifecycle. The
+// phases bracket the call, which is what lets a viewer tell an agent waiting
+// on the model apart from one waiting on a tool: the time between STARTED and
+// ENDED belongs to the model, and everything after ENDED until the next
+// STARTED is tool work.
+enum AgentTurnPhase {
+  AGENT_TURN_PHASE_UNSPECIFIED = 0;
+  // The request is on its way to the provider and nothing has come back.
+  AGENT_TURN_PHASE_STARTED = 1;
+  // The first token arrived, so the wait on the provider is over and the
+  // model is producing. Live-only: it is never recorded, because a reader of
+  // finished history has the start and the end to measure between.
+  AGENT_TURN_PHASE_RESPONDING = 2;
+  // The model stopped producing. Any tool calls it asked for run after this.
+  AGENT_TURN_PHASE_ENDED = 3;
+}
+
+message AgentTurn {
+  AgentTurnPhase phase = 1;
+  // Empty for the parent agent; identifier of the sub-agent run otherwise.
+  string agent_id = 2;
+  // 1-based model call within this agent's conversation.
+  int32 step = 3;
+  // Set on ENDED when the model ended the run rather than pausing for tools.
+  bool final = 4;
+  // The model that was called, e.g. "anthropic/claude-sonnet-4-6".
+  string model = 5;
+}
+
+// AgentRetry reports one failed attempt at a model call and the pause before
+// the next one. It is emitted between STARTED and the first token, since a
+// stream is never retried once it has produced output.
+message AgentRetry {
+  // Empty for the parent agent; identifier of the sub-agent run otherwise.
+  string agent_id = 1;
+  // The model call this attempt belongs to; the same step as the AgentTurn
+  // that opened it.
+  int32 step = 2;
+  // 1-based attempt that just failed, and the total the call is allowed.
+  int32 attempt = 3;
+  int32 max_attempts = 4;
+  // How long the client waits before the next attempt.
+  int64 delay_ms = 5;
+  // HTTP status of the failed attempt; 0 when the provider reported none.
+  int32 status_code = 6;
+  string provider = 7;
+  string model = 8;
+  // What the failed attempt returned.
+  string error = 9;
 }
 
 enum StepPhase {

@@ -249,6 +249,63 @@ type AgentToolResultEvent struct {
 
 func (AgentToolResultEvent) isSessionEvent() {}
 
+// AgentTurnPhase marks where one model call stands in its lifecycle.
+type AgentTurnPhase int
+
+const (
+	// AgentTurnStarted is the request leaving for the provider.
+	AgentTurnStarted AgentTurnPhase = 1
+	// AgentTurnResponding is the first token coming back. It is broadcast
+	// live-only: it says the wait is over, which recorded history answers with
+	// the started/ended pair instead.
+	AgentTurnResponding AgentTurnPhase = 2
+	// AgentTurnEnded is the model finishing its reply. Tool calls run after it.
+	AgentTurnEnded AgentTurnPhase = 3
+)
+
+// AgentTurnEvent brackets one model call, so a watcher can tell an agent
+// waiting on the model apart from one waiting on a tool. Without it the stream
+// falls silent for as long as the model reasons, which reads exactly like a
+// stuck tool call.
+type AgentTurnEvent struct {
+	SessionID string
+	AgentID   string // empty for the parent agent; sub-agent identifier otherwise
+	Phase     AgentTurnPhase
+	// Step is the 1-based model call within this agent's conversation.
+	Step int
+	// Model is the model that was called, as configured.
+	Model string
+	// Final is set on AgentTurnEnded when the model ended the run rather than
+	// pausing for tools.
+	Final bool
+}
+
+func (AgentTurnEvent) isSessionEvent() {}
+
+// AgentRetryEvent reports one failed attempt at a model call and the pause
+// before the next one. It always falls between the turn's start and its first
+// token: a stream is never retried once it has produced output.
+type AgentRetryEvent struct {
+	SessionID string
+	AgentID   string
+	// Step is the model call this attempt belongs to.
+	Step int
+	// Attempt is the 1-based attempt that failed; MaxAttempts is the total the
+	// call is allowed.
+	Attempt     int
+	MaxAttempts int
+	// Delay is how long the provider client waits before trying again.
+	Delay time.Duration
+	// StatusCode is the HTTP status of the failed attempt, 0 when the provider
+	// reported none.
+	StatusCode int
+	Provider   string
+	Model      string
+	Error      string
+}
+
+func (AgentRetryEvent) isSessionEvent() {}
+
 // StepPhase indicates which phase a step belongs to.
 type StepPhase int
 
@@ -371,7 +428,12 @@ func (CostEvent) isSessionEvent() {}
 // was persisted. Seq is 0 for ephemeral events (broadcast live-only, never
 // replayed).
 type WatchEvent struct {
-	Seq   int64
+	Seq int64
+	// At is when the event happened: the time the store recorded it for a
+	// durable event, the time it was broadcast for an ephemeral one. It travels
+	// with the event so a client reading recorded history measures the same
+	// durations a client watching live does.
+	At    time.Time
 	Event Event
 }
 

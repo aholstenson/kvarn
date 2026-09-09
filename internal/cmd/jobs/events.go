@@ -54,8 +54,9 @@ func (c *EventsCmd) Run() error {
 		return PrintJSONList(msgs)
 	}
 
+	printer := client.NewPrinter()
 	for _, ev := range resp.Msg.Events {
-		client.PrintUpdate(ev)
+		printer.Print(ev)
 	}
 	if len(resp.Msg.Events) == 0 {
 		fmt.Fprintln(os.Stdout, "No recorded events")

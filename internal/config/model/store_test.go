@@ -61,6 +61,17 @@ var _ = Describe("Resolve", func() {
 		Expect(cfgs["fast"].MaxSteps).To(Equal(100))
 	})
 
+	It("lets an override forbid retrying without reading as unset", func() {
+		defaults["fast"] = modelcfg.Entry{ModelID: "test/small", MaxAttempts: 10}
+		store := stubStore{models: map[string]modelcfg.RawEntry{
+			"fast": {MaxAttempts: ptr(1)},
+		}}
+
+		_, cfgs, err := modelcfg.Resolve(ctx, mgr, store, defaults, "balanced", "")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfgs["fast"].MaxAttempts).To(Equal(1))
+	})
+
 	It("rejects an alias that is not one of the known classes", func() {
 		store := stubStore{models: map[string]modelcfg.RawEntry{
 			"coding-agent-small": {ModelID: "test/legacy"},
