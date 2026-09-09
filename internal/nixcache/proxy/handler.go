@@ -88,6 +88,7 @@ type Handler struct {
 	client    *http.Client
 	log       *slog.Logger
 	negative  *negativeCache
+	narExpect *narExpectations
 
 	cacheInfoMu sync.Mutex
 	cacheInfo   map[string][]byte
@@ -128,6 +129,7 @@ func New(cfg Config) (*Handler, error) {
 		client:    cfg.HTTPClient,
 		log:       cfg.Logger,
 		negative:  newNegativeCache(cfg.NegativeTTL),
+		narExpect: newNarExpectations(),
 		cacheInfo: make(map[string][]byte),
 	}, nil
 }
@@ -260,6 +262,7 @@ func (h *Handler) serveNarInfo(w http.ResponseWriter, r *http.Request, host stri
 	if body, hit, err := h.cfg.Store.ReadNarInfo(host, hash); err != nil {
 		h.log.Warn("nix cache: narinfo read error", "upstream", host, "hash", hash, "error", err)
 	} else if hit {
+		h.rememberNar(body)
 		writeBytes(w, r, contentTypeNarInfo, body)
 		return
 	}
@@ -304,7 +307,16 @@ func (h *Handler) serveNarInfo(w http.ResponseWriter, r *http.Request, host stri
 	if err := h.cfg.Store.WriteNarInfo(host, hash, body); err != nil {
 		h.log.Warn("nix cache: narinfo write failed", "upstream", host, "hash", hash, "error", err)
 	}
+	h.rememberNar(body)
 	writeBytes(w, r, contentTypeNarInfo, body)
+}
+
+// rememberNar notes what the NAR this record points at must hash to, so the
+// download that follows can be verified before it is kept.
+func (h *Handler) rememberNar(narinfo []byte) {
+	if name, fileHash, ok := parseNarExpectation(narinfo); ok {
+		h.narExpect.put(name, fileHash)
+	}
 }
 
 func (h *Handler) serveNar(w http.ResponseWriter, r *http.Request, host string, base *url.URL, name string) {
@@ -348,9 +360,10 @@ func (h *Handler) serveNar(w http.ResponseWriter, r *http.Request, host string, 
 
 	// Stream to the guest and into the store at once, so the guest waits on
 	// the upstream transfer and nothing else. The store verifies the bytes
-	// against the file name before it keeps them; the guest verifies them
-	// itself against the narinfo, so a bad upstream transfer is caught on
-	// both sides and cached on neither.
+	// against the hash the narinfo declared for them before it keeps them; the
+	// guest verifies them itself against the same record, so a bad upstream
+	// transfer is caught on both sides and cached on neither.
+	expect := h.narExpect.get(name)
 	pr, pw := io.Pipe()
 	type writeResult struct {
 		n   int64
@@ -358,7 +371,7 @@ func (h *Handler) serveNar(w http.ResponseWriter, r *http.Request, host string, 
 	}
 	done := make(chan writeResult, 1)
 	go func() {
-		n, err := h.cfg.Store.WriteNar(name, pr)
+		n, err := h.cfg.Store.WriteNar(name, expect, pr)
 		// Drain what the copy may still push so it never blocks on a store
 		// that has stopped reading.
 		_, _ = io.Copy(io.Discard, pr)
@@ -382,8 +395,13 @@ func (h *Handler) serveNar(w http.ResponseWriter, r *http.Request, host string, 
 	switch {
 	case copyErr != nil:
 		h.log.Debug("nix cache: nar transfer ended early", "upstream", host, "name", name, "error", copyErr)
+	case errors.Is(res.err, store.ErrHashMismatch) && expect == "":
+		// No record naming this file has passed through, so there is nothing
+		// to check the bytes against and they are streamed on unkept. Nix asks
+		// for the record first, so this stays rare.
+		h.log.Debug("nix cache: nar arrived without its narinfo; not cached", "upstream", host, "name", name, "bytes", res.n)
 	case errors.Is(res.err, store.ErrHashMismatch):
-		h.log.Warn("nix cache: upstream nar did not match its name; not cached", "upstream", host, "name", name, "bytes", res.n)
+		h.log.Warn("nix cache: upstream nar did not match the hash its narinfo declares; not cached", "upstream", host, "name", name, "bytes", res.n)
 	case res.err != nil:
 		h.log.Warn("nix cache: nar write failed", "upstream", host, "name", name, "error", res.err)
 	default:

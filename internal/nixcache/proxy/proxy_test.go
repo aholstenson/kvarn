@@ -18,7 +18,15 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-const storeHash = "0mdqa9w1p6cmli6976v4wi0sw9r4p5pr"
+const (
+	storeHash       = "0mdqa9w1p6cmli6976v4wi0sw9r4p5pr"
+	secondStoreHash = "2mdqa9w1p6cmli6976v4wi0sw9r4p5pr"
+)
+
+func hashOf(data []byte) string {
+	sum := sha256.Sum256(data)
+	return nixbase32.Encode(sum[:])
+}
 
 // fakeCache is a minimal upstream binary cache serving one store path. It
 // counts requests so tests can assert that a second pull never reaches it.
@@ -29,7 +37,7 @@ type fakeCache struct {
 	narName string
 
 	// narBody, when set, is served instead of nar under narName, which is how
-	// a test hands out bytes that do not match their name.
+	// a test hands out bytes the narinfo did not describe.
 	narBody []byte
 
 	cacheInfoHits atomic.Int64
@@ -40,20 +48,30 @@ type fakeCache struct {
 }
 
 func newFakeCache(nar []byte) *fakeCache {
-	sum := sha256.Sum256(nar)
-	name := nixbase32.Encode(sum[:]) + ".nar.xz"
+	return newFakeCacheAt(storeHash, nar)
+}
+
+// newFakeCacheAt serves one store path the way cache.nixos.org does: the NAR
+// file is named after the uncompressed archive while what travels is the
+// compressed file, so the name never covers the bytes on the wire and the
+// narinfo's FileHash is the only thing that describes them.
+func newFakeCacheAt(storePathHash string, nar []byte) *fakeCache {
+	archive := append([]byte("uncompressed:"), nar...)
+	name := hashOf(archive) + ".nar.zst"
 	f := &fakeCache{
 		mux:     http.NewServeMux(),
 		nar:     nar,
 		narName: name,
-		narinfo: []byte(fmt.Sprintf("StorePath: /nix/store/%s-hello\nURL: nar/%s\nCompression: xz\nFileSize: %d\n", storeHash, name, len(nar))),
+		narinfo: []byte(fmt.Sprintf(
+			"StorePath: /nix/store/%s-hello\nURL: nar/%s\nCompression: zstd\nFileHash: sha256:%s\nFileSize: %d\nNarHash: sha256:%s\nNarSize: %d\n",
+			storePathHash, name, hashOf(nar), len(nar), hashOf(archive), len(archive))),
 	}
 	f.lastRange.Store("")
 	f.mux.HandleFunc("/nix-cache-info", func(w http.ResponseWriter, r *http.Request) {
 		f.cacheInfoHits.Add(1)
 		w.Write([]byte("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n"))
 	})
-	f.mux.HandleFunc("/"+storeHash+".narinfo", func(w http.ResponseWriter, r *http.Request) {
+	f.mux.HandleFunc("/"+storePathHash+".narinfo", func(w http.ResponseWriter, r *http.Request) {
 		f.narinfoHits.Add(1)
 		if f.failNarinfo.Load() {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -113,6 +131,14 @@ var _ = Describe("Pull-through Nix cache", func() {
 		b, err := io.ReadAll(resp.Body)
 		Expect(err).NotTo(HaveOccurred())
 		return string(b)
+	}
+	// fetchNarInfo does what Nix does before it downloads an archive: ask for
+	// the record describing it. That is where the handler learns what the
+	// download must hash to.
+	fetchNarInfo := func(storePathHash string) {
+		resp := do(http.MethodGet, "/"+host+"/"+storePathHash+".narinfo")
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		body(resp)
 	}
 
 	Describe("nix-cache-info", func() {
@@ -195,6 +221,7 @@ var _ = Describe("Pull-through Nix cache", func() {
 
 	Describe("NAR files", func() {
 		It("caches the file on the first download and serves the second locally", func() {
+			fetchNarInfo(storeHash)
 			resp := do(http.MethodGet, "/"+host+"/nar/"+fake.narName)
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 			Expect(resp.Header.Get("Content-Type")).To(Equal("application/x-nix-nar"))
@@ -208,6 +235,7 @@ var _ = Describe("Pull-through Nix cache", func() {
 		})
 
 		It("honours a range request against a cached file", func() {
+			fetchNarInfo(storeHash)
 			body(do(http.MethodGet, "/"+host+"/nar/"+fake.narName))
 
 			resp := do(http.MethodGet, "/"+host+"/nar/"+fake.narName, "Range", "bytes=4-")
@@ -237,7 +265,8 @@ var _ = Describe("Pull-through Nix cache", func() {
 			Expect(hit).To(BeFalse())
 		})
 
-		It("still streams bytes that do not match their name, but does not keep them", func() {
+		It("still streams bytes the narinfo did not describe, but does not keep them", func() {
+			fetchNarInfo(storeHash)
 			fake.narBody = []byte("corrupted-transfer")
 			resp := do(http.MethodGet, "/"+host+"/nar/"+fake.narName)
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
@@ -251,6 +280,42 @@ var _ = Describe("Pull-through Nix cache", func() {
 			resp = do(http.MethodGet, "/"+host+"/nar/"+fake.narName)
 			Expect(body(resp)).To(Equal(string(fake.nar)))
 			Expect(fake.narHits.Load()).To(Equal(int64(2)))
+		})
+
+		It("streams a file no narinfo has named without keeping it", func() {
+			resp := do(http.MethodGet, "/"+host+"/nar/"+fake.narName)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+			Expect(body(resp)).To(Equal(string(fake.nar)))
+
+			_, _, hit, err := st.OpenNar(fake.narName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(hit).To(BeFalse())
+		})
+
+		It("caches a file a stored narinfo names, without asking upstream for the record again", func() {
+			fetchNarInfo(storeHash)
+			body(do(http.MethodGet, "/"+host+"/nar/"+fake.narName))
+
+			// A second handler over the same store stands in for a restarted
+			// orchestrator: the record comes back from disk, and that is
+			// enough to verify a download it has never seen.
+			Expect(st.Clear()).To(Succeed())
+			fresh, err := nixproxy.New(nixproxy.Config{Store: st, Upstreams: []string{srv.URL}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(st.WriteNarInfo(host, storeHash, fake.narinfo)).To(Succeed())
+
+			w := httptest.NewRecorder()
+			fresh.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/"+host+"/"+storeHash+".narinfo", nil))
+			Expect(w.Result().StatusCode).To(Equal(http.StatusOK))
+
+			w = httptest.NewRecorder()
+			fresh.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/"+host+"/nar/"+fake.narName, nil))
+			Expect(w.Result().StatusCode).To(Equal(http.StatusOK))
+
+			_, _, hit, err := st.OpenNar(fake.narName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(hit).To(BeTrue())
+			Expect(fake.narinfoHits.Load()).To(Equal(int64(1)))
 		})
 
 		It("reports an absent file as 404", func() {
@@ -275,11 +340,14 @@ var _ = Describe("Pull-through Nix cache", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
+			fetchNarInfo(storeHash)
 			body(do(http.MethodGet, "/"+host+"/nar/"+fake.narName))
 			now = now.Add(time.Minute)
 
-			second := newFakeCache([]byte("a second file, larger"))
+			second := newFakeCacheAt(secondStoreHash, []byte("a second file, larger"))
 			fake.mux.Handle("/nar/"+second.narName, second.mux)
+			fake.mux.Handle("/"+secondStoreHash+".narinfo", second.mux)
+			fetchNarInfo(secondStoreHash)
 			body(do(http.MethodGet, "/"+host+"/nar/"+second.narName))
 
 			_, _, hit, err := st.OpenNar(fake.narName)

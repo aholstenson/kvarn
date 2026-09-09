@@ -3,14 +3,13 @@
 // records, which describe one store path, and NAR archives, which carry its
 // contents.
 //
-// Both are immutable once published. A NAR is named by the hash of its own
-// bytes, so the store verifies that hash before it commits a file, and any
-// file that is present is known to be intact. A narinfo describes a store
-// path whose name is itself a hash of what built it, so an upstream never
-// publishes a different record under the same name. That is what makes the
-// cache safe to share across every project on the host with no invalidation:
-// a hit is correct by construction, and the only reason to remove anything is
-// disk space.
+// Both are immutable once published. A NAR is committed only once its bytes
+// hash to the value its narinfo declares for them, so any file that is present
+// is known to be intact. A narinfo describes a store path whose name is itself
+// a hash of what built it, so an upstream never publishes a different record
+// under the same name. That is what makes the cache safe to share across every
+// project on the host with no invalidation: a hit is correct by construction,
+// and the only reason to remove anything is disk space.
 package store
 
 import (
@@ -41,7 +40,7 @@ const (
 )
 
 // ErrHashMismatch is returned by WriteNar when the bytes written do not hash
-// to the name they were offered under. Nothing is committed in that case.
+// to the value expected of them. Nothing is committed in that case.
 var ErrHashMismatch = errors.New("nar content does not match its file hash")
 
 // Store is the on-disk Nix binary cache.
@@ -152,10 +151,17 @@ func (s *Store) WriteNarInfo(upstream, hash string, body []byte) error {
 
 // --- NAR files ---
 
-// ParseNarName splits a NAR file name of the form <filehash>.nar[.<ext>]
-// into its hash and reports whether the name has that shape. Nix names every
-// NAR it publishes by the Nix base32 sha256 of the file, which is what lets
-// the store verify a download against its own name.
+// ValidNarFileHash reports whether hash has the shape of the hash naming a
+// NAR file: 52 Nix base32 digits, a sha256.
+func ValidNarFileHash(hash string) bool {
+	return nixbase32.IsValid(hash, narFileHashLen)
+}
+
+// ParseNarName splits a NAR file name of the form <hash>.nar[.<ext>] into its
+// hash and reports whether the name has that shape. What that hash covers is
+// the publishing cache's choice — cache.nixos.org names a NAR after the
+// uncompressed archive while serving it compressed — so the name identifies a
+// file but is not on its own a checksum of the bytes served under it.
 func ParseNarName(name string) (hash string, ok bool) {
 	if len(name) < narFileHashLen+len(".nar") {
 		return "", false
@@ -230,15 +236,23 @@ func (s *Store) OpenNar(name string) (io.ReadSeekCloser, int64, bool, error) {
 
 // WriteNar streams r into the cache under name. The bytes are hashed as they
 // are written and the file is only renamed into place when that hash matches
-// the name; otherwise the temp file is dropped and ErrHashMismatch is
-// returned. The returned size is the number of bytes read from r either way.
+// expectFileHash, the Nix base32 sha256 the narinfo pointing at this NAR
+// declares for the bytes on the wire; otherwise the temp file is dropped and
+// ErrHashMismatch is returned. An empty expectFileHash falls back to the hash
+// in the file name, which is what a cache that names a NAR after its
+// transferred bytes publishes. The returned size is the number of bytes read
+// from r either way.
 //
 // Concurrent writers of the same name are safe: each writes its own temp file
 // and the losing rename is discarded.
-func (s *Store) WriteNar(name string, r io.Reader) (int64, error) {
+func (s *Store) WriteNar(name, expectFileHash string, r io.Reader) (int64, error) {
 	hash, ok := ParseNarName(name)
 	if !ok {
 		return 0, fmt.Errorf("invalid nar file name %q", name)
+	}
+	want := expectFileHash
+	if want == "" {
+		want = hash
 	}
 	p, err := s.NarPath(name)
 	if err != nil {
@@ -272,7 +286,7 @@ func (s *Store) WriteNar(name string, r io.Reader) (int64, error) {
 		os.Remove(tmpName)
 		return n, fmt.Errorf("close nar: %w", err)
 	}
-	if nixbase32.Encode(h.Sum(nil)) != hash {
+	if nixbase32.Encode(h.Sum(nil)) != want {
 		os.Remove(tmpName)
 		return n, ErrHashMismatch
 	}

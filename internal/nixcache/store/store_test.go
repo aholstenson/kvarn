@@ -15,10 +15,15 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// narNameOf returns the file name Nix would publish data under.
+// narNameOf returns a NAR file name whose hash covers data itself, which is
+// what a cache that names a NAR after its transferred bytes publishes.
 func narNameOf(data []byte) string {
+	return hashOf(data) + ".nar.xz"
+}
+
+func hashOf(data []byte) string {
 	sum := sha256.Sum256(data)
-	return nixbase32.Encode(sum[:]) + ".nar.xz"
+	return nixbase32.Encode(sum[:])
 }
 
 const storeHash = "0mdqa9w1p6cmli6976v4wi0sw9r4p5pr"
@@ -68,7 +73,7 @@ var _ = Describe("Store", func() {
 			data := []byte("nar-bytes")
 			name := narNameOf(data)
 
-			n, err := s.WriteNar(name, bytes.NewReader(data))
+			n, err := s.WriteNar(name, "", bytes.NewReader(data))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(n).To(Equal(int64(len(data))))
 
@@ -81,9 +86,39 @@ var _ = Describe("Store", func() {
 			Expect(got).To(Equal(data))
 		})
 
+		It("commits a file named after something other than its own bytes", func() {
+			// cache.nixos.org names a NAR after the uncompressed archive and
+			// serves it compressed, so the name and the transferred bytes
+			// never agree; the narinfo's FileHash is what they are checked
+			// against.
+			data := []byte("compressed-nar-bytes")
+			name := narNameOf([]byte("the uncompressed archive"))
+
+			n, err := s.WriteNar(name, hashOf(data), bytes.NewReader(data))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(len(data))))
+
+			rc, _, hit, err := s.OpenNar(name)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(hit).To(BeTrue())
+			got, _ := io.ReadAll(rc)
+			rc.Close()
+			Expect(got).To(Equal(data))
+		})
+
+		It("refuses to commit bytes that do not hash to the declared file hash", func() {
+			name := narNameOf([]byte("the uncompressed archive"))
+			_, err := s.WriteNar(name, hashOf([]byte("what was promised")), bytes.NewReader([]byte("what arrived")))
+			Expect(err).To(MatchError(store.ErrHashMismatch))
+
+			_, _, hit, err := s.OpenNar(name)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(hit).To(BeFalse())
+		})
+
 		It("refuses to commit bytes that do not hash to the name", func() {
 			name := narNameOf([]byte("the real content"))
-			_, err := s.WriteNar(name, bytes.NewReader([]byte("something else")))
+			_, err := s.WriteNar(name, "", bytes.NewReader([]byte("something else")))
 			Expect(err).To(MatchError(store.ErrHashMismatch))
 
 			_, _, hit, err := s.OpenNar(name)
@@ -102,7 +137,7 @@ var _ = Describe("Store", func() {
 		})
 
 		It("rejects names that are not hash.nar[.ext]", func() {
-			_, err := s.WriteNar("../../escape.nar.xz", bytes.NewReader(nil))
+			_, err := s.WriteNar("../../escape.nar.xz", "", bytes.NewReader(nil))
 			Expect(err).To(HaveOccurred())
 			_, _, _, err = s.OpenNar("notahash.nar.xz")
 			Expect(err).To(HaveOccurred())
@@ -117,7 +152,7 @@ var _ = Describe("Store", func() {
 				go func() {
 					defer GinkgoRecover()
 					defer wg.Done()
-					_, err := s.WriteNar(name, bytes.NewReader(data))
+					_, err := s.WriteNar(name, "", bytes.NewReader(data))
 					Expect(err).NotTo(HaveOccurred())
 				}()
 			}
@@ -154,9 +189,9 @@ var _ = Describe("Store", func() {
 		It("counts files and bytes", func() {
 			a := []byte("aaaa")
 			b := []byte("bbbbbbbb")
-			_, err := s.WriteNar(narNameOf(a), bytes.NewReader(a))
+			_, err := s.WriteNar(narNameOf(a), "", bytes.NewReader(a))
 			Expect(err).NotTo(HaveOccurred())
-			_, err = s.WriteNar(narNameOf(b), bytes.NewReader(b))
+			_, err = s.WriteNar(narNameOf(b), "", bytes.NewReader(b))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(s.WriteNarInfo("cache.nixos.org", storeHash, []byte("x"))).To(Succeed())
 
@@ -170,10 +205,10 @@ var _ = Describe("Store", func() {
 		It("evicts the least recently used NAR first and leaves narinfo alone", func() {
 			old := []byte("old-old-old")
 			fresh := []byte("fresh-fresh")
-			_, err := s.WriteNar(narNameOf(old), bytes.NewReader(old))
+			_, err := s.WriteNar(narNameOf(old), "", bytes.NewReader(old))
 			Expect(err).NotTo(HaveOccurred())
 			now = now.Add(time.Hour)
-			_, err = s.WriteNar(narNameOf(fresh), bytes.NewReader(fresh))
+			_, err = s.WriteNar(narNameOf(fresh), "", bytes.NewReader(fresh))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(s.WriteNarInfo("cache.nixos.org", storeHash, []byte("x"))).To(Succeed())
 
@@ -193,10 +228,10 @@ var _ = Describe("Store", func() {
 		It("treats a read as recent use", func() {
 			first := []byte("first-first")
 			second := []byte("second-secon")
-			_, err := s.WriteNar(narNameOf(first), bytes.NewReader(first))
+			_, err := s.WriteNar(narNameOf(first), "", bytes.NewReader(first))
 			Expect(err).NotTo(HaveOccurred())
 			now = now.Add(time.Hour)
-			_, err = s.WriteNar(narNameOf(second), bytes.NewReader(second))
+			_, err = s.WriteNar(narNameOf(second), "", bytes.NewReader(second))
 			Expect(err).NotTo(HaveOccurred())
 			now = now.Add(time.Hour)
 			rc, _, _, err := s.OpenNar(narNameOf(first))
@@ -213,7 +248,7 @@ var _ = Describe("Store", func() {
 
 		It("clears everything", func() {
 			data := []byte("gone")
-			_, err := s.WriteNar(narNameOf(data), bytes.NewReader(data))
+			_, err := s.WriteNar(narNameOf(data), "", bytes.NewReader(data))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(s.WriteNarInfo("cache.nixos.org", storeHash, []byte("x"))).To(Succeed())
 			Expect(s.Clear()).To(Succeed())
