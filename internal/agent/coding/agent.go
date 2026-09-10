@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 
@@ -70,11 +71,10 @@ func NewCodingAgent(resolver *Resolver) *CodingAgent {
 	return &CodingAgent{resolver: resolver}
 }
 
-// Start opens a stateful llms.Session so the orchestrator can drive multiple
-// agent turns through the same conversation. The session preserves message
-// history (tool calls and results) across turns, which is what makes
-// validation-failure retries productive — the agent sees what it tried last
-// time.
+// Start opens a stateful conversation so the orchestrator can drive multiple
+// agent turns through it. The conversation preserves message history (tool
+// calls and results) across turns, which is what makes validation-failure
+// retries productive — the agent sees what it tried last time.
 func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent.Conversation, error) {
 	// Resolved once here and then carried by the conversation: every turn of a
 	// job, including the closing summary call, runs on the configuration the
@@ -148,7 +148,6 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 
 	opts := []llms.GenerateOption{
 		llms.WithSystemPrompt(systemPrompt),
-		llms.WithMessages(llms.NewMessage(llms.RoleUser, llms.NewTextPart(agentCtx.Prompt))),
 		llms.WithMaxSteps(maxSteps),
 		llms.WithMaxOutputTokens(maxOut),
 		llms.WithToolCallTimeout(hostToolCallTimeout),
@@ -168,11 +167,16 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 	}
 
 	mainModel := models.Classes[ModelMain]
+	c.start = func(ctx context.Context, msgs ...*llms.Message) (agentSession, error) {
+		sessOpts := append(slices.Clone(opts), llms.WithMessages(msgs...))
+		return llms.NewSession(ctx, mainModel, sessOpts...)
+	}
+
 	sessCtx := ctx
 	if agentCtx.Cost != nil {
 		sessCtx = llms.WithMetrics(sessCtx, agentCtx.Cost.Recorder())
 	}
-	sess, err := llms.NewSession(sessCtx, mainModel, opts...)
+	sess, err := c.start(sessCtx, llms.NewMessage(llms.RoleUser, llms.NewTextPart(agentCtx.Prompt)))
 	if err != nil {
 		return nil, err
 	}
@@ -181,15 +185,27 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 	return c, nil
 }
 
-// codingConversation drives a single llms.Session across one or more agent
-// turns. The streaming-event handler reuses the same per-agent text buffers
-// across calls so partial-message text never leaks between turns.
+// agentSession is the part of llms.Session the conversation drives. Only a
+// provider can build a real one, so the interface is what lets the retry
+// handover be tested.
+type agentSession interface {
+	Step(ctx context.Context) (llms.StepInfo, bool, error)
+	Result() (llms.Result, error)
+	Messages() []*llms.Message
+}
+
+// codingConversation drives an llms session across one or more agent turns.
+// The streaming-event handler reuses the same per-agent text buffers across
+// calls so partial-message text never leaks between turns.
 type codingConversation struct {
 	models   Models
 	agentCtx *agent.Context
 	mode     *Mode
 	mainCfg  modelcfg.Entry
-	sess     *llms.Session
+	sess     agentSession
+	// start opens a session seeded with msgs, carrying the same system prompt,
+	// tools and model options every turn of this conversation runs on.
+	start func(ctx context.Context, msgs ...*llms.Message) (agentSession, error)
 
 	streamMu sync.Mutex
 	textBufs map[string]*strings.Builder
@@ -314,15 +330,28 @@ func streamAgentID(ctx context.Context) string {
 // Run advances the session to its next stopping point: either the assistant
 // finishes its turn with a final text reply, or the step budget is exhausted.
 // On the first call followup must be empty (the constructor's prompt is
-// already in the message history); on later calls followup is injected as the
-// next user message.
+// already in the message history); on later calls followup becomes the next
+// user message.
 func (c *codingConversation) Run(ctx context.Context, followup string) (string, error) {
-	if followup != "" {
-		c.sess.Inject(llms.NewMessage(llms.RoleUser, llms.NewTextPart(followup)))
-	}
-
 	if c.agentCtx.Cost != nil {
 		ctx = llms.WithMetrics(ctx, c.agentCtx.Cost.Recorder())
+	}
+
+	// A session ends for good once the model finishes a turn without calling a
+	// tool, and nothing reopens it: a message added to a finished session is
+	// recorded in its history and never sent to the model, so the turn would
+	// come back instantly with the previous answer and the followup would go
+	// unread. The next turn therefore runs on a new session seeded with the
+	// whole transcript plus the followup, which also gives that turn a full
+	// step budget rather than what the previous one left over.
+	if followup != "" {
+		history := append(c.sess.Messages(),
+			llms.NewMessage(llms.RoleUser, llms.NewTextPart(followup)))
+		sess, err := c.start(ctx, history...)
+		if err != nil {
+			return "", err
+		}
+		c.sess = sess
 	}
 
 	for {

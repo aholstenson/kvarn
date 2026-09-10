@@ -127,6 +127,91 @@ var _ = Describe("conversation progress", func() {
 	})
 })
 
+// fakeSession is a session that ends its turn immediately, the way a real one
+// does once the model answers without calling a tool.
+type fakeSession struct {
+	seed  []*llms.Message
+	reply string
+	steps int
+}
+
+func (f *fakeSession) Step(context.Context) (llms.StepInfo, bool, error) {
+	f.steps++
+	return llms.StepInfo{}, true, nil
+}
+
+func (f *fakeSession) Result() (llms.Result, error) {
+	return llms.TextResult{Text: f.reply}, nil
+}
+
+func (f *fakeSession) Messages() []*llms.Message {
+	msgs := append([]*llms.Message{}, f.seed...)
+	return append(msgs, llms.NewMessage(llms.RoleAssistant, llms.NewTextPart(f.reply)))
+}
+
+var _ = Describe("conversation followup", func() {
+	var (
+		conv     *codingConversation
+		sessions []*fakeSession
+	)
+
+	BeforeEach(func() {
+		sessions = nil
+		conv = &codingConversation{
+			agentCtx: &agent.Context{},
+			start: func(_ context.Context, msgs ...*llms.Message) (agentSession, error) {
+				s := &fakeSession{seed: msgs, reply: "done"}
+				sessions = append(sessions, s)
+				return s, nil
+			},
+		}
+		first, err := conv.start(context.Background(),
+			llms.NewMessage(llms.RoleUser, llms.NewTextPart("do the work")))
+		Expect(err).NotTo(HaveOccurred())
+		conv.sess = first
+	})
+
+	text := func(m *llms.Message) string {
+		return m.Parts[0].(*llms.TextPart).Text
+	}
+
+	It("carries the followup into a turn the model actually sees", func() {
+		_, err := conv.Run(context.Background(), "")
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = conv.Run(context.Background(), "validation failed: build broke")
+		Expect(err).NotTo(HaveOccurred())
+
+		// A finished session never makes another model call, so the followup
+		// only reaches the model as the seed of the session that replaced it.
+		Expect(sessions).To(HaveLen(2))
+		seed := sessions[1].seed
+		Expect(sessions[1].steps).To(Equal(1))
+		Expect(text(seed[len(seed)-1])).To(Equal("validation failed: build broke"))
+		Expect(seed[len(seed)-1].Role).To(Equal(llms.RoleUser))
+	})
+
+	It("keeps the earlier turns so the agent iterates instead of starting over", func() {
+		_, err := conv.Run(context.Background(), "")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = conv.Run(context.Background(), "try again")
+		Expect(err).NotTo(HaveOccurred())
+
+		seed := sessions[1].seed
+		Expect(seed).To(HaveLen(3))
+		Expect(text(seed[0])).To(Equal("do the work"))
+		Expect(text(seed[1])).To(Equal("done"))
+	})
+
+	It("stays on the same session while there is no followup", func() {
+		_, err := conv.Run(context.Background(), "")
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(sessions).To(HaveLen(1))
+		Expect(sessions[0].steps).To(Equal(1))
+	})
+})
+
 var _ = Describe("retryOptions", func() {
 	It("turns an attempt budget into the retries that follow the first try", func() {
 		Expect(retryOptions(modelcfg.Entry{MaxAttempts: 4}, nil)).To(HaveLen(1))
