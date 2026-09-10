@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.8.0](https://github.com/aholstenson/kvarn/compare/v0.7.0...v0.8.0) (2026-09-10)
+
+
+### Features
+
+* Ability to link a branch's preview in posted comments ([a6e10d1](https://github.com/aholstenson/kvarn/commit/a6e10d12bc343f27bbce2721ba1a0a13c1056413))
+* Add support for hosting previews ([#13](https://github.com/aholstenson/kvarn/issues/13)) ([5c44c67](https://github.com/aholstenson/kvarn/commit/5c44c672502c63cce63fdea9a8d32d9724b6c948))
+* Allow preview environments to relax network egress rules ([94363f2](https://github.com/aholstenson/kvarn/commit/94363f287921b4b1e340f587ceaedbe8430476d3))
+* Cache Nix downloads ([3129a51](https://github.com/aholstenson/kvarn/commit/3129a51bd77e7adcf47f0aebae4ea7002c4ab130))
+* Events for when the LLM is working ([fea8498](https://github.com/aholstenson/kvarn/commit/fea8498f48411c4122587f1f77c8fa6645b8ba40))
+* Improve throughput of preview requests ([3967e61](https://github.com/aholstenson/kvarn/commit/3967e6195472f73abd5c7dfce9a6b75808347f85))
+* Resolve nixpkgs version in the orchestrator ([e13d406](https://github.com/aholstenson/kvarn/commit/e13d406e6714e9ea2f3edb2be2dd4e6308788ad2))
+* State management for previews ([037c10c](https://github.com/aholstenson/kvarn/commit/037c10c210a5ec7cf7522b9cfca840cfb25467f9))
+* Stop preview environments a background tab is only polling ([43695a0](https://github.com/aholstenson/kvarn/commit/43695a05684c463ed9a50d91c8e70271b243b984))
+* Support for merging in changes into PRs ([fe882ce](https://github.com/aholstenson/kvarn/commit/fe882cee28a418ce5b7453942d011d2dfabc10d1))
+* Use copy-on-write cloning for the VM on macOS ([a8cd31e](https://github.com/aholstenson/kvarn/commit/a8cd31eed9791e8d98728dfa8988e34e4456d338))
+
+
+### Bug Fixes
+
+* **image:** Dependency installs survive a slow or stalled download ([6179724](https://github.com/aholstenson/kvarn/commit/6179724f630b33fec13c4ad127a6f3c2b49e11ba))
+* Keep a preview alive while a WebSocket or SSE stream is connected ([28ca4d5](https://github.com/aholstenson/kvarn/commit/28ca4d53c399e20e4f1f7c7565f041a075ed5ba5))
+* Keep the sandbox alive when a command prints bytes that are not UTF-8 ([716b69e](https://github.com/aholstenson/kvarn/commit/716b69e145f7a09095a205e58cca3ae7ce19cffb))
+* Pass validation results properly to the model for processing ([1d0ecf5](https://github.com/aholstenson/kvarn/commit/1d0ecf5d3f7df335300526d246df34f44985a3a4))
+* Report a dead sandbox runner at once instead of after a timeout ([4077b1f](https://github.com/aholstenson/kvarn/commit/4077b1ff42fb0d87dbb5f8e704b75c8245e2db19))
+* Tool calls no longer expire waiting behind a long-running command ([7d5731a](https://github.com/aholstenson/kvarn/commit/7d5731aae741f924160840af23a750589405e4ba))
+
 ## [0.7.0](https://github.com/aholstenson/kvarn/compare/v0.6.0...v0.7.0) (2026-08-18)
 
 
