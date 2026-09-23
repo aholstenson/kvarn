@@ -18,6 +18,8 @@ github.com/aholstenson/llms-go v0.6.1 h1:EZWs5NQbQemVd6tF4ScyM8khgHakABj8eB9kvjW
 github.com/aholstenson/llms-go v0.6.1/go.mod h1:yLZ99VGTdC221kaCKVNS6Q4iG4GvU6KKtIjTie69H8c=
 github.com/aholstenson/llms-go v0.8.0 h1:mzW4+gapPldfZeMola/BIve1ZkvLt/Vmzvc2PRqkras=
 github.com/aholstenson/llms-go v0.8.0/go.mod h1:yLZ99VGTdC221kaCKVNS6Q4iG4GvU6KKtIjTie69H8c=
+github.com/aholstenson/llms-go v0.9.0 h1:QFBfHk1idqNP1GbLZKZKsISJ53QLfPdUaM+lULCyhh0=
+github.com/aholstenson/llms-go v0.9.0/go.mod h1:yLZ99VGTdC221kaCKVNS6Q4iG4GvU6KKtIjTie69H8c=
 github.com/alecthomas/assert/v2 v2.11.0 h1:2Q9r3ki8+JYXvGsDyBXwH3LcJ+WK5D0gc5E8vS6K3D0=
 github.com/alecthomas/assert/v2 v2.11.0/go.mod h1:Bze95FyfUr7x34QZrjL+XP+0qgp/zg8yS+TtBj1WA3k=
 github.com/alecthomas/kong v1.15.0 h1:BVJstKbpO73zKpmIu+m/aLRrNmWwxXPIGTNin9VmLVI=
