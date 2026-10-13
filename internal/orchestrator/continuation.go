@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/aholstenson/kvarn/internal/config/project"
 	"github.com/aholstenson/kvarn/internal/forge"
 	"github.com/aholstenson/kvarn/internal/session"
@@ -34,11 +34,11 @@ func (s *Service) startContinuation(
 	fr, err := s.resolveForge(ctx, proj)
 	if err != nil {
 		log.Error("failed to resolve forge", "forge", proj.Forge, "error", err)
-		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err.Error()).WithCause(err)
 	}
 	if fr.impl == nil {
-		return nil, connect.NewError(connect.CodeFailedPrecondition,
-			fmt.Errorf("project %q has no forge configured; continuing a pull request needs one to read and update it", p.project))
+		return nil, connect.Errorf(connect.CodeFailedPrecondition,
+			"project %q has no forge configured; continuing a pull request needs one to read and update it", p.project)
 	}
 
 	getOpts := forge.GetPROpts{RepoURL: fr.cloneURL, PRRef: prRef, Credentials: fr.creds}
@@ -47,11 +47,11 @@ func (s *Service) startContinuation(
 		// A ref the forge cannot interpret, or one that does not resolve to a
 		// pull request, is a bad request rather than a server fault.
 		log.Error("failed to read pull request", "error", err)
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("pull request %q: %w", prRef, err))
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("pull request %q: %w", prRef, err).Error())
 	}
 	if pr.State != "open" {
-		return nil, connect.NewError(connect.CodeFailedPrecondition,
-			fmt.Errorf("pull request %s is %s; only open pull requests can be continued", prRef, pr.State))
+		return nil, connect.Errorf(connect.CodeFailedPrecondition,
+			"pull request %s is %s; only open pull requests can be continued", prRef, pr.State)
 	}
 	// Fork pull requests are out of scope for every mode, not only the ones
 	// that push. The head branch lives in another repository, so it is not
@@ -59,8 +59,8 @@ func (s *Service) startContinuation(
 	// would fail at the clone rather than at the push. Working on one needs a
 	// refs/pull/<n>/head fetch, which the branch-shaped mirror does not do.
 	if isForkPR(pr) {
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("pull request %s comes from a fork (%s); its head branch is not in this repository", prRef, pr.HeadRepo))
+		return nil, connect.Errorf(connect.CodeInvalidArgument,
+			"pull request %s comes from a fork (%s); its head branch is not in this repository", prRef, pr.HeadRepo)
 	}
 
 	if err := s.checkBacklogDepth(ctx, proj.Name); err != nil {
@@ -106,11 +106,11 @@ func (s *Service) startContinuation(
 		activeFilter.ActiveOnly = true
 		active, err := s.sessionMgr.List(ctx, activeFilter)
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("check running sessions: %w", err))
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("check running sessions: %w", err).Error())
 		}
 		if len(active) > 0 {
-			return nil, connect.NewError(connect.CodeFailedPrecondition,
-				fmt.Errorf("session %s is already running for pull request %s", active[0].ID, pr.Ref))
+			return nil, connect.Errorf(connect.CodeFailedPrecondition,
+				"session %s is already running for pull request %s", active[0].ID, pr.Ref)
 		}
 	}
 
@@ -152,12 +152,12 @@ func (s *Service) startContinuation(
 			return nil, findErr
 		}
 		if claimed == nil {
-			return nil, connect.NewError(connect.CodeInternal, errors.New("idempotency key claimed by a session that cannot be read back"))
+			return nil, connect.NewError(connect.CodeInternal, "idempotency key claimed by a session that cannot be read back")
 		}
 		return replay(claimed)
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create session: %w", err))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create session: %w", err).Error())
 	}
 
 	// Publish the PR up front so watchers can link to it from the first event.

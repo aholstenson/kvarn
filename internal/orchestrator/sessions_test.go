@@ -2,12 +2,15 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -22,17 +25,14 @@ import (
 
 // serveOrchestrator stands up an in-process OrchestratorService over HTTP and
 // returns its base address, registering teardown.
-func serveOrchestrator(svc *orchestrator.Service, interceptors ...connect.Interceptor) string {
+func serveOrchestrator(svc *orchestrator.Service, interceptors ...connect.ServerInterceptor) string {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	Expect(err).NotTo(HaveOccurred())
 
 	mux := http.NewServeMux()
-	var opts []connect.HandlerOption
-	if len(interceptors) > 0 {
-		opts = append(opts, connect.WithInterceptors(interceptors...))
-	}
-	path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc, opts...)
-	mux.Handle(path, handler)
+	orchestratorRPC := connect.NewServer(interceptors...)
+	kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, svc)
+	connecthttp.Mount(mux, orchestratorRPC)
 	server := &http.Server{Handler: mux}
 	go server.Serve(listener)
 	DeferCleanup(server.Close)
@@ -71,47 +71,56 @@ var _ = Describe("OrchestratorService persistent sessions", func() {
 
 		It("returns full history with sequences and last_sequence via ListSessionEvents", func() {
 			oc := client.NewOrchestrator(addr, "")
-			resp, err := oc.ListSessionEvents(ctx, connect.NewRequest(&v1.ListSessionEventsRequest{
+			resp, err := oc.ListSessionEvents(ctx, &v1.ListSessionEventsRequest{
 				SessionId: sessionID,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Events).To(HaveLen(3))
-			Expect(resp.Msg.Events[0].Sequence).To(Equal(int64(1)))
-			Expect(resp.Msg.Events[2].Sequence).To(Equal(int64(3)))
-			Expect(resp.Msg.LastSequence).To(Equal(int64(3)))
+			Expect(resp.Events).To(HaveLen(3))
+			Expect(resp.Events[0].Sequence).To(Equal(int64(1)))
+			Expect(resp.Events[2].Sequence).To(Equal(int64(3)))
+			Expect(resp.LastSequence).To(Equal(int64(3)))
 			// Mapped through the shared mapper: the final event is a state change
 			// to completed.
-			sc := resp.Msg.Events[2].GetStateChange()
+			sc := resp.Events[2].GetStateChange()
 			Expect(sc).NotTo(BeNil())
 			Expect(sc.State).To(Equal("completed"))
 		})
 
 		It("honors after_sequence when polling", func() {
 			oc := client.NewOrchestrator(addr, "")
-			resp, err := oc.ListSessionEvents(ctx, connect.NewRequest(&v1.ListSessionEventsRequest{
+			resp, err := oc.ListSessionEvents(ctx, &v1.ListSessionEventsRequest{
 				SessionId:     sessionID,
 				AfterSequence: 2,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Events).To(HaveLen(1))
-			Expect(resp.Msg.Events[0].Sequence).To(Equal(int64(3)))
-			Expect(resp.Msg.LastSequence).To(Equal(int64(3)))
+			Expect(resp.Events).To(HaveLen(1))
+			Expect(resp.Events[0].Sequence).To(Equal(int64(3)))
+			Expect(resp.LastSequence).To(Equal(int64(3)))
 		})
 
 		It("resumes from from_sequence on WatchSession", func() {
 			oc := client.NewOrchestrator(addr, "")
-			stream, err := oc.WatchSession(ctx, connect.NewRequest(&v1.WatchSessionRequest{
+			stream, err := oc.WatchSession(ctx, &v1.WatchSessionRequest{
 				SessionId:    sessionID,
 				FromSequence: 2,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 			defer stream.Close()
 
 			var seqs []int64
-			for stream.Receive() {
-				seqs = append(seqs, stream.Msg().Sequence)
+			var streamErr error
+			for {
+				msg, err := stream.Receive()
+				if err != nil {
+					streamErr = err
+					break
+				}
+				seqs = append(seqs, msg.Sequence)
 			}
-			Expect(stream.Err()).NotTo(HaveOccurred())
+			if errors.Is(streamErr, io.EOF) {
+				streamErr = nil
+			}
+			Expect(streamErr).NotTo(HaveOccurred())
 			Expect(seqs).To(Equal([]int64{3}))
 		})
 	})
@@ -150,18 +159,18 @@ var _ = Describe("OrchestratorService persistent sessions", func() {
 				AuthEnabled: false,
 			}))
 			resp, err := client.NewOrchestrator(addr, "").ListSessionEvents(ctx,
-				connect.NewRequest(&v1.ListSessionEventsRequest{SessionId: sess.ID}))
+				&v1.ListSessionEventsRequest{SessionId: sess.ID})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Events).To(HaveLen(3))
+			Expect(resp.Events).To(HaveLen(3))
 
-			started := resp.Msg.Events[0].GetAgentTurn()
+			started := resp.Events[0].GetAgentTurn()
 			Expect(started).NotTo(BeNil())
 			Expect(started.Phase).To(Equal(v1.AgentTurnPhase_AGENT_TURN_PHASE_STARTED))
 			Expect(started.Step).To(Equal(int32(4)))
 			Expect(started.Model).To(Equal("anthropic/claude-sonnet-4-6"))
-			Expect(resp.Msg.Events[0].Timestamp).NotTo(BeNil())
+			Expect(resp.Events[0].Timestamp).NotTo(BeNil())
 
-			retry := resp.Msg.Events[1].GetAgentRetry()
+			retry := resp.Events[1].GetAgentRetry()
 			Expect(retry).NotTo(BeNil())
 			Expect(retry.Attempt).To(Equal(int32(1)))
 			Expect(retry.MaxAttempts).To(Equal(int32(10)))
@@ -169,7 +178,7 @@ var _ = Describe("OrchestratorService persistent sessions", func() {
 			Expect(retry.StatusCode).To(Equal(int32(529)))
 			Expect(retry.Provider).To(Equal("anthropic"))
 
-			ended := resp.Msg.Events[2].GetAgentTurn()
+			ended := resp.Events[2].GetAgentTurn()
 			Expect(ended).NotTo(BeNil())
 			Expect(ended.Phase).To(Equal(v1.AgentTurnPhase_AGENT_TURN_PHASE_ENDED))
 			Expect(ended.Final).To(BeTrue())
@@ -192,31 +201,33 @@ var _ = Describe("OrchestratorService persistent sessions", func() {
 			oc := client.NewOrchestrator(addr, "")
 			watchCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			stream, err := oc.WatchSession(watchCtx, connect.NewRequest(&v1.WatchSessionRequest{SessionId: sess.ID}))
+			stream, err := oc.WatchSession(watchCtx, &v1.WatchSessionRequest{SessionId: sess.ID})
 			Expect(err).NotTo(HaveOccurred())
 			defer stream.Close()
 
-			Expect(stream.Receive()).To(BeTrue())
-			Expect(stream.Msg().GetStateChange()).NotTo(BeNil())
+			replayed, err := stream.Receive()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(replayed.GetStateChange()).NotTo(BeNil())
 
 			Expect(mgr.EmitEvent(ctx, sess.ID, session.AgentTurnEvent{
 				SessionID: sess.ID, Phase: session.AgentTurnResponding, Step: 1,
 			})).To(Succeed())
 
-			Expect(stream.Receive()).To(BeTrue())
-			live := stream.Msg().GetAgentTurn()
+			event, err := stream.Receive()
+			Expect(err).NotTo(HaveOccurred())
+			live := event.GetAgentTurn()
 			Expect(live).NotTo(BeNil())
 			Expect(live.Phase).To(Equal(v1.AgentTurnPhase_AGENT_TURN_PHASE_RESPONDING))
-			Expect(stream.Msg().Sequence).To(BeZero())
-			Expect(stream.Msg().Timestamp).NotTo(BeNil())
+			Expect(event.Sequence).To(BeZero())
+			Expect(event.Timestamp).NotTo(BeNil())
 
 			// History holds the state change and nothing else: the live-only
 			// phase was never recorded.
 			resp, err := oc.ListSessionEvents(ctx,
-				connect.NewRequest(&v1.ListSessionEventsRequest{SessionId: sess.ID}))
+				&v1.ListSessionEventsRequest{SessionId: sess.ID})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Events).To(HaveLen(1))
-			Expect(resp.Msg.Events[0].GetStateChange()).NotTo(BeNil())
+			Expect(resp.Events).To(HaveLen(1))
+			Expect(resp.Events[0].GetStateChange()).NotTo(BeNil())
 		})
 	})
 
@@ -259,19 +270,19 @@ var _ = Describe("OrchestratorService persistent sessions", func() {
 			oc := client.NewOrchestrator(addr, scopedToken)
 
 			// Page 1: newest two allowed rows (a3, a2), not under-filled to one.
-			page1, err := oc.ListSessions(ctx, connect.NewRequest(&v1.ListSessionsRequest{Limit: 2}))
+			page1, err := oc.ListSessions(ctx, &v1.ListSessionsRequest{Limit: 2})
 			Expect(err).NotTo(HaveOccurred())
-			ids1 := projectIDs(page1.Msg.Sessions)
+			ids1 := projectIDs(page1.Sessions)
 			Expect(ids1).To(Equal([]string{"a3", "a2"}))
-			Expect(page1.Msg.NextPageCursor).NotTo(BeEmpty())
+			Expect(page1.NextPageCursor).NotTo(BeEmpty())
 
 			// Page 2: the remaining allowed row (a1).
-			page2, err := oc.ListSessions(ctx, connect.NewRequest(&v1.ListSessionsRequest{
+			page2, err := oc.ListSessions(ctx, &v1.ListSessionsRequest{
 				Limit:      2,
-				PageCursor: page1.Msg.NextPageCursor,
-			}))
+				PageCursor: page1.NextPageCursor,
+			})
 			Expect(err).NotTo(HaveOccurred())
-			ids2 := projectIDs(page2.Msg.Sessions)
+			ids2 := projectIDs(page2.Sessions)
 			Expect(ids2).To(Equal([]string{"a1"}))
 		})
 	})

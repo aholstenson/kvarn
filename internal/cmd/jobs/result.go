@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 )
 
@@ -23,25 +22,25 @@ func (c *ResultCmd) Run() error {
 	ctx := context.Background()
 	oc := c.client()
 
-	resp, err := oc.GetSessionResult(ctx, connect.NewRequest(&v1.GetSessionResultRequest{
+	resp, err := oc.GetSessionResult(ctx, &v1.GetSessionResultRequest{
 		SessionId: c.SessionID,
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("get job result: %w", err)
 	}
 
 	if c.JSON {
-		return PrintJSON(resp.Msg)
+		return PrintJSON(resp)
 	}
 
 	// An empty result is not an empty answer — it is a run that has not
 	// produced one yet, or one that failed before it could — so say which,
 	// on stderr, leaving stdout clean for the text itself.
-	if resp.Msg.Result == "" {
-		fmt.Fprintf(os.Stderr, "Job %s is %s and has produced no result.\n", resp.Msg.SessionId, resp.Msg.State)
+	if resp.Result == "" {
+		fmt.Fprintf(os.Stderr, "Job %s is %s and has produced no result.\n", resp.SessionId, resp.State)
 		return nil
 	}
 
-	fmt.Fprintln(os.Stdout, resp.Msg.Result)
+	fmt.Fprintln(os.Stdout, resp.Result)
 	return nil
 }

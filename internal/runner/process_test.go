@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/runner"
 	. "github.com/onsi/ginkgo/v2"
@@ -90,7 +90,7 @@ var _ = Describe("Long-lived processes", func() {
 			Command:   command,
 		}, rec.onOutput, rec.onExit)
 		Expect(err).NotTo(HaveOccurred())
-		return resp.Msg
+		return resp
 	}
 
 	It("streams output from a process that keeps running", func() {
@@ -147,12 +147,12 @@ var _ = Describe("Long-lived processes", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(pidAlive(childPid)).To(BeTrue())
 
-		stopResp, err := h.StopProcess(ctx, connect.NewRequest(&v1.StopProcessRequest{
+		stopResp, err := h.StopProcess(ctx, &v1.StopProcessRequest{
 			ProcessId:    "p-group",
 			GraceSeconds: 2,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(stopResp.Msg.ExitCode).NotTo(Equal(int32(0)))
+		Expect(stopResp.ExitCode).NotTo(Equal(int32(0)))
 
 		Expect(pidAlive(int(resp.Pid))).To(BeFalse())
 		Eventually(func() bool { return pidAlive(childPid) }).Should(BeFalse())
@@ -168,11 +168,11 @@ var _ = Describe("Long-lived processes", func() {
 
 		Eventually(func() bool { exited, _ := gone.Exit(); return exited }).Should(BeTrue())
 
-		resp, err := h.ListProcesses(ctx, connect.NewRequest(&v1.ListProcessesRequest{}))
+		resp, err := h.ListProcesses(ctx, &v1.ListProcessesRequest{})
 		Expect(err).NotTo(HaveOccurred())
 
 		byID := map[string]*v1.ProcessInfo{}
-		for _, p := range resp.Msg.Processes {
+		for _, p := range resp.Processes {
 			byID[p.ProcessId] = p
 		}
 		Expect(byID).To(HaveKey("p-running"))
@@ -219,7 +219,7 @@ var _ = Describe("Long-lived processes", func() {
 	})
 
 	It("reports not-found when stopping an unknown process", func() {
-		_, err := h.StopProcess(ctx, connect.NewRequest(&v1.StopProcessRequest{ProcessId: "nope"}))
+		_, err := h.StopProcess(ctx, &v1.StopProcessRequest{ProcessId: "nope"})
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeNotFound))
 	})
 

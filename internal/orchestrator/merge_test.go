@@ -11,7 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	llms "github.com/aholstenson/llms-go"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -285,16 +286,18 @@ var _ = Describe("Merging the base branch into a pull request", func() {
 		})
 
 		mux := http.NewServeMux()
-		path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc)
-		mux.Handle(path, handler)
-		bridgePath, bridgeHandler := kvarnv1connect.NewBridgeServiceHandler(svc.BridgeHandler())
-		mux.Handle(bridgePath, bridgeHandler)
+		orchestratorRPC := connect.NewServer()
+		kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, svc)
+		connecthttp.Mount(mux, orchestratorRPC)
+		bridgeRPC := connect.NewServer()
+		kvarnv1connect.RegisterBridgeServiceHandler(bridgeRPC, svc.BridgeHandler())
+		connecthttp.Mount(mux, bridgeRPC)
 
 		server = &http.Server{Handler: mux}
 		go server.Serve(listener)
 
-		client = kvarnv1connect.NewOrchestratorServiceClient(
-			http.DefaultClient, fmt.Sprintf("http://%s", listener.Addr().String()))
+		client = kvarnv1connect.NewOrchestratorServiceClient(connect.NewClient(connecthttp.NewTransport(
+			http.DefaultClient, fmt.Sprintf("http://%s", listener.Addr().String()), connecthttp.WithReadMaxBytes(0))))
 	})
 
 	AfterEach(func() {
@@ -304,14 +307,14 @@ var _ = Describe("Merging the base branch into a pull request", func() {
 
 	submit := func(mode string) string {
 		GinkgoHelper()
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project:   "test-project",
 			Prompt:    "merge the base branch and fix the conflicts",
 			Mode:      mode,
 			StartFrom: &v1.StartJobRequest_PrRef{PrRef: "7"},
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		return resp.Msg.SessionId
+		return resp.SessionId
 	}
 
 	// A run here does real git work — a clone, a fetch, a merge, a push — so it

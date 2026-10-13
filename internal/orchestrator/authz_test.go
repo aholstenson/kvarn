@@ -7,7 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/cmd/client"
@@ -109,9 +110,9 @@ var _ = Describe("OrchestratorService authorization", func() {
 		addr = fmt.Sprintf("http://%s", listener.Addr().String())
 
 		mux := http.NewServeMux()
-		path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc,
-			connect.WithInterceptors(auth.NewInterceptor(apiKeyStore)))
-		mux.Handle(path, handler)
+		orchestratorRPC := connect.NewServer(auth.NewInterceptor(apiKeyStore))
+		kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, svc)
+		connecthttp.Mount(mux, orchestratorRPC)
 
 		server = &http.Server{Handler: mux}
 		go server.Serve(listener)
@@ -124,45 +125,45 @@ var _ = Describe("OrchestratorService authorization", func() {
 	Describe("StartJob", func() {
 		It("rejects requests without a token", func() {
 			oc := client.NewOrchestrator(addr, "")
-			_, err := oc.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			_, err := oc.StartJob(context.Background(), &v1.StartJobRequest{
 				Project: "allowed-project", Prompt: "do",
-			}))
+			})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 		})
 
 		It("denies a project outside the key's scope", func() {
 			oc := client.NewOrchestrator(addr, scopedToken)
-			_, err := oc.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			_, err := oc.StartJob(context.Background(), &v1.StartJobRequest{
 				Project: "other-project", Prompt: "do",
-			}))
+			})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
 		})
 
 		It("allows an in-scope project", func() {
 			oc := client.NewOrchestrator(addr, scopedToken)
-			resp, err := oc.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := oc.StartJob(context.Background(), &v1.StartJobRequest{
 				Project: "allowed-project", Prompt: "do",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.SessionId).NotTo(BeEmpty())
+			Expect(resp.SessionId).NotTo(BeEmpty())
 		})
 	})
 
 	Describe("GetSession", func() {
 		It("allows an in-scope session", func() {
 			oc := client.NewOrchestrator(addr, scopedToken)
-			resp, err := oc.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
+			resp, err := oc.GetSession(context.Background(), &v1.GetSessionRequest{
 				SessionId: allowedSession,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Project).To(Equal("allowed-project"))
+			Expect(resp.Project).To(Equal("allowed-project"))
 		})
 
 		It("denies a session outside the key's scope", func() {
 			oc := client.NewOrchestrator(addr, scopedToken)
-			_, err := oc.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
+			_, err := oc.GetSession(context.Background(), &v1.GetSessionRequest{
 				SessionId: otherSession,
-			}))
+			})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
 		})
 	})
@@ -170,9 +171,9 @@ var _ = Describe("OrchestratorService authorization", func() {
 	Describe("CancelJob", func() {
 		It("denies a session outside the key's scope", func() {
 			oc := client.NewOrchestrator(addr, scopedToken)
-			_, err := oc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
+			_, err := oc.CancelJob(context.Background(), &v1.CancelJobRequest{
 				SessionId: otherSession,
-			}))
+			})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
 		})
 
@@ -181,9 +182,9 @@ var _ = Describe("OrchestratorService authorization", func() {
 			// the row and succeeds. Reaching the session at all is what this
 			// asserts; the scope check is the test above.
 			oc := client.NewOrchestrator(addr, scopedToken)
-			_, err := oc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
+			_, err := oc.CancelJob(context.Background(), &v1.CancelJobRequest{
 				SessionId: allowedSession,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 		})
 	})
@@ -191,30 +192,30 @@ var _ = Describe("OrchestratorService authorization", func() {
 	Describe("WatchSession", func() {
 		It("denies a session outside the key's scope", func() {
 			oc := client.NewOrchestrator(addr, scopedToken)
-			stream, err := oc.WatchSession(context.Background(), connect.NewRequest(&v1.WatchSessionRequest{
+			stream, err := oc.WatchSession(context.Background(), &v1.WatchSessionRequest{
 				SessionId: otherSession,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 			defer stream.Close()
-			Expect(stream.Receive()).To(BeFalse())
-			Expect(connect.CodeOf(stream.Err())).To(Equal(connect.CodePermissionDenied))
+			_, err = stream.Receive()
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
 		})
 	})
 
 	Describe("ListSessions", func() {
 		It("returns only the sessions the scoped key may access", func() {
 			oc := client.NewOrchestrator(addr, scopedToken)
-			resp, err := oc.ListSessions(context.Background(), connect.NewRequest(&v1.ListSessionsRequest{}))
+			resp, err := oc.ListSessions(context.Background(), &v1.ListSessionsRequest{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Sessions).To(HaveLen(1))
-			Expect(resp.Msg.Sessions[0].Project).To(Equal("allowed-project"))
+			Expect(resp.Sessions).To(HaveLen(1))
+			Expect(resp.Sessions[0].Project).To(Equal("allowed-project"))
 		})
 
 		It("returns all sessions for a wildcard key", func() {
 			oc := client.NewOrchestrator(addr, wildcardToken)
-			resp, err := oc.ListSessions(context.Background(), connect.NewRequest(&v1.ListSessionsRequest{}))
+			resp, err := oc.ListSessions(context.Background(), &v1.ListSessionsRequest{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Sessions).To(HaveLen(2))
+			Expect(resp.Sessions).To(HaveLen(2))
 		})
 	})
 })
@@ -244,8 +245,9 @@ var _ = Describe("OrchestratorService with auth disabled", func() {
 		addr = fmt.Sprintf("http://%s", listener.Addr().String())
 
 		mux := http.NewServeMux()
-		path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc)
-		mux.Handle(path, handler)
+		orchestratorRPC := connect.NewServer()
+		kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, svc)
+		connecthttp.Mount(mux, orchestratorRPC)
 		server = &http.Server{Handler: mux}
 		go server.Serve(listener)
 	})
@@ -256,8 +258,8 @@ var _ = Describe("OrchestratorService with auth disabled", func() {
 
 	It("returns every session without a token", func() {
 		oc := client.NewOrchestrator(addr, "")
-		resp, err := oc.ListSessions(context.Background(), connect.NewRequest(&v1.ListSessionsRequest{}))
+		resp, err := oc.ListSessions(context.Background(), &v1.ListSessionsRequest{})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.Sessions).To(HaveLen(2))
+		Expect(resp.Sessions).To(HaveLen(2))
 	})
 })

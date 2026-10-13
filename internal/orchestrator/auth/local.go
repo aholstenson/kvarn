@@ -2,11 +2,10 @@ package auth
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/aholstenson/kvarn/internal/config/apikey"
 )
 
@@ -44,13 +43,14 @@ func WithLocalMetrics(m AuthMetrics) LocalOption {
 	return func(i *LocalInterceptor) { i.metrics = m }
 }
 
-// NewLocalInterceptor returns an interceptor for the host-local listener.
-func NewLocalInterceptor(opts ...LocalOption) *LocalInterceptor {
+// NewLocalInterceptor returns a server interceptor for the host-local
+// listener. It authenticates unary and streaming calls alike.
+func NewLocalInterceptor(opts ...LocalOption) connect.ServerInterceptor {
 	i := &LocalInterceptor{}
 	for _, opt := range opts {
 		opt(i)
 	}
-	return i
+	return i.wrap
 }
 
 // reasonNotLocal is the audit category for a request that reached the local
@@ -62,7 +62,7 @@ const reasonNotLocal = "not_local"
 // caller getting a credential wrong, only by the local mux being served
 // somewhere it must not be, so the message should say so.
 var errNotLocal = connect.NewError(connect.CodeUnauthenticated,
-	errors.New("host-local control is only available over the local socket"))
+	"host-local control is only available over the local socket")
 
 // identify builds the identity for a request served on conn. A connection that
 // is not a unix socket is refused. That is a structural guard rather than a
@@ -108,35 +108,19 @@ func (i *LocalInterceptor) record(ctx context.Context, id *Identity, procedure, 
 	}
 }
 
-// WrapUnary authenticates unary handler calls.
-func (i *LocalInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		if req.Spec().IsClient {
-			return next(ctx, req)
+// wrap authenticates every handler call before it reaches next.
+func (i *LocalInterceptor) wrap(next connect.ServerFunc) connect.ServerFunc {
+	return func(ctx context.Context, spec connect.Spec, stream connect.ServerStream) error {
+		var remote string
+		if info, ok := connect.CallInfoForServerContext(ctx); ok {
+			remote = info.PeerAddr
 		}
 		id, err := i.identify(ctx)
-		i.record(ctx, id, req.Spec().Procedure, req.Peer().Addr, err)
-		if err != nil {
-			return nil, err
-		}
-		return next(WithIdentity(ctx, id), req)
-	}
-}
-
-// WrapStreamingClient is a pass-through; this interceptor is server-side only.
-func (i *LocalInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	return next
-}
-
-// WrapStreamingHandler authenticates server-streaming handler calls.
-func (i *LocalInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
-		id, err := i.identify(ctx)
-		i.record(ctx, id, conn.Spec().Procedure, conn.Peer().Addr, err)
+		i.record(ctx, id, spec.Procedure, remote, err)
 		if err != nil {
 			return err
 		}
-		return next(WithIdentity(ctx, id), conn)
+		return next(WithIdentity(ctx, id), spec, stream)
 	}
 }
 

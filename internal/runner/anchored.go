@@ -10,7 +10,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connectproto"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 )
 
@@ -112,10 +113,10 @@ func (e *AnchoredError) toConnectError() error {
 	default:
 		code = connect.CodeInvalidArgument
 	}
-	cerr := connect.NewError(code, e)
+	cerr := connect.NewError(code, e.Error()).WithCause(e)
 	if e.Snapshot != nil {
-		if d, derr := connect.NewErrorDetail(e.Snapshot); derr == nil {
-			cerr.AddDetail(d)
+		if d, derr := connectproto.NewErrorDetail(e.Snapshot); derr == nil {
+			cerr = cerr.WithDetail(d)
 		}
 	}
 	return cerr

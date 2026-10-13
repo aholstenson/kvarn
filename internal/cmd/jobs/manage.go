@@ -7,7 +7,6 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/cmd/client"
 )
@@ -42,20 +41,20 @@ func (c *CancelCmd) Run() error {
 		if c.DryRun {
 			return errors.New("--dry-run applies to a filtered cancel, not to a single session")
 		}
-		resp, err := oc.CancelJob(ctx, connect.NewRequest(&v1.CancelJobRequest{
+		resp, err := oc.CancelJob(ctx, &v1.CancelJobRequest{
 			SessionId: c.SessionID,
 			Reason:    c.Reason,
-		}))
+		})
 		if err != nil {
 			return fmt.Errorf("cancel job: %w", err)
 		}
 		// The orchestrator returns once the stop is signalled; the run still has
 		// to unwind and tear its VM down before the session reaches `cancelled`.
-		fmt.Fprintf(os.Stdout, "Cancelling %s (was %s)\n", c.SessionID, resp.Msg.PreviousState)
+		fmt.Fprintf(os.Stdout, "Cancelling %s (was %s)\n", c.SessionID, resp.PreviousState)
 		return nil
 	}
 
-	resp, err := oc.CancelJobs(ctx, connect.NewRequest(&v1.CancelJobsRequest{
+	resp, err := oc.CancelJobs(ctx, &v1.CancelJobsRequest{
 		Project: c.Project,
 		States:  c.State,
 		Mode:    c.Mode,
@@ -64,16 +63,16 @@ func (c *CancelCmd) Run() error {
 		DryRun:  c.DryRun,
 		All:     c.All,
 		Limit:   int32(c.Limit),
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("cancel jobs: %w", err)
 	}
 
 	if c.JSON {
-		return PrintJSON(resp.Msg)
+		return PrintJSON(resp)
 	}
 
-	jobs := resp.Msg.Jobs
+	jobs := resp.Jobs
 	if len(jobs) == 0 {
 		fmt.Fprintln(os.Stdout, "No matching jobs")
 		return nil
@@ -117,15 +116,15 @@ func (c *RetryCmd) Run() error {
 	ctx := context.Background()
 	oc := c.client()
 
-	resp, err := oc.RetryJob(ctx, connect.NewRequest(&v1.RetryJobRequest{
+	resp, err := oc.RetryJob(ctx, &v1.RetryJobRequest{
 		SessionId: c.SessionID,
 		Prompt:    c.Prompt,
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("retry job: %w", err)
 	}
 
-	sessionID := resp.Msg.SessionId
+	sessionID := resp.SessionId
 	fmt.Fprintf(os.Stdout, "Session: %s\n", sessionID)
 
 	if !c.Watch {
@@ -144,15 +143,15 @@ type PriorityCmd struct {
 
 func (c *PriorityCmd) Run() error {
 	resp, err := c.client().SetJobPriority(context.Background(),
-		connect.NewRequest(&v1.SetJobPriorityRequest{
+		&v1.SetJobPriorityRequest{
 			SessionId: c.SessionID,
 			Priority:  int32(c.Priority),
-		}))
+		})
 	if err != nil {
 		return fmt.Errorf("set priority: %w", err)
 	}
 
 	fmt.Fprintf(os.Stdout, "Priority of %s: %d -> %d\n",
-		c.SessionID, resp.Msg.PreviousPriority, c.Priority)
+		c.SessionID, resp.PreviousPriority, c.Priority)
 	return nil
 }

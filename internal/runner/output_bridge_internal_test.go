@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/dispatch"
@@ -44,8 +46,9 @@ var _ = Describe("output that is not UTF-8", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		mux := http.NewServeMux()
-		path, h := kvarnv1connect.NewBridgeServiceHandler(dispatch.NewHandler(registry))
-		mux.Handle(path, h)
+		bridgeRPC := connect.NewServer()
+		kvarnv1connect.RegisterBridgeServiceHandler(bridgeRPC, dispatch.NewHandler(registry))
+		connecthttp.Mount(mux, bridgeRPC)
 		bridge = &http.Server{Handler: h2c.NewHandler(mux, &http2.Server{})}
 		go bridge.Serve(listener)
 

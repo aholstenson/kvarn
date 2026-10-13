@@ -18,8 +18,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/agent"
 	"github.com/aholstenson/kvarn/internal/agent/coding"
 	"github.com/aholstenson/kvarn/internal/agent/cost"
@@ -673,7 +674,7 @@ func (s *Service) checkBacklogDepth(ctx context.Context, project string) error {
 		return nil
 	}
 	s.instruments.RecordAdmissionDenied(ctx, project, "backlog_full")
-	return connect.NewError(connect.CodeResourceExhausted, errBacklogFull)
+	return connect.NewError(connect.CodeResourceExhausted, errBacklogFull.Error()).WithCause(errBacklogFull)
 }
 
 // callerKeyID returns the API key behind ctx, or "" when auth is disabled and
@@ -696,7 +697,7 @@ func (s *Service) authorizeProject(ctx context.Context, project, procedure strin
 	}
 	id, ok := auth.IdentityFrom(ctx)
 	if !ok {
-		return connect.NewError(connect.CodeUnauthenticated, errors.New("missing identity"))
+		return connect.NewError(connect.CodeUnauthenticated, "missing identity")
 	}
 	if !id.AllowsProject(project) {
 		slog.LogAttrs(ctx, slog.LevelWarn, "api_key_authz_denied",
@@ -706,8 +707,8 @@ func (s *Service) authorizeProject(ctx context.Context, project, procedure strin
 			slog.String("project", project),
 			slog.String("method", procedure),
 		)
-		return connect.NewError(connect.CodePermissionDenied,
-			fmt.Errorf("key %q not allowed for project %q", id.KeyName, project))
+		return connect.Errorf(connect.CodePermissionDenied,
+			"key %q not allowed for project %q", id.KeyName, project)
 	}
 	return nil
 }
@@ -738,7 +739,7 @@ func (s *Service) authorizeHost(ctx context.Context, procedure string) error {
 	}
 	id, ok := auth.IdentityFrom(ctx)
 	if !ok {
-		return connect.NewError(connect.CodeUnauthenticated, errors.New("missing identity"))
+		return connect.NewError(connect.CodeUnauthenticated, "missing identity")
 	}
 	if !id.Allows(apikey.CapabilityHost) {
 		slog.LogAttrs(ctx, slog.LevelWarn, "capability_denied",
@@ -750,9 +751,9 @@ func (s *Service) authorizeHost(ctx context.Context, procedure string) error {
 			slog.String("capability", string(apikey.CapabilityHost)),
 			slog.String("method", procedure),
 		)
-		return connect.NewError(connect.CodePermissionDenied,
-			fmt.Errorf("%q lacks the %q capability, which this request needs because it acts on the orchestrator rather than on a project",
-				id.KeyName, apikey.CapabilityHost))
+		return connect.Errorf(connect.CodePermissionDenied,
+			"%q lacks the %q capability, which this request needs because it acts on the orchestrator rather than on a project",
+			id.KeyName, apikey.CapabilityHost)
 	}
 	return nil
 }
@@ -818,15 +819,15 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 	}
 
 	if s.projectStore == nil || s.sessionMgr == nil {
-		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("project-aware jobs not configured"))
+		return nil, connect.NewError(connect.CodeUnimplemented, "project-aware jobs not configured")
 	}
 
 	if strings.TrimSpace(p.prompt) == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("prompt is required"))
+		return nil, connect.NewError(connect.CodeInvalidArgument, "prompt is required")
 	}
 	if len(p.idempotencyKey) > maxIdempotencyKeyLen {
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("idempotency key is %d bytes; the limit is %d", len(p.idempotencyKey), maxIdempotencyKeyLen))
+		return nil, connect.Errorf(connect.CodeInvalidArgument,
+			"idempotency key is %d bytes; the limit is %d", len(p.idempotencyKey), maxIdempotencyKeyLen)
 	}
 	if err := validateMetadata(p.metadata); err != nil {
 		return nil, invalidArgument(err)
@@ -846,7 +847,7 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 
 	specJSON, err := choice.specJSON()
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		return nil, connect.NewError(connect.CodeInvalidArgument, err.Error()).WithCause(err)
 	}
 
 	log := reqid.LoggerFrom(ctx).With("project", p.project, "mode", choice.name)
@@ -882,7 +883,7 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 	proj, err := s.projectStore.Get(ctx, p.project)
 	if err != nil {
 		log.Error("project not found", "error", err)
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("project %q: %w", p.project, err))
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("project %q: %w", p.project, err).Error())
 	}
 
 	log.Info("resolved project", "repo", proj.RepoURL, "forge", proj.Forge)
@@ -959,12 +960,12 @@ func (s *Service) startFresh(
 			return nil, findErr
 		}
 		if claimed == nil {
-			return nil, connect.NewError(connect.CodeInternal, errors.New("idempotency key claimed by a session that cannot be read back"))
+			return nil, connect.NewError(connect.CodeInternal, "idempotency key claimed by a session that cannot be read back")
 		}
 		return replay(claimed)
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create session: %w", err))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create session: %w", err).Error())
 	}
 
 	log.Info("job queued", "session_id", sess.ID, "branch", branch)
@@ -979,7 +980,7 @@ func (s *Service) startFresh(
 func (s *Service) findClaimedSession(ctx context.Context, project, key string) (*session.Session, error) {
 	claimed, err := s.sessionMgr.FindByIdempotencyKey(ctx, project, key)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("look up idempotency key: %w", err))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("look up idempotency key: %w", err).Error())
 	}
 	return claimed, nil
 }
@@ -1008,13 +1009,11 @@ func sameSubmission(claimed *session.Session, prompt, mode, modeSpecJSON, startF
 		claimed.ModeSpecJSON == modeSpecJSON && claimedStartFrom == startFrom {
 		return nil
 	}
-	return connect.NewError(connect.CodeAlreadyExists,
-		fmt.Errorf("idempotency key already used by session %s for a different submission", claimed.ID))
+	return connect.Errorf(connect.CodeAlreadyExists,
+		"idempotency key already used by session %s for a different submission", claimed.ID)
 }
 
-func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJobRequest]) (*connect.Response[v1.StartJobResponse], error) {
-	msg := req.Msg
-
+func (s *Service) StartJob(ctx context.Context, msg *v1.StartJobRequest) (*v1.StartJobResponse, error) {
 	p := startJobParams{
 		project:        msg.Project,
 		prompt:         msg.Prompt,
@@ -1022,7 +1021,7 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 		modeSpec:       modeSpecFromProto(msg.GetModeSpec()),
 		idempotencyKey: msg.IdempotencyKey,
 		metadata:       msg.GetMetadata(),
-		procedure:      req.Spec().Procedure,
+		procedure:      kvarnv1connect.OrchestratorServiceStartJobProcedure,
 	}
 	// An unset start_from is the project's default branch. A set-but-empty one
 	// is refused rather than folded into that default: a caller that meant to
@@ -1036,7 +1035,7 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 		p.prRef = strings.TrimSpace(from.PrRef)
 		if p.prRef == "" {
 			return nil, connect.NewError(connect.CodeInvalidArgument,
-				errors.New("pr_ref is empty; omit start_from to run from the project's default branch"))
+				"pr_ref is empty; omit start_from to run from the project's default branch")
 		}
 	}
 
@@ -1045,10 +1044,10 @@ func (s *Service) StartJob(ctx context.Context, req *connect.Request[v1.StartJob
 		return nil, err
 	}
 
-	return connect.NewResponse(&v1.StartJobResponse{
+	return &v1.StartJobResponse{
 		SessionId: res.session.ID,
 		Duplicate: res.duplicate,
-	}), nil
+	}, nil
 }
 
 // prTarget identifies the pull request a continuation run pushes back to.
@@ -2315,46 +2314,46 @@ func (s *Service) makeEventAdapter(ctx context.Context, sessionID string) func(s
 	}
 }
 
-func (s *Service) GetSession(ctx context.Context, req *connect.Request[v1.GetSessionRequest]) (*connect.Response[v1.GetSessionResponse], error) {
+func (s *Service) GetSession(ctx context.Context, req *v1.GetSessionRequest) (*v1.GetSessionResponse, error) {
 	if s.sessionMgr == nil {
-		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+		return nil, connect.NewError(connect.CodeUnimplemented, "sessions not configured")
 	}
 
-	sess, err := s.sessionMgr.Get(ctx, req.Msg.SessionId)
+	sess, err := s.sessionMgr.Get(ctx, req.SessionId)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, err)
+		return nil, connect.NewError(connect.CodeNotFound, err.Error()).WithCause(err)
 	}
 
-	if err := s.authorizeProject(ctx, sess.ProjectName, req.Spec().Procedure); err != nil {
+	if err := s.authorizeProject(ctx, sess.ProjectName, kvarnv1connect.OrchestratorServiceGetSessionProcedure); err != nil {
 		return nil, err
 	}
 
-	return connect.NewResponse(sessionToProto(sess)), nil
+	return sessionToProto(sess), nil
 }
 
 // GetSessionResult returns what a run produced in writing. It is how a mode
 // that delivers nowhere is read: the answer a research run wrote, or the review
 // a read-only audit produced, without replaying the whole event log to find the
 // final assistant message.
-func (s *Service) GetSessionResult(ctx context.Context, req *connect.Request[v1.GetSessionResultRequest]) (*connect.Response[v1.GetSessionResultResponse], error) {
+func (s *Service) GetSessionResult(ctx context.Context, req *v1.GetSessionResultRequest) (*v1.GetSessionResultResponse, error) {
 	if s.sessionMgr == nil {
-		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+		return nil, connect.NewError(connect.CodeUnimplemented, "sessions not configured")
 	}
 
-	sess, err := s.sessionMgr.Get(ctx, req.Msg.SessionId)
+	sess, err := s.sessionMgr.Get(ctx, req.SessionId)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, err)
+		return nil, connect.NewError(connect.CodeNotFound, err.Error()).WithCause(err)
 	}
 
-	if err := s.authorizeProject(ctx, sess.ProjectName, req.Spec().Procedure); err != nil {
+	if err := s.authorizeProject(ctx, sess.ProjectName, kvarnv1connect.OrchestratorServiceGetSessionResultProcedure); err != nil {
 		return nil, err
 	}
 
-	return connect.NewResponse(&v1.GetSessionResultResponse{
+	return &v1.GetSessionResultResponse{
 		SessionId: sess.ID,
 		State:     string(sess.State),
 		Result:    sess.Result,
-	}), nil
+	}, nil
 }
 
 // sessionToProto renders a session as the wire message shared by GetSession
@@ -2408,12 +2407,12 @@ const (
 	maxSessionsLimit     = 500
 )
 
-func (s *Service) ListSessions(ctx context.Context, req *connect.Request[v1.ListSessionsRequest]) (*connect.Response[v1.ListSessionsResponse], error) {
+func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest) (*v1.ListSessionsResponse, error) {
 	if s.sessionMgr == nil {
-		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+		return nil, connect.NewError(connect.CodeUnimplemented, "sessions not configured")
 	}
 
-	limit := int(req.Msg.Limit)
+	limit := int(req.Limit)
 	if limit <= 0 {
 		limit = defaultSessionsLimit
 	}
@@ -2421,18 +2420,18 @@ func (s *Service) ListSessions(ctx context.Context, req *connect.Request[v1.List
 		limit = maxSessionsLimit
 	}
 
-	cursorTime, cursorID, err := decodePageCursor(req.Msg.PageCursor)
+	cursorTime, cursorID, err := decodePageCursor(req.PageCursor)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("page_cursor: %w", err))
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("page_cursor: %w", err).Error())
 	}
 
-	states, err := parseStates(req.Msg.States)
+	states, err := parseStates(req.States)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		return nil, connect.NewError(connect.CodeInvalidArgument, err.Error()).WithCause(err)
 	}
 
 	var createdAfter time.Time
-	if ts := req.Msg.CreatedAfter; ts != nil {
+	if ts := req.CreatedAfter; ts != nil {
 		createdAfter = ts.AsTime()
 	}
 
@@ -2459,26 +2458,26 @@ func (s *Service) ListSessions(ctx context.Context, req *connect.Request[v1.List
 	// submitted it as work: listing it next to the jobs makes the queue read as
 	// if the previews were somebody's requests. Excluded unless asked for.
 	var withoutKeys []string
-	if !req.Msg.IncludePreviews {
+	if !req.IncludePreviews {
 		withoutKeys = []string{previewSessionMarker}
 	}
 
 	for len(included) < limit {
 		batch, err := s.sessionMgr.List(ctx, session.SessionFilter{
-			Project:             req.Msg.Project,
-			PRRef:               req.Msg.PrRef,
-			Mode:                req.Msg.Mode,
+			Project:             req.Project,
+			PRRef:               req.PrRef,
+			Mode:                req.Mode,
 			States:              states,
-			ActiveOnly:          req.Msg.ActiveOnly,
+			ActiveOnly:          req.ActiveOnly,
 			CreatedAfter:        createdAfter,
-			Metadata:            req.Msg.GetMetadata(),
+			Metadata:            req.GetMetadata(),
 			WithoutMetadataKeys: withoutKeys,
 			Limit:               limit,
 			AfterCreatedAt:      cursorTime,
 			AfterID:             cursorID,
 		})
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 		}
 		if len(batch) == 0 {
 			break
@@ -2510,10 +2509,10 @@ func (s *Service) ListSessions(ctx context.Context, req *connect.Request[v1.List
 		nextCursor = encodePageCursor(lastRow.CreatedAt, lastRow.ID)
 	}
 
-	return connect.NewResponse(&v1.ListSessionsResponse{
+	return &v1.ListSessionsResponse{
 		Sessions:       resp,
 		NextPageCursor: nextCursor,
-	}), nil
+	}, nil
 }
 
 // encodePageCursor / decodePageCursor serialize the (created_at, id) keyset
@@ -2543,24 +2542,24 @@ func decodePageCursor(cursor string) (time.Time, string, error) {
 	return time.UnixMicro(micros).UTC(), string(raw[sep+1:]), nil
 }
 
-func (s *Service) WatchSession(ctx context.Context, req *connect.Request[v1.WatchSessionRequest], stream *connect.ServerStream[v1.SessionUpdate]) error {
+func (s *Service) WatchSession(ctx context.Context, req *v1.WatchSessionRequest, stream kvarnv1connect.OrchestratorServiceWatchSessionServerStream) error {
 	if s.sessionMgr == nil {
-		return connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+		return connect.NewError(connect.CodeUnimplemented, "sessions not configured")
 	}
 
 	// Resolve the session first so we can authorize against its project before
 	// streaming any events.
-	sess, err := s.sessionMgr.Get(ctx, req.Msg.SessionId)
+	sess, err := s.sessionMgr.Get(ctx, req.SessionId)
 	if err != nil {
-		return connect.NewError(connect.CodeNotFound, err)
+		return connect.NewError(connect.CodeNotFound, err.Error()).WithCause(err)
 	}
-	if err := s.authorizeProject(ctx, sess.ProjectName, req.Spec().Procedure); err != nil {
+	if err := s.authorizeProject(ctx, sess.ProjectName, kvarnv1connect.OrchestratorServiceWatchSessionProcedure); err != nil {
 		return err
 	}
 
-	ch, err := s.sessionMgr.Watch(ctx, req.Msg.SessionId, req.Msg.FromSequence)
+	ch, err := s.sessionMgr.Watch(ctx, req.SessionId, req.FromSequence)
 	if err != nil {
-		return connect.NewError(connect.CodeNotFound, err)
+		return connect.NewError(connect.CodeNotFound, err.Error()).WithCause(err)
 	}
 
 	for we := range ch {
@@ -2575,20 +2574,20 @@ func (s *Service) WatchSession(ctx context.Context, req *connect.Request[v1.Watc
 	return nil
 }
 
-func (s *Service) ListSessionEvents(ctx context.Context, req *connect.Request[v1.ListSessionEventsRequest]) (*connect.Response[v1.ListSessionEventsResponse], error) {
+func (s *Service) ListSessionEvents(ctx context.Context, req *v1.ListSessionEventsRequest) (*v1.ListSessionEventsResponse, error) {
 	if s.sessionMgr == nil {
-		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+		return nil, connect.NewError(connect.CodeUnimplemented, "sessions not configured")
 	}
 
-	sess, err := s.sessionMgr.Get(ctx, req.Msg.SessionId)
+	sess, err := s.sessionMgr.Get(ctx, req.SessionId)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, err)
+		return nil, connect.NewError(connect.CodeNotFound, err.Error()).WithCause(err)
 	}
-	if err := s.authorizeProject(ctx, sess.ProjectName, req.Spec().Procedure); err != nil {
+	if err := s.authorizeProject(ctx, sess.ProjectName, kvarnv1connect.OrchestratorServiceListSessionEventsProcedure); err != nil {
 		return nil, err
 	}
 
-	limit := int(req.Msg.Limit)
+	limit := int(req.Limit)
 	if limit <= 0 {
 		limit = defaultSessionEventsLimit
 	}
@@ -2596,9 +2595,9 @@ func (s *Service) ListSessionEvents(ctx context.Context, req *connect.Request[v1
 		limit = maxSessionEventsLimit
 	}
 
-	events, err := s.sessionMgr.ListEvents(ctx, req.Msg.SessionId, req.Msg.AfterSequence, limit)
+	events, err := s.sessionMgr.ListEvents(ctx, req.SessionId, req.AfterSequence, limit)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 
 	var (
@@ -2614,10 +2613,10 @@ func (s *Service) ListSessionEvents(ctx context.Context, req *connect.Request[v1
 		lastSeq = we.Seq
 	}
 
-	return connect.NewResponse(&v1.ListSessionEventsResponse{
+	return &v1.ListSessionEventsResponse{
 		Events:       updates,
 		LastSequence: lastSeq,
-	}), nil
+	}, nil
 }
 
 // Server-side bounds for ListSessionEvents polling.

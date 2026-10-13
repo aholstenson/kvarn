@@ -14,7 +14,7 @@ import (
 
 	"errors"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 )
 
@@ -68,8 +68,8 @@ func (p *managedProcess) finished() (bool, int32) {
 // StartProcess implements the RunnerService RPC. Output and exit are dropped:
 // a caller reaching the runner directly has no channel to receive them on. The
 // bridge path uses StartProcessWithCallbacks instead.
-func (h *Handler) StartProcess(ctx context.Context, req *connect.Request[v1.StartProcessRequest]) (*connect.Response[v1.StartProcessResponse], error) {
-	return h.StartProcessWithCallbacks(ctx, req.Msg, nil, nil)
+func (h *Handler) StartProcess(ctx context.Context, req *v1.StartProcessRequest) (*v1.StartProcessResponse, error) {
+	return h.StartProcessWithCallbacks(ctx, req, nil, nil)
 }
 
 // StartProcessWithCallbacks spawns a process that outlives this call, wiring
@@ -80,12 +80,12 @@ func (h *Handler) StartProcess(ctx context.Context, req *connect.Request[v1.Star
 // sandbox wrote to /etc/profile.d. It is given its own process group, which is
 // what makes stopping it a group signal rather than a signal to one shell that
 // leaves the real server behind.
-func (h *Handler) StartProcessWithCallbacks(_ context.Context, msg *v1.StartProcessRequest, onOutput ProcessOutputCallback, onExit ProcessExitCallback) (*connect.Response[v1.StartProcessResponse], error) {
+func (h *Handler) StartProcessWithCallbacks(_ context.Context, msg *v1.StartProcessRequest, onOutput ProcessOutputCallback, onExit ProcessExitCallback) (*v1.StartProcessResponse, error) {
 	if msg.ProcessId == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("process_id is required"))
+		return nil, connect.NewError(connect.CodeInvalidArgument, "process_id is required")
 	}
 	if strings.TrimSpace(msg.Command) == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("command is required"))
+		return nil, connect.NewError(connect.CodeInvalidArgument, "command is required")
 	}
 
 	h.processMu.Lock()
@@ -94,12 +94,12 @@ func (h *Handler) StartProcessWithCallbacks(_ context.Context, msg *v1.StartProc
 	}
 	if _, exists := h.processes[msg.ProcessId]; exists {
 		h.processMu.Unlock()
-		return nil, connect.NewError(connect.CodeAlreadyExists, fmt.Errorf("process %q already exists", msg.ProcessId))
+		return nil, connect.Errorf(connect.CodeAlreadyExists, "process %q already exists", msg.ProcessId)
 	}
 	if len(h.processes) >= maxProcesses {
 		h.processMu.Unlock()
-		return nil, connect.NewError(connect.CodeResourceExhausted,
-			fmt.Errorf("too many processes (%d), limit is %d", len(h.processes), maxProcesses))
+		return nil, connect.Errorf(connect.CodeResourceExhausted,
+			"too many processes (%d), limit is %d", len(h.processes), maxProcesses)
 	}
 	h.processMu.Unlock()
 
@@ -119,15 +119,15 @@ func (h *Handler) StartProcessWithCallbacks(_ context.Context, msg *v1.StartProc
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("stdout pipe: %w", err))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("stdout pipe: %w", err).Error())
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("stderr pipe: %w", err))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("stderr pipe: %w", err).Error())
 	}
 
 	if err := cmd.Start(); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("start process: %w", err))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("start process: %w", err).Error())
 	}
 
 	proc := &managedProcess{
@@ -179,16 +179,14 @@ func (h *Handler) StartProcessWithCallbacks(_ context.Context, msg *v1.StartProc
 		}
 	}()
 
-	return connect.NewResponse(&v1.StartProcessResponse{
+	return &v1.StartProcessResponse{
 		ProcessId: proc.id,
 		Pid:       int32(proc.pid),
-	}), nil
+	}, nil
 }
 
 // StopProcess signals a managed process's group and waits for it to go.
-func (h *Handler) StopProcess(ctx context.Context, req *connect.Request[v1.StopProcessRequest]) (*connect.Response[v1.StopProcessResponse], error) {
-	msg := req.Msg
-
+func (h *Handler) StopProcess(ctx context.Context, msg *v1.StopProcessRequest) (*v1.StopProcessResponse, error) {
 	h.processMu.Lock()
 	proc, ok := h.processes[msg.ProcessId]
 	if ok {
@@ -197,7 +195,7 @@ func (h *Handler) StopProcess(ctx context.Context, req *connect.Request[v1.StopP
 	h.processMu.Unlock()
 
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("process %q not found", msg.ProcessId))
+		return nil, connect.Errorf(connect.CodeNotFound, "process %q not found", msg.ProcessId)
 	}
 
 	grace := time.Duration(msg.GraceSeconds) * time.Second
@@ -206,13 +204,13 @@ func (h *Handler) StopProcess(ctx context.Context, req *connect.Request[v1.StopP
 	}
 
 	code := stopProcess(proc, grace)
-	return connect.NewResponse(&v1.StopProcessResponse{ExitCode: code}), nil
+	return &v1.StopProcessResponse{ExitCode: code}, nil
 }
 
 // ListProcesses reports every process this handler is supervising, plus those
 // that have exited but not yet been stopped, so a caller can tell "still
 // starting" from "crashed on boot".
-func (h *Handler) ListProcesses(_ context.Context, _ *connect.Request[v1.ListProcessesRequest]) (*connect.Response[v1.ListProcessesResponse], error) {
+func (h *Handler) ListProcesses(_ context.Context, _ *v1.ListProcessesRequest) (*v1.ListProcessesResponse, error) {
 	h.processMu.Lock()
 	procs := make([]*managedProcess, 0, len(h.processes))
 	for _, p := range h.processes {
@@ -233,7 +231,7 @@ func (h *Handler) ListProcesses(_ context.Context, _ *connect.Request[v1.ListPro
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ProcessId < out[j].ProcessId })
 
-	return connect.NewResponse(&v1.ListProcessesResponse{Processes: out}), nil
+	return &v1.ListProcessesResponse{Processes: out}, nil
 }
 
 // closeProcesses stops every supervised process. Called from Handler.Close so

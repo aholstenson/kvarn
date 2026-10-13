@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/agent/coding"
 	projconfig "github.com/aholstenson/kvarn/internal/project"
@@ -242,5 +242,5 @@ func invalidArgument(err error) error {
 	if errors.As(err, &connectErr) {
 		return err
 	}
-	return connect.NewError(connect.CodeInvalidArgument, err)
+	return connect.NewError(connect.CodeInvalidArgument, err.Error()).WithCause(err)
 }

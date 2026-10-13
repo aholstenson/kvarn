@@ -2,13 +2,15 @@ package dispatch_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/dispatch"
@@ -35,18 +37,20 @@ var _ = Describe("Handler streaming", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		mux := http.NewServeMux()
-		path, h := kvarnv1connect.NewBridgeServiceHandler(handler)
-		mux.Handle(path, h)
+		bridgeRPC := connect.NewServer()
+		kvarnv1connect.RegisterBridgeServiceHandler(bridgeRPC, handler)
+		connecthttp.Mount(mux, bridgeRPC)
 
 		server = &http.Server{
 			Handler: h2c.NewHandler(mux, &http2.Server{}),
 		}
 		go server.Serve(listener)
 
-		client = kvarnv1connect.NewBridgeServiceClient(
+		client = kvarnv1connect.NewBridgeServiceClient(connect.NewClient(connecthttp.NewTransport(
 			http.DefaultClient,
 			fmt.Sprintf("http://%s", listener.Addr().String()),
-		)
+			connecthttp.WithReadMaxBytes(0),
+		)))
 	})
 
 	AfterEach(func() {
@@ -71,44 +75,53 @@ var _ = Describe("Handler streaming", func() {
 			}
 			pr.RegisterTransfer("dl-1", t)
 
-			stream, err := client.DownloadFile(context.Background(), connect.NewRequest(&v1.DownloadFileRequest{
+			stream, err := client.DownloadFile(context.Background(), &v1.DownloadFileRequest{
 				TransferId: "dl-1",
 				Token:      "dl-token",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 			defer stream.Close()
 
 			// First chunk should be start metadata.
-			Expect(stream.Receive()).To(BeTrue())
-			start := stream.Msg().GetStart()
+			first, err := stream.Receive()
+			Expect(err).NotTo(HaveOccurred())
+			start := first.GetStart()
 			Expect(start).NotTo(BeNil())
 			Expect(start.Path).To(Equal("/tmp/test.tar"))
 			Expect(start.Size).To(Equal(int64(len(content))))
 
 			// Subsequent chunks should be data.
 			var received []byte
-			for stream.Receive() {
-				data := stream.Msg().GetData()
+			var streamErr error
+			for {
+				msg, err := stream.Receive()
+				if err != nil {
+					streamErr = err
+					break
+				}
+				data := msg.GetData()
 				Expect(data).NotTo(BeNil())
 				received = append(received, data...)
 			}
-			Expect(stream.Err()).NotTo(HaveOccurred())
+			if errors.Is(streamErr, io.EOF) {
+				streamErr = nil
+			}
+			Expect(streamErr).NotTo(HaveOccurred())
 			Expect(string(received)).To(Equal(content))
 		})
 
 		It("returns error for unknown token", func() {
-			stream, err := client.DownloadFile(context.Background(), connect.NewRequest(&v1.DownloadFileRequest{
+			stream, err := client.DownloadFile(context.Background(), &v1.DownloadFileRequest{
 				TransferId: "dl-1",
 				Token:      "nonexistent",
-			}))
+			})
 			if err != nil {
 				Expect(connect.CodeOf(err)).To(Equal(connect.CodeNotFound))
 			} else {
 				// Error may come on first Receive for server-streaming RPCs.
 				defer stream.Close()
-				Expect(stream.Receive()).To(BeFalse())
-				Expect(stream.Err()).To(HaveOccurred())
-				Expect(connect.CodeOf(stream.Err())).To(Equal(connect.CodeNotFound))
+				_, err := stream.Receive()
+				Expect(connect.CodeOf(err)).To(Equal(connect.CodeNotFound))
 			}
 		})
 
@@ -116,17 +129,16 @@ var _ = Describe("Handler streaming", func() {
 			_, err := registry.Register("dl-token-2")
 			Expect(err).NotTo(HaveOccurred())
 
-			stream, err := client.DownloadFile(context.Background(), connect.NewRequest(&v1.DownloadFileRequest{
+			stream, err := client.DownloadFile(context.Background(), &v1.DownloadFileRequest{
 				TransferId: "nonexistent",
 				Token:      "dl-token-2",
-			}))
+			})
 			if err != nil {
 				Expect(connect.CodeOf(err)).To(Equal(connect.CodeNotFound))
 			} else {
 				defer stream.Close()
-				Expect(stream.Receive()).To(BeFalse())
-				Expect(stream.Err()).To(HaveOccurred())
-				Expect(connect.CodeOf(stream.Err())).To(Equal(connect.CodeNotFound))
+				_, err := stream.Receive()
+				Expect(connect.CodeOf(err)).To(Equal(connect.CodeNotFound))
 			}
 		})
 
@@ -147,28 +159,38 @@ var _ = Describe("Handler streaming", func() {
 			}
 			pr.RegisterTransfer("dl-big", t)
 
-			stream, err := client.DownloadFile(context.Background(), connect.NewRequest(&v1.DownloadFileRequest{
+			stream, err := client.DownloadFile(context.Background(), &v1.DownloadFileRequest{
 				TransferId: "dl-big",
 				Token:      "dl-token-3",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 			defer stream.Close()
 
 			// Skip start.
-			Expect(stream.Receive()).To(BeTrue())
-			Expect(stream.Msg().GetStart()).NotTo(BeNil())
+			first, err := stream.Receive()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(first.GetStart()).NotTo(BeNil())
 
 			// Count data chunks — should be more than one.
 			chunkCount := 0
 			var received []byte
-			for stream.Receive() {
-				data := stream.Msg().GetData()
+			var streamErr error
+			for {
+				msg, err := stream.Receive()
+				if err != nil {
+					streamErr = err
+					break
+				}
+				data := msg.GetData()
 				if data != nil {
 					chunkCount++
 					received = append(received, data...)
 				}
 			}
-			Expect(stream.Err()).NotTo(HaveOccurred())
+			if errors.Is(streamErr, io.EOF) {
+				streamErr = nil
+			}
+			Expect(streamErr).NotTo(HaveOccurred())
 			Expect(chunkCount).To(BeNumerically(">", 1))
 			Expect(string(received)).To(Equal(bigData))
 		})
@@ -187,19 +209,29 @@ var _ = Describe("Handler streaming", func() {
 			}
 			pr.RegisterTransfer("dl-err", t)
 
-			stream, err := client.DownloadFile(context.Background(), connect.NewRequest(&v1.DownloadFileRequest{
+			stream, err := client.DownloadFile(context.Background(), &v1.DownloadFileRequest{
 				TransferId: "dl-err",
 				Token:      "dl-token-4",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 			defer stream.Close()
 
 			// Should get start, then an error during data.
-			Expect(stream.Receive()).To(BeTrue()) // start
+			_, err = stream.Receive() // start
+			Expect(err).NotTo(HaveOccurred())
 			// Drain — eventually should see the error.
-			for stream.Receive() {
+			var streamErr error
+			for {
+				_, err := stream.Receive()
+				if err != nil {
+					streamErr = err
+					break
+				}
 			}
-			Expect(stream.Err()).To(HaveOccurred())
+			if errors.Is(streamErr, io.EOF) {
+				streamErr = nil
+			}
+			Expect(streamErr).To(HaveOccurred())
 		})
 	})
 
@@ -226,7 +258,8 @@ var _ = Describe("Handler streaming", func() {
 				receivedCh <- string(data)
 			}()
 
-			stream := client.UploadFile(context.Background())
+			stream, err := client.UploadFile(context.Background())
+			Expect(err).NotTo(HaveOccurred())
 			err = stream.Send(&v1.FileStreamChunk{
 				Payload: &v1.FileStreamChunk_Start{Start: &v1.FileStreamStart{
 					TransferId: "ul-1",
@@ -244,14 +277,15 @@ var _ = Describe("Handler streaming", func() {
 
 			resp, err := stream.CloseAndReceive()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.BytesWritten).To(Equal(int64(len(content))))
+			Expect(resp.BytesWritten).To(Equal(int64(len(content))))
 
 			Eventually(receivedCh).Should(Receive(Equal(content)))
 		})
 
 		It("rejects first chunk without start metadata", func() {
-			stream := client.UploadFile(context.Background())
-			err := stream.Send(&v1.FileStreamChunk{
+			stream, err := client.UploadFile(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			err = stream.Send(&v1.FileStreamChunk{
 				Payload: &v1.FileStreamChunk_Data{Data: []byte("data")},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -261,8 +295,9 @@ var _ = Describe("Handler streaming", func() {
 		})
 
 		It("returns error for unknown token in start", func() {
-			stream := client.UploadFile(context.Background())
-			err := stream.Send(&v1.FileStreamChunk{
+			stream, err := client.UploadFile(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			err = stream.Send(&v1.FileStreamChunk{
 				Payload: &v1.FileStreamChunk_Start{Start: &v1.FileStreamStart{
 					TransferId: "ul-x",
 					Token:      "nonexistent",

@@ -6,7 +6,8 @@ import (
 	"net"
 	"net/http"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/orchestrator"
@@ -38,8 +39,8 @@ var _ = Describe("PublicMux", func() {
 
 		baseURL := fmt.Sprintf("http://%s", listener.Addr().String())
 
-		bridge := kvarnv1connect.NewBridgeServiceClient(http.DefaultClient, baseURL)
-		_, err = bridge.ReportResult(context.Background(), connect.NewRequest(&v1.CommandResult{Token: "anything"}))
+		bridge := kvarnv1connect.NewBridgeServiceClient(connect.NewClient(connecthttp.NewTransport(http.DefaultClient, baseURL, connecthttp.WithReadMaxBytes(0))))
+		_, err = bridge.ReportResult(context.Background(), &v1.CommandResult{Token: "anything"})
 		Expect(err).To(HaveOccurred())
 		// http.ServeMux returns 404 for an unmounted path; connect-go maps
 		// that to CodeUnimplemented, which is what we want here — anything

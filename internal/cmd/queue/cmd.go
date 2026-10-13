@@ -11,7 +11,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/cmd/client"
@@ -44,11 +43,11 @@ type StatusCmd struct {
 
 func (c *StatusCmd) Run() error {
 	resp, err := c.client().GetQueueStats(context.Background(),
-		connect.NewRequest(&v1.GetQueueStatsRequest{}))
+		&v1.GetQueueStatsRequest{})
 	if err != nil {
 		return fmt.Errorf("queue stats: %w", err)
 	}
-	st := resp.Msg
+	st := resp
 
 	if c.JSON {
 		return jobs.PrintJSON(st)
@@ -117,26 +116,26 @@ type ListCmd struct {
 
 func (c *ListCmd) Run() error {
 	resp, err := c.client().ListQueue(context.Background(),
-		connect.NewRequest(&v1.ListQueueRequest{
+		&v1.ListQueueRequest{
 			Project: c.Project,
 			Limit:   int32(c.Limit),
-		}))
+		})
 	if err != nil {
 		return fmt.Errorf("list queue: %w", err)
 	}
 
 	if c.JSON {
-		return jobs.PrintJSON(resp.Msg)
+		return jobs.PrintJSON(resp)
 	}
 
-	if len(resp.Msg.Entries) == 0 {
+	if len(resp.Entries) == 0 {
 		fmt.Fprintln(os.Stdout, "Backlog is empty")
 		return nil
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "#\tSESSION\tPROJECT\tMODE\tPRIO\tEFFECTIVE\tWAITING\tTRIES\tPROMPT")
-	for _, e := range resp.Msg.Entries {
+	for _, e := range resp.Entries {
 		s := e.Session
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%d\t%d\t%s\t%d\t%s\n",
 			e.Position, s.SessionId, s.Project, jobs.Dash(s.Mode),
@@ -147,8 +146,8 @@ func (c *ListCmd) Run() error {
 		return err
 	}
 
-	if int(resp.Msg.Backlog) > len(resp.Msg.Entries) {
-		fmt.Fprintf(os.Stdout, "\nShowing %d of %d waiting\n", len(resp.Msg.Entries), resp.Msg.Backlog)
+	if int(resp.Backlog) > len(resp.Entries) {
+		fmt.Fprintf(os.Stdout, "\nShowing %d of %d waiting\n", len(resp.Entries), resp.Backlog)
 	}
 	return nil
 }

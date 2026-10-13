@@ -2,11 +2,13 @@ package orchestrator
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"golang.org/x/net/http2"
@@ -32,11 +34,12 @@ var _ = Describe("Preview RPCs", func() {
 	serve := func(s *Service) kvarnv1connect.OrchestratorServiceClient {
 		GinkgoHelper()
 		mux := http.NewServeMux()
-		path, handler := kvarnv1connect.NewOrchestratorServiceHandler(s)
-		mux.Handle(path, handler)
+		orchestratorRPC := connect.NewServer()
+		kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, s)
+		connecthttp.Mount(mux, orchestratorRPC)
 		server := httptest.NewServer(h2c.NewHandler(mux, &http2.Server{}))
 		DeferCleanup(server.Close)
-		return kvarnv1connect.NewOrchestratorServiceClient(server.Client(), server.URL)
+		return kvarnv1connect.NewOrchestratorServiceClient(connect.NewClient(connecthttp.NewTransport(server.Client(), server.URL, connecthttp.WithReadMaxBytes(0))))
 	}
 
 	BeforeEach(func() {
@@ -63,48 +66,48 @@ var _ = Describe("Preview RPCs", func() {
 
 	Describe("StartPreview", func() {
 		It("registers and boots a preview", func() {
-			resp, err := client.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{
+			resp, err := client.StartPreview(ctx, &v1.StartPreviewRequest{
 				Project: "proj",
 				Ref:     "main",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Preview.Id).To(Equal("proj/main"))
-			Expect(resp.Msg.Preview.Project).To(Equal("proj"))
-			Expect(resp.Msg.Preview.Ref).To(Equal("main"))
+			Expect(resp.Preview.Id).To(Equal("proj/main"))
+			Expect(resp.Preview.Project).To(Equal("proj"))
+			Expect(resp.Preview.Ref).To(Equal("main"))
 			Eventually(booted).Should(Receive(Equal("proj/main")))
 		})
 
 		It("waits for the boot to settle when asked", func() {
-			resp, err := client.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{
+			resp, err := client.StartPreview(ctx, &v1.StartPreviewRequest{
 				Project: "proj", Ref: "main", Wait: true,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Preview.State).To(Equal(string(preview.StateRunning)))
-			Expect(resp.Msg.Preview.Sites).To(HaveLen(1))
-			Expect(resp.Msg.Preview.Sites[0].Url).To(HavePrefix("https://"))
-			Expect(resp.Msg.Preview.Url).NotTo(BeEmpty())
+			Expect(resp.Preview.State).To(Equal(string(preview.StateRunning)))
+			Expect(resp.Preview.Sites).To(HaveLen(1))
+			Expect(resp.Preview.Sites[0].Url).To(HavePrefix("https://"))
+			Expect(resp.Preview.Url).NotTo(BeEmpty())
 		})
 
 		It("returns the existing preview for a ref that already has one", func() {
-			first, err := client.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{
+			first, err := client.StartPreview(ctx, &v1.StartPreviewRequest{
 				Project: "proj", Ref: "main", Wait: true,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			second, err := client.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{
+			second, err := client.StartPreview(ctx, &v1.StartPreviewRequest{
 				Project: "proj", Ref: "main", Wait: true,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(second.Msg.Preview.Id).To(Equal(first.Msg.Preview.Id))
-			Expect(second.Msg.Preview.CreatedAt.AsTime()).
-				To(BeTemporally("==", first.Msg.Preview.CreatedAt.AsTime()))
+			Expect(second.Preview.Id).To(Equal(first.Preview.Id))
+			Expect(second.Preview.CreatedAt.AsTime()).
+				To(BeTemporally("==", first.Preview.CreatedAt.AsTime()))
 		})
 
 		It("requires a project and a ref", func() {
-			_, err := client.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{Ref: "main"}))
+			_, err := client.StartPreview(ctx, &v1.StartPreviewRequest{Ref: "main"})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 
-			_, err = client.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{Project: "proj"}))
+			_, err = client.StartPreview(ctx, &v1.StartPreviewRequest{Project: "proj"})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 		})
 	})
@@ -119,23 +122,23 @@ var _ = Describe("Preview RPCs", func() {
 				}, nil
 			}
 
-			_, err := client.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{
+			_, err := client.StartPreview(ctx, &v1.StartPreviewRequest{
 				Project: "proj", Ref: "main", Wait: true,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			resp, err := client.GetPreview(ctx, connect.NewRequest(&v1.GetPreviewRequest{
+			resp, err := client.GetPreview(ctx, &v1.GetPreviewRequest{
 				Project: "proj", Ref: "main",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Preview.State).To(Equal(string(preview.StateRunning)))
-			Expect(resp.Msg.Logs).To(ContainSubstring("listening on :3000"))
+			Expect(resp.Preview.State).To(Equal(string(preview.StateRunning)))
+			Expect(resp.Logs).To(ContainSubstring("listening on :3000"))
 		})
 
 		It("reports not-found for a ref with no preview", func() {
-			_, err := client.GetPreview(ctx, connect.NewRequest(&v1.GetPreviewRequest{
+			_, err := client.GetPreview(ctx, &v1.GetPreviewRequest{
 				Project: "proj", Ref: "nope",
-			}))
+			})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeNotFound))
 		})
 	})
@@ -143,96 +146,97 @@ var _ = Describe("Preview RPCs", func() {
 	Describe("ListPreviews", func() {
 		It("lists every preview, and filters by project", func() {
 			for _, target := range [][2]string{{"proj", "a"}, {"proj", "b"}, {"other", "c"}} {
-				_, err := client.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{
+				_, err := client.StartPreview(ctx, &v1.StartPreviewRequest{
 					Project: target[0], Ref: target[1], Wait: true,
-				}))
+				})
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			all, err := client.ListPreviews(ctx, connect.NewRequest(&v1.ListPreviewsRequest{}))
+			all, err := client.ListPreviews(ctx, &v1.ListPreviewsRequest{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(all.Msg.Previews).To(HaveLen(3))
+			Expect(all.Previews).To(HaveLen(3))
 
-			filtered, err := client.ListPreviews(ctx, connect.NewRequest(&v1.ListPreviewsRequest{
+			filtered, err := client.ListPreviews(ctx, &v1.ListPreviewsRequest{
 				Project: "proj",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(filtered.Msg.Previews).To(HaveLen(2))
-			for _, p := range filtered.Msg.Previews {
+			Expect(filtered.Previews).To(HaveLen(2))
+			for _, p := range filtered.Previews {
 				Expect(p.Project).To(Equal("proj"))
 			}
 		})
 
 		It("returns an empty list rather than an error when there is nothing", func() {
-			resp, err := client.ListPreviews(ctx, connect.NewRequest(&v1.ListPreviewsRequest{}))
+			resp, err := client.ListPreviews(ctx, &v1.ListPreviewsRequest{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Previews).To(BeEmpty())
+			Expect(resp.Previews).To(BeEmpty())
 		})
 	})
 
 	Describe("StopPreview", func() {
 		It("stops a preview but keeps it registered", func() {
-			_, err := client.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{
+			_, err := client.StartPreview(ctx, &v1.StartPreviewRequest{
 				Project: "proj", Ref: "main", Wait: true,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			resp, err := client.StopPreview(ctx, connect.NewRequest(&v1.StopPreviewRequest{
+			resp, err := client.StopPreview(ctx, &v1.StopPreviewRequest{
 				Project: "proj", Ref: "main",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Preview.State).To(Equal(string(preview.StateStopped)))
+			Expect(resp.Preview.State).To(Equal(string(preview.StateStopped)))
 
 			// Still listed, so the next request boots it again.
-			list, err := client.ListPreviews(ctx, connect.NewRequest(&v1.ListPreviewsRequest{}))
+			list, err := client.ListPreviews(ctx, &v1.ListPreviewsRequest{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(list.Msg.Previews).To(HaveLen(1))
+			Expect(list.Previews).To(HaveLen(1))
 		})
 
 		It("removes a preview entirely when asked", func() {
-			_, err := client.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{
+			_, err := client.StartPreview(ctx, &v1.StartPreviewRequest{
 				Project: "proj", Ref: "main", Wait: true,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			_, err = client.StopPreview(ctx, connect.NewRequest(&v1.StopPreviewRequest{
+			_, err = client.StopPreview(ctx, &v1.StopPreviewRequest{
 				Project: "proj", Ref: "main", Remove: true,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			list, err := client.ListPreviews(ctx, connect.NewRequest(&v1.ListPreviewsRequest{}))
+			list, err := client.ListPreviews(ctx, &v1.ListPreviewsRequest{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(list.Msg.Previews).To(BeEmpty())
+			Expect(list.Previews).To(BeEmpty())
 		})
 
 		It("reports not-found for a ref with no preview", func() {
-			_, err := client.StopPreview(ctx, connect.NewRequest(&v1.StopPreviewRequest{
+			_, err := client.StopPreview(ctx, &v1.StopPreviewRequest{
 				Project: "proj", Ref: "nope",
-			}))
+			})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeNotFound))
 		})
 	})
 
 	Describe("WatchPreview", func() {
 		It("streams until the preview settles", func() {
-			_, err := client.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{
+			_, err := client.StartPreview(ctx, &v1.StartPreviewRequest{
 				Project: "proj", Ref: "main", Wait: true,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
 			watchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
-			stream, err := client.WatchPreview(watchCtx, connect.NewRequest(&v1.WatchPreviewRequest{
+			stream, err := client.WatchPreview(watchCtx, &v1.WatchPreviewRequest{
 				Project: "proj", Ref: "main",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 			defer stream.Close()
 
-			Expect(stream.Receive()).To(BeTrue())
-			Expect(stream.Msg().Preview.State).To(Equal(string(preview.StateRunning)))
+			msg, err := stream.Receive()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(msg.Preview.State).To(Equal(string(preview.StateRunning)))
 			// A settled preview ends the stream rather than holding it open.
-			Expect(stream.Receive()).To(BeFalse())
-			Expect(stream.Err()).NotTo(HaveOccurred())
+			_, err = stream.Receive()
+			Expect(err).To(MatchError(io.EOF))
 		})
 	})
 
@@ -240,17 +244,17 @@ var _ = Describe("Preview RPCs", func() {
 		It("reports every preview RPC as unimplemented", func() {
 			bare := serve(NewServiceWithOpts(ServiceOpts{}))
 
-			_, err := bare.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{
+			_, err := bare.StartPreview(ctx, &v1.StartPreviewRequest{
 				Project: "proj", Ref: "main",
-			}))
+			})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnimplemented))
 
-			_, err = bare.ListPreviews(ctx, connect.NewRequest(&v1.ListPreviewsRequest{}))
+			_, err = bare.ListPreviews(ctx, &v1.ListPreviewsRequest{})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnimplemented))
 
-			_, err = bare.GetPreview(ctx, connect.NewRequest(&v1.GetPreviewRequest{
+			_, err = bare.GetPreview(ctx, &v1.GetPreviewRequest{
 				Project: "proj", Ref: "main",
-			}))
+			})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnimplemented))
 		})
 	})

@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -37,12 +37,12 @@ var _ = Describe("Job metadata", func() {
 		svc.dispatcher = newDispatcher(svc, DispatchPolicy{})
 	})
 
-	start := func(md map[string]string) (*connect.Response[v1.StartJobResponse], error) {
-		return svc.StartJob(ctx, connect.NewRequest(&v1.StartJobRequest{
+	start := func(md map[string]string) (*v1.StartJobResponse, error) {
+		return svc.StartJob(ctx, &v1.StartJobRequest{
 			Project:  "alpha",
 			Prompt:   "fix the bug",
 			Metadata: md,
-		}))
+		})
 	}
 
 	Describe("recording", func() {
@@ -51,22 +51,22 @@ var _ = Describe("Job metadata", func() {
 			resp, err := start(md)
 			Expect(err).NotTo(HaveOccurred())
 
-			got, err := svc.GetSession(ctx, connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			got, err := svc.GetSession(ctx, &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Msg.Metadata).To(Equal(md))
+			Expect(got.Metadata).To(Equal(md))
 		})
 
 		It("leaves a submission that carried none unannotated", func() {
 			resp, err := start(nil)
 			Expect(err).NotTo(HaveOccurred())
 
-			got, err := svc.GetSession(ctx, connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			got, err := svc.GetSession(ctx, &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Msg.Metadata).To(BeEmpty())
+			Expect(got.Metadata).To(BeEmpty())
 		})
 
 		It("does not let the caller's map alias what was stored", func() {
@@ -76,11 +76,11 @@ var _ = Describe("Job metadata", func() {
 
 			md["source"] = "rewritten"
 
-			got, err := svc.GetSession(ctx, connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			got, err := svc.GetSession(ctx, &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Msg.Metadata).To(Equal(map[string]string{"source": "slack"}))
+			Expect(got.Metadata).To(Equal(map[string]string{"source": "slack"}))
 		})
 	})
 
@@ -137,11 +137,11 @@ var _ = Describe("Job metadata", func() {
 			resp, err := start(map[string]string{"dry-run": ""})
 			Expect(err).NotTo(HaveOccurred())
 
-			got, err := svc.GetSession(ctx, connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			got, err := svc.GetSession(ctx, &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Msg.Metadata).To(HaveKeyWithValue("dry-run", ""))
+			Expect(got.Metadata).To(HaveKeyWithValue("dry-run", ""))
 		})
 	})
 
@@ -154,12 +154,12 @@ var _ = Describe("Job metadata", func() {
 			_, err = start(nil)
 			Expect(err).NotTo(HaveOccurred())
 
-			listed, err := svc.ListSessions(ctx, connect.NewRequest(&v1.ListSessionsRequest{
+			listed, err := svc.ListSessions(ctx, &v1.ListSessionsRequest{
 				Metadata: map[string]string{"source": "slack", "team": "ops"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(listed.Msg.Sessions).To(HaveLen(1))
-			Expect(listed.Msg.Sessions[0].SessionId).To(Equal(slack.Msg.SessionId))
+			Expect(listed.Sessions).To(HaveLen(1))
+			Expect(listed.Sessions[0].SessionId).To(Equal(slack.SessionId))
 		})
 
 		It("lists everything when no pairs are given", func() {
@@ -168,58 +168,58 @@ var _ = Describe("Job metadata", func() {
 			_, err = start(nil)
 			Expect(err).NotTo(HaveOccurred())
 
-			listed, err := svc.ListSessions(ctx, connect.NewRequest(&v1.ListSessionsRequest{}))
+			listed, err := svc.ListSessions(ctx, &v1.ListSessionsRequest{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(listed.Msg.Sessions).To(HaveLen(2))
+			Expect(listed.Sessions).To(HaveLen(2))
 		})
 	})
 
 	Describe("resubmission", func() {
 		It("keeps the first submission's annotations on an idempotent replay", func() {
-			first, err := svc.StartJob(ctx, connect.NewRequest(&v1.StartJobRequest{
+			first, err := svc.StartJob(ctx, &v1.StartJobRequest{
 				Project:        "alpha",
 				Prompt:         "fix the bug",
 				IdempotencyKey: "req-1",
 				Metadata:       map[string]string{"trace": "one"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
 			// Metadata is not part of what the key claimed, so a replay whose
 			// annotations differ is still the same submission rather than a
 			// conflict — and the record keeps what the first request said.
-			second, err := svc.StartJob(ctx, connect.NewRequest(&v1.StartJobRequest{
+			second, err := svc.StartJob(ctx, &v1.StartJobRequest{
 				Project:        "alpha",
 				Prompt:         "fix the bug",
 				IdempotencyKey: "req-1",
 				Metadata:       map[string]string{"trace": "two"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(second.Msg.SessionId).To(Equal(first.Msg.SessionId))
-			Expect(second.Msg.Duplicate).To(BeTrue())
+			Expect(second.SessionId).To(Equal(first.SessionId))
+			Expect(second.Duplicate).To(BeTrue())
 
-			got, err := svc.GetSession(ctx, connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: first.Msg.SessionId,
-			}))
+			got, err := svc.GetSession(ctx, &v1.GetSessionRequest{
+				SessionId: first.SessionId,
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Msg.Metadata).To(Equal(map[string]string{"trace": "one"}))
+			Expect(got.Metadata).To(Equal(map[string]string{"trace": "one"}))
 		})
 
 		It("carries the annotations onto a retry", func() {
 			first, err := start(map[string]string{"source": "slack"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(mgr.UpdateState(ctx, first.Msg.SessionId, session.StateFailed, "boom")).To(Succeed())
+			Expect(mgr.UpdateState(ctx, first.SessionId, session.StateFailed, "boom")).To(Succeed())
 
-			retried, err := svc.RetryJob(ctx, connect.NewRequest(&v1.RetryJobRequest{
-				SessionId: first.Msg.SessionId,
-			}))
+			retried, err := svc.RetryJob(ctx, &v1.RetryJobRequest{
+				SessionId: first.SessionId,
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(retried.Msg.SessionId).NotTo(Equal(first.Msg.SessionId))
+			Expect(retried.SessionId).NotTo(Equal(first.SessionId))
 
-			got, err := svc.GetSession(ctx, connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: retried.Msg.SessionId,
-			}))
+			got, err := svc.GetSession(ctx, &v1.GetSessionRequest{
+				SessionId: retried.SessionId,
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Msg.Metadata).To(Equal(map[string]string{"source": "slack"}))
+			Expect(got.Metadata).To(Equal(map[string]string{"source": "slack"}))
 		})
 	})
 })

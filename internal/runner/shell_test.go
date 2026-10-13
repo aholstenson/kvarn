@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/runner"
 	. "github.com/onsi/ginkgo/v2"
@@ -29,18 +28,18 @@ var _ = Describe("Shell Sessions", func() {
 	})
 
 	createSession := func() string {
-		resp, err := h.CreateSession(ctx, connect.NewRequest(&v1.CreateSessionRequest{}))
+		resp, err := h.CreateSession(ctx, &v1.CreateSessionRequest{})
 		Expect(err).NotTo(HaveOccurred())
-		return resp.Msg.SessionId
+		return resp.SessionId
 	}
 
 	sessionExec := func(id, command string) *v1.SessionExecResponse {
-		resp, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+		resp, err := h.SessionExec(ctx, &v1.SessionExecRequest{
 			SessionId: id,
 			Command:   command,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		return resp.Msg
+		return resp
 	}
 
 	Describe("CreateSession", func() {
@@ -119,17 +118,17 @@ var _ = Describe("Shell Sessions", func() {
 
 		It("caps output at max_output_bytes and reports the true size", func() {
 			id := createSession()
-			resp, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+			resp, err := h.SessionExec(ctx, &v1.SessionExecRequest{
 				SessionId:      id,
 				Command:        "printf 'HEAD'; head -c 200000 /dev/zero | tr '\\0' 'x'; printf 'TAIL'",
 				MaxOutputBytes: 1024,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Stdout).To(HavePrefix("HEAD"))
-			Expect(resp.Msg.Stdout).To(HaveSuffix("TAIL"))
-			Expect(resp.Msg.Stdout).To(ContainSubstring("of output omitted"))
-			Expect(len(resp.Msg.Stdout)).To(BeNumerically("<", 1200))
-			Expect(resp.Msg.StdoutTotalBytes).To(Equal(uint64(200008)))
+			Expect(resp.Stdout).To(HavePrefix("HEAD"))
+			Expect(resp.Stdout).To(HaveSuffix("TAIL"))
+			Expect(resp.Stdout).To(ContainSubstring("of output omitted"))
+			Expect(len(resp.Stdout)).To(BeNumerically("<", 1200))
+			Expect(resp.StdoutTotalBytes).To(Equal(uint64(200008)))
 		})
 
 		It("leaves output uncapped by default", func() {
@@ -181,15 +180,15 @@ var _ = Describe("Shell Sessions", func() {
 			// exec attached to stdin, a tool waiting on a prompt — would block
 			// on that pipe until its timeout; on /dev/null it returns at once.
 			id := createSession()
-			resp, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+			resp, err := h.SessionExec(ctx, &v1.SessionExecRequest{
 				SessionId:      id,
 				Command:        "cat; echo done",
 				TimeoutSeconds: 5,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.TimedOut).To(BeFalse())
-			Expect(resp.Msg.Stdout).To(Equal("done\n"))
-			Expect(resp.Msg.ExitCode).To(Equal(int32(0)))
+			Expect(resp.TimedOut).To(BeFalse())
+			Expect(resp.Stdout).To(Equal("done\n"))
+			Expect(resp.ExitCode).To(Equal(int32(0)))
 
 			// The shell itself still reads the commands that follow.
 			resp2 := sessionExec(id, "echo next")
@@ -198,38 +197,38 @@ var _ = Describe("Shell Sessions", func() {
 
 		It("reports a timeout as a result rather than an error", func() {
 			id := createSession()
-			resp, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+			resp, err := h.SessionExec(ctx, &v1.SessionExecRequest{
 				SessionId:      id,
 				Command:        "sleep 60",
 				TimeoutSeconds: 1,
-			}))
+			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(resp.Msg.TimedOut).To(BeTrue())
-			Expect(resp.Msg.ExitCode).To(Equal(int32(124)))
-			Expect(resp.Msg.StateReset).To(BeTrue())
+			Expect(resp.TimedOut).To(BeTrue())
+			Expect(resp.ExitCode).To(Equal(int32(124)))
+			Expect(resp.StateReset).To(BeTrue())
 		})
 
 		It("returns what a command printed before it timed out", func() {
 			id := createSession()
-			resp, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+			resp, err := h.SessionExec(ctx, &v1.SessionExecRequest{
 				SessionId:      id,
 				Command:        "echo started; sleep 60",
 				TimeoutSeconds: 1,
-			}))
+			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(resp.Msg.TimedOut).To(BeTrue())
-			Expect(resp.Msg.Stdout).To(ContainSubstring("started"))
+			Expect(resp.TimedOut).To(BeTrue())
+			Expect(resp.Stdout).To(ContainSubstring("started"))
 		})
 
 		It("recovers after timeout", func() {
 			id := createSession()
-			resp, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+			resp, err := h.SessionExec(ctx, &v1.SessionExecRequest{
 				SessionId:      id,
 				Command:        "sleep 60",
 				TimeoutSeconds: 1,
-			}))
+			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(resp.Msg.TimedOut).To(BeTrue())
+			Expect(resp.TimedOut).To(BeTrue())
 
 			// Should still work after timeout.
 			resp2 := sessionExec(id, "echo recovered")
@@ -237,10 +236,10 @@ var _ = Describe("Shell Sessions", func() {
 		})
 
 		It("returns error for unknown session", func() {
-			_, err := h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+			_, err := h.SessionExec(ctx, &v1.SessionExecRequest{
 				SessionId: "nonexistent",
 				Command:   "echo hello",
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("not found"))
 		})
@@ -249,24 +248,24 @@ var _ = Describe("Shell Sessions", func() {
 	Describe("CloseSession", func() {
 		It("closes session and cleans up", func() {
 			id := createSession()
-			_, err := h.CloseSession(ctx, connect.NewRequest(&v1.CloseSessionRequest{
+			_, err := h.CloseSession(ctx, &v1.CloseSessionRequest{
 				SessionId: id,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
 			// Subsequent exec should fail.
-			_, err = h.SessionExec(ctx, connect.NewRequest(&v1.SessionExecRequest{
+			_, err = h.SessionExec(ctx, &v1.SessionExecRequest{
 				SessionId: id,
 				Command:   "echo hello",
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("not found"))
 		})
 
 		It("returns error for unknown session", func() {
-			_, err := h.CloseSession(ctx, connect.NewRequest(&v1.CloseSessionRequest{
+			_, err := h.CloseSession(ctx, &v1.CloseSessionRequest{
 				SessionId: "nonexistent",
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("not found"))
 		})

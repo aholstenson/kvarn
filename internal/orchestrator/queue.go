@@ -2,11 +2,10 @@ package orchestrator
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/orchestrator/auth"
 	"github.com/aholstenson/kvarn/internal/orchestrator/scheduler"
@@ -37,9 +36,9 @@ func (s *Service) projectVisibility(ctx context.Context) func(string) bool {
 // The aggregate counters and the resource pool are host-wide — they describe
 // the orchestrator, not any one project — while the per-project breakdown is
 // restricted to the projects the caller's key covers.
-func (s *Service) GetQueueStats(ctx context.Context, _ *connect.Request[v1.GetQueueStatsRequest]) (*connect.Response[v1.GetQueueStatsResponse], error) {
+func (s *Service) GetQueueStats(ctx context.Context, _ *v1.GetQueueStatsRequest) (*v1.GetQueueStatsResponse, error) {
 	if s.sessionMgr == nil {
-		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+		return nil, connect.NewError(connect.CodeUnimplemented, "sessions not configured")
 	}
 
 	// The backlog is read as rows rather than as a count because the
@@ -50,7 +49,7 @@ func (s *Service) GetQueueStats(ctx context.Context, _ *connect.Request[v1.GetQu
 		AgeStep: s.dispatcher.ageStep(),
 	})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 
 	visible := s.projectVisibility(ctx)
@@ -105,7 +104,7 @@ func (s *Service) GetQueueStats(ctx context.Context, _ *connect.Request[v1.GetQu
 	// number, and this is the field that tells them apart.
 	s.drainStatsInto(stats)
 
-	return connect.NewResponse(stats), nil
+	return stats, nil
 }
 
 func capacityToProto(c scheduler.Capacity) *v1.Capacity {
@@ -124,12 +123,12 @@ func capacityToProto(c scheduler.Capacity) *v1.Capacity {
 //
 // The whole backlog is read even when the caller filters or limits, because a
 // position is only meaningful against everything else waiting.
-func (s *Service) ListQueue(ctx context.Context, req *connect.Request[v1.ListQueueRequest]) (*connect.Response[v1.ListQueueResponse], error) {
+func (s *Service) ListQueue(ctx context.Context, req *v1.ListQueueRequest) (*v1.ListQueueResponse, error) {
 	if s.sessionMgr == nil {
-		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+		return nil, connect.NewError(connect.CodeUnimplemented, "sessions not configured")
 	}
 
-	limit := int(req.Msg.Limit)
+	limit := int(req.Limit)
 	if limit <= 0 {
 		limit = defaultQueueLimit
 	}
@@ -137,7 +136,7 @@ func (s *Service) ListQueue(ctx context.Context, req *connect.Request[v1.ListQue
 	query := session.PendingQuery{Now: time.Now(), AgeStep: s.dispatcher.ageStep()}
 	pending, err := s.sessionMgr.ListPending(ctx, query)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 
 	visible := s.projectVisibility(ctx)
@@ -148,7 +147,7 @@ func (s *Service) ListQueue(ctx context.Context, req *connect.Request[v1.ListQue
 		if len(entries) >= limit {
 			break
 		}
-		if req.Msg.Project != "" && sess.ProjectName != req.Msg.Project {
+		if req.Project != "" && sess.ProjectName != req.Project {
 			continue
 		}
 		if !visible(sess.ProjectName) {
@@ -161,8 +160,8 @@ func (s *Service) ListQueue(ctx context.Context, req *connect.Request[v1.ListQue
 		})
 	}
 
-	return connect.NewResponse(&v1.ListQueueResponse{
+	return &v1.ListQueueResponse{
 		Entries: entries,
 		Backlog: int32(len(pending)),
-	}), nil
+	}, nil
 }

@@ -7,7 +7,8 @@ import (
 	"net/http"
 	"os"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/localsock"
 )
@@ -40,9 +41,9 @@ func Resolve(addr string) string {
 // header; the socket needs no key, since the filesystem is what authenticates
 // a caller there.
 func NewOrchestrator(addr, apiKey string) kvarnv1connect.OrchestratorServiceClient {
-	var opts []connect.ClientOption
+	var interceptors []connect.ClientInterceptor
 	if apiKey != "" {
-		opts = append(opts, connect.WithInterceptors(&bearerInterceptor{token: apiKey}))
+		interceptors = append(interceptors, bearerInterceptor(apiKey))
 	}
 
 	httpClient := http.DefaultClient
@@ -54,31 +55,23 @@ func NewOrchestrator(addr, apiKey string) kvarnv1connect.OrchestratorServiceClie
 		// base URL to build request URLs from.
 		baseURL = "http://kvarn-local"
 	}
-	return kvarnv1connect.NewOrchestratorServiceClient(httpClient, baseURL, opts...)
+	return kvarnv1connect.NewOrchestratorServiceClient(connect.NewClient(
+		connecthttp.NewTransport(httpClient, baseURL, connecthttp.WithReadMaxBytes(0)),
+		interceptors...,
+	))
 }
 
 // bearerInterceptor sets the Authorization header on outgoing client requests.
-type bearerInterceptor struct {
-	token string
-}
-
-func (b *bearerInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		if req.Spec().IsClient {
-			req.Header().Set("Authorization", "Bearer "+b.token)
+func bearerInterceptor(token string) connect.ClientInterceptor {
+	return func(next connect.ClientFunc) connect.ClientFunc {
+		return func(ctx context.Context, spec connect.Spec) (connect.ClientStream, error) {
+			// The client attaches a CallInfo before the interceptor chain runs,
+			// and the headers are only flushed on the first Send, so setting
+			// them here reaches the wire.
+			if info, ok := connect.CallInfoForClientContext(ctx); ok {
+				info.RequestHeader().Set("Authorization", "Bearer "+token)
+			}
+			return next(ctx, spec)
 		}
-		return next(ctx, req)
 	}
-}
-
-func (b *bearerInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
-		conn := next(ctx, spec)
-		conn.RequestHeader().Set("Authorization", "Bearer "+b.token)
-		return conn
-	}
-}
-
-func (b *bearerInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return next
 }

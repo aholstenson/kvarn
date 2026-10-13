@@ -8,7 +8,6 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 )
 
@@ -34,24 +33,24 @@ func (c *DownCmd) Run() error {
 	ctx := context.Background()
 	oc := c.client()
 
-	resp, err := oc.StopPreview(ctx, connect.NewRequest(&v1.StopPreviewRequest{
+	resp, err := oc.StopPreview(ctx, &v1.StopPreviewRequest{
 		Project:   c.Project,
 		Ref:       c.Ref,
 		Remove:    c.Remove,
 		SkipState: c.NoState,
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("stop preview: %w", err)
 	}
 
 	if c.JSON {
-		return printJSON(resp.Msg.Preview)
+		return printJSON(resp.Preview)
 	}
 	if c.Remove {
 		fmt.Fprintf(os.Stderr, "Removed the preview of %s.\n", c.Ref)
 		return nil
 	}
-	p := resp.Msg.Preview
+	p := resp.Preview
 	switch {
 	case p.GetStateError() != "":
 		fmt.Fprintf(os.Stderr, "Stopped the preview of %s, but its state could not be saved: %s\n",
@@ -79,15 +78,15 @@ func (c *ResetCmd) Run() error {
 	ctx := context.Background()
 	oc := c.client()
 
-	resp, err := oc.ResetPreviewState(ctx, connect.NewRequest(&v1.ResetPreviewStateRequest{
+	resp, err := oc.ResetPreviewState(ctx, &v1.ResetPreviewStateRequest{
 		Project: c.Project,
 		Ref:     c.Ref,
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("reset preview state: %w", err)
 	}
 	if c.JSON {
-		return printJSON(resp.Msg.Preview)
+		return printJSON(resp.Preview)
 	}
 	fmt.Fprintf(os.Stderr, "Dropped the saved state of %s; the next start comes up empty.\n", c.Ref)
 	return nil
@@ -105,21 +104,21 @@ func (c *PruneCmd) Run() error {
 	ctx := context.Background()
 	oc := c.client()
 
-	resp, err := oc.PrunePreviewState(ctx, connect.NewRequest(&v1.PrunePreviewStateRequest{
+	resp, err := oc.PrunePreviewState(ctx, &v1.PrunePreviewStateRequest{
 		OlderThan: c.OlderThan,
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("prune preview state: %w", err)
 	}
 	if c.JSON {
-		return printJSON(resp.Msg)
+		return printJSON(resp)
 	}
-	if resp.Msg.Removed == 0 {
+	if resp.Removed == 0 {
 		fmt.Fprintln(os.Stderr, "No preview state was old enough to drop.")
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "Dropped %d saved preview state archives, freeing %s.\n",
-		resp.Msg.Removed, formatBytes(resp.Msg.BytesFreed))
+		resp.Removed, formatBytes(resp.BytesFreed))
 	return nil
 }
 
@@ -135,18 +134,18 @@ func (c *ListCmd) Run() error {
 	ctx := context.Background()
 	oc := c.client()
 
-	resp, err := oc.ListPreviews(ctx, connect.NewRequest(&v1.ListPreviewsRequest{
+	resp, err := oc.ListPreviews(ctx, &v1.ListPreviewsRequest{
 		Project: c.Project,
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("list previews: %w", err)
 	}
 
-	previews := resp.Msg.Previews
+	previews := resp.Previews
 	sort.Slice(previews, func(i, j int) bool { return previews[i].Id < previews[j].Id })
 
 	if c.JSON {
-		return printJSON(resp.Msg)
+		return printJSON(resp)
 	}
 
 	if len(previews) == 0 {
@@ -197,24 +196,24 @@ func (c *LogsCmd) Run() error {
 	ctx := context.Background()
 	oc := c.client()
 
-	resp, err := oc.GetPreview(ctx, connect.NewRequest(&v1.GetPreviewRequest{
+	resp, err := oc.GetPreview(ctx, &v1.GetPreviewRequest{
 		Project: c.Project,
 		Ref:     c.Ref,
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("get preview: %w", err)
 	}
 
 	if c.JSON {
-		return printJSON(resp.Msg)
+		return printJSON(resp)
 	}
 
 	// The buffer holds a bounded tail, so an empty one is a preview that has
 	// not started anything yet rather than a preview that printed nothing.
-	logs := resp.Msg.Logs
+	logs := resp.Logs
 	if strings.TrimSpace(logs) == "" {
 		fmt.Fprintf(os.Stderr, "No output retained for the preview of %s (state: %s).\n",
-			c.Ref, resp.Msg.Preview.GetState())
+			c.Ref, resp.Preview.GetState())
 		return nil
 	}
 	fmt.Fprintln(os.Stdout, strings.TrimRight(logs, "\n"))

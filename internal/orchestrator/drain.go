@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/observability/reqid"
 	"github.com/aholstenson/kvarn/internal/session"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -93,12 +93,12 @@ func (s *Service) setDrain(draining bool, reason string) drainStatus {
 // its whole pipeline's. The split is `session.RestartableStates`, the same one
 // startup reconciliation uses, because it answers the same question: what can
 // this host stop doing without destroying anything.
-func (s *Service) SetDrain(ctx context.Context, req *connect.Request[v1.SetDrainRequest]) (*connect.Response[v1.SetDrainResponse], error) {
-	if err := s.authorizeHost(ctx, req.Spec().Procedure); err != nil {
+func (s *Service) SetDrain(ctx context.Context, req *v1.SetDrainRequest) (*v1.SetDrainResponse, error) {
+	if err := s.authorizeHost(ctx, kvarnv1connect.OrchestratorServiceSetDrainProcedure); err != nil {
 		return nil, err
 	}
 
-	previous := s.setDrain(req.Msg.Draining, req.Msg.Reason)
+	previous := s.setDrain(req.Draining, req.Reason)
 	log := reqid.LoggerFrom(ctx)
 
 	// A preview cannot be requeued the way a job can: it is a VM in this
@@ -106,13 +106,13 @@ func (s *Service) SetDrain(ctx context.Context, req *connect.Request[v1.SetDrain
 	// to. Draining therefore stops previews outright and refuses new boots —
 	// the record survives, so the next request on whichever host is serving
 	// boots it there.
-	s.previews.SetDraining(ctx, req.Msg.Draining)
+	s.previews.SetDraining(ctx, req.Draining)
 
 	var requeued []string
-	if req.Msg.Draining {
-		requeued = s.requeueUnstarted(ctx, req.Msg.Reason)
+	if req.Draining {
+		requeued = s.requeueUnstarted(ctx, req.Reason)
 		log.Info("orchestrator draining",
-			"reason", req.Msg.Reason, "requeued", len(requeued), "dispatched", s.dispatchedCount())
+			"reason", req.Reason, "requeued", len(requeued), "dispatched", s.dispatchedCount())
 	} else {
 		// Resuming has to wake the dispatcher: every pass while drained was a
 		// no-op, so without this the backlog waits for the next tick.
@@ -120,11 +120,11 @@ func (s *Service) SetDrain(ctx context.Context, req *connect.Request[v1.SetDrain
 		log.Info("orchestrator resumed", "backlog_waiting", s.dispatchedCount())
 	}
 
-	return connect.NewResponse(&v1.SetDrainResponse{
+	return &v1.SetDrainResponse{
 		PreviouslyDraining: previous.draining,
 		Requeued:           requeued,
 		Dispatched:         int32(s.dispatchedCount()),
-	}), nil
+	}, nil
 }
 
 // requeueUnstarted signals every run that has not started running yet to go

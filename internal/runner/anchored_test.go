@@ -9,7 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connectproto"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -45,23 +46,23 @@ var _ = Describe("Anchored editing", func() {
 		return string(b)
 	}
 	doRead := func(name string) *v1.ReadFileResponse {
-		resp, err := h.ReadFile(ctx, connect.NewRequest(&v1.ReadFileRequest{
+		resp, err := h.ReadFile(ctx, &v1.ReadFileRequest{
 			WorkingDir: workDir, Path: name,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		return resp.Msg
+		return resp
 	}
 	doEdit := func(name, version string, ops []*v1.EditOperation) (*v1.EditFileResponse, error) {
-		resp, err := h.EditFile(ctx, connect.NewRequest(&v1.EditFileRequest{
+		resp, err := h.EditFile(ctx, &v1.EditFileRequest{
 			WorkingDir:      workDir,
 			Path:            name,
 			ExpectedVersion: version,
 			Operations:      ops,
-		}))
+		})
 		if err != nil {
 			return nil, err
 		}
-		return resp.Msg, nil
+		return resp, nil
 	}
 
 	It("applies a single REPLACE op", func() {
@@ -171,7 +172,7 @@ var _ = Describe("Anchored editing", func() {
 
 		details := cerr.Details()
 		Expect(details).NotTo(BeEmpty())
-		val, dErr := details[0].Value()
+		val, dErr := connectproto.UnmarshalErrorDetail(details[0])
 		Expect(dErr).NotTo(HaveOccurred())
 		snap, ok := val.(*v1.ReadFileResponse)
 		Expect(ok).To(BeTrue())
@@ -217,9 +218,9 @@ var _ = Describe("Anchored editing", func() {
 
 	It("rejects mixed-newline files", func() {
 		writeFile("f.txt", "a\r\nb\nc\r\n")
-		_, err := h.ReadFile(ctx, connect.NewRequest(&v1.ReadFileRequest{
+		_, err := h.ReadFile(ctx, &v1.ReadFileRequest{
 			WorkingDir: workDir, Path: "f.txt",
-		}))
+		})
 		Expect(err).To(HaveOccurred())
 	})
 
@@ -246,18 +247,18 @@ var _ = Describe("Anchored editing", func() {
 		writeFile("f.txt", "a\nb\nc\nd\ne\n")
 		full := doRead("f.txt")
 
-		resp, err := h.ReadFile(ctx, connect.NewRequest(&v1.ReadFileRequest{
+		resp, err := h.ReadFile(ctx, &v1.ReadFileRequest{
 			WorkingDir: workDir,
 			Path:       "f.txt",
 			StartLine:  2,
 			EndLine:    4,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.Version).To(Equal(full.Version))
-		Expect(resp.Msg.TotalLines).To(Equal(int32(5)))
-		Expect(resp.Msg.Lines).To(HaveLen(3))
-		Expect(resp.Msg.Lines[0].Line).To(Equal(int32(2)))
-		Expect(resp.Msg.Lines[0].Content).To(Equal("b"))
+		Expect(resp.Version).To(Equal(full.Version))
+		Expect(resp.TotalLines).To(Equal(int32(5)))
+		Expect(resp.Lines).To(HaveLen(3))
+		Expect(resp.Lines[0].Line).To(Equal(int32(2)))
+		Expect(resp.Lines[0].Content).To(Equal("b"))
 	})
 
 	It("inserts before a line", func() {
@@ -452,9 +453,9 @@ var _ = Describe("Anchored editing", func() {
 		It("refuses to read a file too large to anchor", func() {
 			writeHuge("huge.json")
 
-			_, err := h.ReadFile(ctx, connect.NewRequest(&v1.ReadFileRequest{
+			_, err := h.ReadFile(ctx, &v1.ReadFileRequest{
 				WorkingDir: workDir, Path: "huge.json",
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("file_too_large"))
 			Expect(err.Error()).To(ContainSubstring("9.0M"))
@@ -464,9 +465,9 @@ var _ = Describe("Anchored editing", func() {
 		It("refuses a windowed read of the same file, since anchoring reads all of it", func() {
 			writeHuge("huge.json")
 
-			_, err := h.ReadFile(ctx, connect.NewRequest(&v1.ReadFileRequest{
+			_, err := h.ReadFile(ctx, &v1.ReadFileRequest{
 				WorkingDir: workDir, Path: "huge.json", StartLine: 1, EndLine: 10,
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("file_too_large"))
 		})

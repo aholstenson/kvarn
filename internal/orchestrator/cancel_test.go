@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -94,24 +94,24 @@ var _ = Describe("CancelJob", func() {
 	}
 
 	startRunningJob := func() string {
-		resp, err := svc.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := svc.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "do the thing",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(ag.started).Should(BeClosed())
-		return resp.Msg.SessionId
+		return resp.SessionId
 	}
 
 	It("stops a running job and records it as cancelled", func() {
 		sessionID := startRunningJob()
 
-		resp, err := svc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
+		resp, err := svc.CancelJob(context.Background(), &v1.CancelJobRequest{
 			SessionId: sessionID,
 			Reason:    "wrong prompt",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.PreviousState).To(Equal(string(session.StateRunning)))
+		Expect(resp.PreviousState).To(Equal(string(session.StateRunning)))
 
 		// The run unwinds on its own; the state lands once it has torn down.
 		Eventually(func() session.State {
@@ -137,9 +137,9 @@ var _ = Describe("CancelJob", func() {
 		ch, err := sessionMgr.Watch(ctx, sessionID, 0)
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = svc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
+		_, err = svc.CancelJob(context.Background(), &v1.CancelJobRequest{
 			SessionId: sessionID,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		// A watching client (`kvarn startjob --watch`) has to come back rather
@@ -153,9 +153,9 @@ var _ = Describe("CancelJob", func() {
 	})
 
 	It("rejects an unknown session", func() {
-		_, err := svc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
+		_, err := svc.CancelJob(context.Background(), &v1.CancelJobRequest{
 			SessionId: "does-not-exist",
-		}))
+		})
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeNotFound))
 	})
 
@@ -168,9 +168,9 @@ var _ = Describe("CancelJob", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(sessionMgr.UpdateState(context.Background(), sess.ID, session.StateCompleted, "Completed")).To(Succeed())
 
-		_, err = svc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
+		_, err = svc.CancelJob(context.Background(), &v1.CancelJobRequest{
 			SessionId: sess.ID,
-		}))
+		})
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeFailedPrecondition))
 		Expect(err.Error()).To(ContainSubstring("already finished"))
 	})
@@ -187,9 +187,9 @@ var _ = Describe("CancelJob", func() {
 		// reconciliation settles every other way of getting here.
 		Expect(sessionMgr.UpdateState(context.Background(), sess.ID, session.StateCloning, "")).To(Succeed())
 
-		_, err = svc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
+		_, err = svc.CancelJob(context.Background(), &v1.CancelJobRequest{
 			SessionId: sess.ID,
-		}))
+		})
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeFailedPrecondition))
 		Expect(err.Error()).To(ContainSubstring("not running"))
 	})
@@ -204,11 +204,11 @@ var _ = Describe("CancelJob", func() {
 
 		// No goroutine owns a backlog entry, so the cancel lands on the row
 		// itself rather than on a context.
-		resp, err := svc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
+		resp, err := svc.CancelJob(context.Background(), &v1.CancelJobRequest{
 			SessionId: sess.ID, Reason: "changed my mind",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.PreviousState).To(Equal(string(session.StatePending)))
+		Expect(resp.PreviousState).To(Equal(string(session.StatePending)))
 
 		got, err := sessionMgr.Get(context.Background(), sess.ID)
 		Expect(err).NotTo(HaveOccurred())
@@ -220,16 +220,16 @@ var _ = Describe("CancelJob", func() {
 	It("cancels a job that has not reached the agent yet", func() {
 		// The registration happens before the job goroutine starts, so a cancel
 		// issued the moment StartJob returns cannot slip past it.
-		resp, err := svc.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := svc.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "do the thing",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		sessionID := resp.Msg.SessionId
+		sessionID := resp.SessionId
 
-		_, err = svc.CancelJob(context.Background(), connect.NewRequest(&v1.CancelJobRequest{
+		_, err = svc.CancelJob(context.Background(), &v1.CancelJobRequest{
 			SessionId: sessionID,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() session.State {

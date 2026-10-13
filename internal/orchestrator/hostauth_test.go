@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/cmd/client"
 	"github.com/aholstenson/kvarn/internal/config/apikey"
@@ -100,9 +100,9 @@ var _ = Describe("Host capability", func() {
 
 	cancelAll := func(addr, token string) error {
 		oc := client.NewOrchestrator(addr, token)
-		_, err := oc.CancelJobs(context.Background(), connect.NewRequest(&v1.CancelJobsRequest{
+		_, err := oc.CancelJobs(context.Background(), &v1.CancelJobsRequest{
 			All: true, DryRun: true,
-		}))
+		})
 		return err
 	}
 
@@ -135,9 +135,9 @@ var _ = Describe("Host capability", func() {
 	Describe("SetDrain", func() {
 		setDrain := func(addr, token string) error {
 			oc := client.NewOrchestrator(addr, token)
-			_, err := oc.SetDrain(context.Background(), connect.NewRequest(&v1.SetDrainRequest{
+			_, err := oc.SetDrain(context.Background(), &v1.SetDrainRequest{
 				Draining: true, Reason: "test",
-			}))
+			})
 			return err
 		}
 
@@ -162,9 +162,9 @@ var _ = Describe("Host capability", func() {
 	// the key's own scope is the whole answer.
 	It("allows a project-filtered bulk cancel without the capability", func() {
 		oc := client.NewOrchestrator(tcpAddr, wildcardToken)
-		_, err := oc.CancelJobs(context.Background(), connect.NewRequest(&v1.CancelJobsRequest{
+		_, err := oc.CancelJobs(context.Background(), &v1.CancelJobsRequest{
 			Project: "allowed-project", DryRun: true,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 	})
 
@@ -172,11 +172,11 @@ var _ = Describe("Host capability", func() {
 	// capabilities still submits and reads jobs exactly as before.
 	It("leaves project-scoped RPCs alone", func() {
 		oc := client.NewOrchestrator(tcpAddr, scopedToken)
-		resp, err := oc.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := oc.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "allowed-project", Prompt: "do",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.SessionId).NotTo(BeEmpty())
+		Expect(resp.SessionId).NotTo(BeEmpty())
 	})
 
 	// The socket is the authentication mechanism, so the mux behind it must
@@ -196,7 +196,7 @@ var _ = Describe("Host capability", func() {
 		DeferCleanup(func() { srv.Close() })
 
 		oc := client.NewOrchestrator(fmt.Sprintf("http://%s", listener.Addr().String()), "")
-		_, err = oc.GetQueueStats(context.Background(), connect.NewRequest(&v1.GetQueueStatsRequest{}))
+		_, err = oc.GetQueueStats(context.Background(), &v1.GetQueueStatsRequest{})
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 	})
 })

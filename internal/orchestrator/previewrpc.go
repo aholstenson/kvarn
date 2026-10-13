@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/observability/reqid"
 	"github.com/aholstenson/kvarn/internal/preview"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -24,15 +25,15 @@ const previewWatchInterval = time.Second
 const previewLogTailLines = 200
 
 // StartPreview registers a preview of a ref and boots it.
-func (s *Service) StartPreview(ctx context.Context, req *connect.Request[v1.StartPreviewRequest]) (*connect.Response[v1.StartPreviewResponse], error) {
-	if err := s.authorizeProject(ctx, req.Msg.Project, req.Spec().Procedure); err != nil {
+func (s *Service) StartPreview(ctx context.Context, req *v1.StartPreviewRequest) (*v1.StartPreviewResponse, error) {
+	if err := s.authorizeProject(ctx, req.Project, kvarnv1connect.OrchestratorServiceStartPreviewProcedure); err != nil {
 		return nil, err
 	}
-	if err := validatePreviewTarget(req.Msg.Project, req.Msg.Ref); err != nil {
+	if err := validatePreviewTarget(req.Project, req.Ref); err != nil {
 		return nil, err
 	}
 
-	p, err := s.previews.Register(ctx, req.Msg.Project, req.Msg.Ref, previewOrigin{PR: req.Msg.Pr})
+	p, err := s.previews.Register(ctx, req.Project, req.Ref, previewOrigin{PR: req.Pr})
 	if err != nil {
 		return nil, previewConnectError(err)
 	}
@@ -41,7 +42,7 @@ func (s *Service) StartPreview(ctx context.Context, req *connect.Request[v1.Star
 	// preview whose saved state no longer restores should come up clean and stay
 	// that way, not come up clean and then be captured over the archive that was
 	// already unusable.
-	if req.Msg.Fresh {
+	if req.Fresh {
 		s.previews.ResetState(ctx, p.ID)
 	}
 
@@ -49,7 +50,7 @@ func (s *Service) StartPreview(ctx context.Context, req *connect.Request[v1.Star
 		return nil, previewConnectError(err)
 	}
 
-	if req.Msg.Wait {
+	if req.Wait {
 		p, err = s.awaitPreview(ctx, p.ID)
 		if err != nil {
 			return nil, previewConnectError(err)
@@ -59,9 +60,9 @@ func (s *Service) StartPreview(ctx context.Context, req *connect.Request[v1.Star
 	}
 
 	reqid.LoggerFrom(ctx).Info("preview start requested",
-		"project", req.Msg.Project, "ref", req.Msg.Ref, "state", p.State)
+		"project", req.Project, "ref", req.Ref, "state", p.State)
 
-	return connect.NewResponse(&v1.StartPreviewResponse{Preview: previewToProto(p)}), nil
+	return &v1.StartPreviewResponse{Preview: previewToProto(p)}, nil
 }
 
 // awaitPreview blocks until the preview stops booting, so `--wait` returns a
@@ -87,31 +88,31 @@ func (s *Service) awaitPreview(ctx context.Context, id string) (*preview.Preview
 
 // StopPreview takes a preview's VM down, and forgets the preview entirely when
 // the request asks for it.
-func (s *Service) StopPreview(ctx context.Context, req *connect.Request[v1.StopPreviewRequest]) (*connect.Response[v1.StopPreviewResponse], error) {
-	if err := s.authorizeProject(ctx, req.Msg.Project, req.Spec().Procedure); err != nil {
+func (s *Service) StopPreview(ctx context.Context, req *v1.StopPreviewRequest) (*v1.StopPreviewResponse, error) {
+	if err := s.authorizeProject(ctx, req.Project, kvarnv1connect.OrchestratorServiceStopPreviewProcedure); err != nil {
 		return nil, err
 	}
-	if err := validatePreviewTarget(req.Msg.Project, req.Msg.Ref); err != nil {
+	if err := validatePreviewTarget(req.Project, req.Ref); err != nil {
 		return nil, err
 	}
 
-	id := preview.ID(req.Msg.Project, req.Msg.Ref)
+	id := preview.ID(req.Project, req.Ref)
 	p, err := s.previews.Get(ctx, id)
 	if err != nil {
 		return nil, previewConnectError(err)
 	}
 
-	if req.Msg.Remove {
+	if req.Remove {
 		if err := s.previews.Remove(ctx, id); err != nil {
 			return nil, previewConnectError(err)
 		}
 		// The record is gone; report it as it was last seen, stopped.
 		p.State = preview.StateStopped
-		return connect.NewResponse(&v1.StopPreviewResponse{Preview: previewToProto(p)}), nil
+		return &v1.StopPreviewResponse{Preview: previewToProto(p)}, nil
 	}
 
 	stop := s.previews.Stop
-	if req.Msg.SkipState {
+	if req.SkipState {
 		stop = s.previews.StopWithoutState
 	}
 	if err := stop(ctx, id, "stopped by request"); err != nil {
@@ -120,16 +121,16 @@ func (s *Service) StopPreview(ctx context.Context, req *connect.Request[v1.StopP
 	if updated, err := s.previews.Get(ctx, id); err == nil {
 		p = updated
 	}
-	return connect.NewResponse(&v1.StopPreviewResponse{Preview: previewToProto(p)}), nil
+	return &v1.StopPreviewResponse{Preview: previewToProto(p)}, nil
 }
 
 // ListPreviews returns the previews the caller may see.
-func (s *Service) ListPreviews(ctx context.Context, req *connect.Request[v1.ListPreviewsRequest]) (*connect.Response[v1.ListPreviewsResponse], error) {
+func (s *Service) ListPreviews(ctx context.Context, req *v1.ListPreviewsRequest) (*v1.ListPreviewsResponse, error) {
 	// A listing filtered to one project is authorized against it; an unfiltered
 	// one is filtered down to what the caller's key covers, so a scoped key
 	// never learns another project's branch names from the preview list.
-	if req.Msg.Project != "" {
-		if err := s.authorizeProject(ctx, req.Msg.Project, req.Spec().Procedure); err != nil {
+	if req.Project != "" {
+		if err := s.authorizeProject(ctx, req.Project, kvarnv1connect.OrchestratorServiceListPreviewsProcedure); err != nil {
 			return nil, err
 		}
 	}
@@ -141,51 +142,51 @@ func (s *Service) ListPreviews(ctx context.Context, req *connect.Request[v1.List
 
 	out := make([]*v1.Preview, 0, len(previews))
 	for _, p := range previews {
-		if req.Msg.Project != "" && p.Project != req.Msg.Project {
+		if req.Project != "" && p.Project != req.Project {
 			continue
 		}
-		if req.Msg.Project == "" {
-			if err := s.authorizeProject(ctx, p.Project, req.Spec().Procedure); err != nil {
+		if req.Project == "" {
+			if err := s.authorizeProject(ctx, p.Project, kvarnv1connect.OrchestratorServiceListPreviewsProcedure); err != nil {
 				continue
 			}
 		}
 		out = append(out, previewToProto(p))
 	}
-	return connect.NewResponse(&v1.ListPreviewsResponse{Previews: out}), nil
+	return &v1.ListPreviewsResponse{Previews: out}, nil
 }
 
 // GetPreview returns one preview plus the tail of its output.
-func (s *Service) GetPreview(ctx context.Context, req *connect.Request[v1.GetPreviewRequest]) (*connect.Response[v1.GetPreviewResponse], error) {
-	if err := s.authorizeProject(ctx, req.Msg.Project, req.Spec().Procedure); err != nil {
+func (s *Service) GetPreview(ctx context.Context, req *v1.GetPreviewRequest) (*v1.GetPreviewResponse, error) {
+	if err := s.authorizeProject(ctx, req.Project, kvarnv1connect.OrchestratorServiceGetPreviewProcedure); err != nil {
 		return nil, err
 	}
-	if err := validatePreviewTarget(req.Msg.Project, req.Msg.Ref); err != nil {
+	if err := validatePreviewTarget(req.Project, req.Ref); err != nil {
 		return nil, err
 	}
 
-	id := preview.ID(req.Msg.Project, req.Msg.Ref)
+	id := preview.ID(req.Project, req.Ref)
 	p, err := s.previews.Get(ctx, id)
 	if err != nil {
 		return nil, previewConnectError(err)
 	}
 
-	return connect.NewResponse(&v1.GetPreviewResponse{
+	return &v1.GetPreviewResponse{
 		Preview: previewToProto(p),
 		Logs:    s.previews.Logs(id, previewLogTailLines),
-	}), nil
+	}, nil
 }
 
 // WatchPreview streams a preview's state until it stops changing or the client
 // goes away.
-func (s *Service) WatchPreview(ctx context.Context, req *connect.Request[v1.WatchPreviewRequest], stream *connect.ServerStream[v1.PreviewUpdate]) error {
-	if err := s.authorizeProject(ctx, req.Msg.Project, req.Spec().Procedure); err != nil {
+func (s *Service) WatchPreview(ctx context.Context, req *v1.WatchPreviewRequest, stream kvarnv1connect.OrchestratorServiceWatchPreviewServerStream) error {
+	if err := s.authorizeProject(ctx, req.Project, kvarnv1connect.OrchestratorServiceWatchPreviewProcedure); err != nil {
 		return err
 	}
-	if err := validatePreviewTarget(req.Msg.Project, req.Msg.Ref); err != nil {
+	if err := validatePreviewTarget(req.Project, req.Ref); err != nil {
 		return err
 	}
 
-	id := preview.ID(req.Msg.Project, req.Msg.Ref)
+	id := preview.ID(req.Project, req.Ref)
 	ticker := time.NewTicker(previewWatchInterval)
 	defer ticker.Stop()
 
@@ -222,15 +223,15 @@ func (s *Service) WatchPreview(ctx context.Context, req *connect.Request[v1.Watc
 // ResetPreviewState drops a preview's saved state. The preview keeps its
 // record, its hostnames and its place in the world; only what it was holding
 // goes away, so the next boot comes up as if nothing had ever run there.
-func (s *Service) ResetPreviewState(ctx context.Context, req *connect.Request[v1.ResetPreviewStateRequest]) (*connect.Response[v1.ResetPreviewStateResponse], error) {
-	if err := s.authorizeProject(ctx, req.Msg.Project, req.Spec().Procedure); err != nil {
+func (s *Service) ResetPreviewState(ctx context.Context, req *v1.ResetPreviewStateRequest) (*v1.ResetPreviewStateResponse, error) {
+	if err := s.authorizeProject(ctx, req.Project, kvarnv1connect.OrchestratorServiceResetPreviewStateProcedure); err != nil {
 		return nil, err
 	}
-	if err := validatePreviewTarget(req.Msg.Project, req.Msg.Ref); err != nil {
+	if err := validatePreviewTarget(req.Project, req.Ref); err != nil {
 		return nil, err
 	}
 
-	id := preview.ID(req.Msg.Project, req.Msg.Ref)
+	id := preview.ID(req.Project, req.Ref)
 	if _, err := s.previews.Get(ctx, id); err != nil {
 		return nil, previewConnectError(err)
 	}
@@ -238,8 +239,8 @@ func (s *Service) ResetPreviewState(ctx context.Context, req *connect.Request[v1
 	// A preview that is running would capture over whatever this deletes the
 	// moment it stops, so the reset would silently not have happened.
 	if s.previews.IsLive(id) {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New(
-			"this preview is running; stop it with `kvarn preview down --no-state` before resetting its state"))
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			"this preview is running; stop it with `kvarn preview down --no-state` before resetting its state")
 	}
 
 	s.previews.ResetState(ctx, id)
@@ -249,16 +250,16 @@ func (s *Service) ResetPreviewState(ctx context.Context, req *connect.Request[v1
 		return nil, previewConnectError(err)
 	}
 	reqid.LoggerFrom(ctx).Info("preview state reset", "preview", id)
-	return connect.NewResponse(&v1.ResetPreviewStateResponse{Preview: previewToProto(p)}), nil
+	return &v1.ResetPreviewStateResponse{Preview: previewToProto(p)}, nil
 }
 
 // PrunePreviewState runs the state sweep by hand. It is the same work the
 // periodic sweeper does, for an operator who wants the disk back now rather
 // than at the next tick.
-func (s *Service) PrunePreviewState(ctx context.Context, req *connect.Request[v1.PrunePreviewStateRequest]) (*connect.Response[v1.PrunePreviewStateResponse], error) {
+func (s *Service) PrunePreviewState(ctx context.Context, req *v1.PrunePreviewStateRequest) (*v1.PrunePreviewStateResponse, error) {
 	// Pruning is host-wide rather than per-project, so it is an operator action
 	// and is authorized as one.
-	if err := s.authorizeHost(ctx, req.Spec().Procedure); err != nil {
+	if err := s.authorizeHost(ctx, kvarnv1connect.OrchestratorServicePrunePreviewStateProcedure); err != nil {
 		return nil, err
 	}
 	if !s.previews.enabled() {
@@ -266,15 +267,15 @@ func (s *Service) PrunePreviewState(ctx context.Context, req *connect.Request[v1
 	}
 
 	retention := s.previews.policy.StateRetention
-	if req.Msg.OlderThan != "" {
-		d, err := time.ParseDuration(req.Msg.OlderThan)
+	if req.OlderThan != "" {
+		d, err := time.ParseDuration(req.OlderThan)
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument,
-				fmt.Errorf("older_than: %w", err))
+				fmt.Errorf("older_than: %w", err).Error())
 		}
 		if d <= 0 {
 			return nil, connect.NewError(connect.CodeInvalidArgument,
-				errors.New("older_than must be greater than zero"))
+				"older_than must be greater than zero")
 		}
 		retention = d
 	}
@@ -285,10 +286,10 @@ func (s *Service) PrunePreviewState(ctx context.Context, req *connect.Request[v1
 	}
 	reqid.LoggerFrom(ctx).Info("preview state pruned",
 		"archives", report.Removed, "bytes", report.BytesFreed, "retention", retention)
-	return connect.NewResponse(&v1.PrunePreviewStateResponse{
+	return &v1.PrunePreviewStateResponse{
 		Removed:    int32(report.Removed),
 		BytesFreed: report.BytesFreed,
-	}), nil
+	}, nil
 }
 
 // previewPhase is the human-readable step a booting preview is on, read from
@@ -314,10 +315,10 @@ func (s *Service) previewPhase(ctx context.Context, p *preview.Preview) string {
 // preview by.
 func validatePreviewTarget(project, ref string) error {
 	if project == "" {
-		return connect.NewError(connect.CodeInvalidArgument, errors.New("project is required"))
+		return connect.NewError(connect.CodeInvalidArgument, "project is required")
 	}
 	if ref == "" {
-		return connect.NewError(connect.CodeInvalidArgument, errors.New("ref is required"))
+		return connect.NewError(connect.CodeInvalidArgument, "ref is required")
 	}
 	return nil
 }
@@ -328,21 +329,21 @@ func previewConnectError(err error) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, preview.ErrNotFound):
-		return connect.NewError(connect.CodeNotFound, err)
+		return connect.NewError(connect.CodeNotFound, err.Error()).WithCause(err)
 	case errors.Is(err, ErrPreviewsDisabled):
-		return connect.NewError(connect.CodeUnimplemented, err)
+		return connect.NewError(connect.CodeUnimplemented, err.Error()).WithCause(err)
 	case errors.Is(err, ErrAtCapacity):
-		return connect.NewError(connect.CodeResourceExhausted, err)
+		return connect.NewError(connect.CodeResourceExhausted, err.Error()).WithCause(err)
 	case errors.Is(err, ErrPreviewDraining):
-		return connect.NewError(connect.CodeUnavailable, err)
+		return connect.NewError(connect.CodeUnavailable, err.Error()).WithCause(err)
 	case errors.Is(err, preview.ErrHostTaken):
-		return connect.NewError(connect.CodeAlreadyExists, err)
+		return connect.NewError(connect.CodeAlreadyExists, err.Error()).WithCause(err)
 	default:
 		var connectErr *connect.Error
 		if errors.As(err, &connectErr) {
 			return err
 		}
-		return connect.NewError(connect.CodeInternal, err)
+		return connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 }
 

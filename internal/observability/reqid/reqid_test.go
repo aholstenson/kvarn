@@ -2,116 +2,91 @@ package reqid_test
 
 import (
 	"context"
-	"errors"
 	"net/http"
+	"net/http/httptest"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
+	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/observability/reqid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-// fakeRequest is the minimal connect.AnyRequest the interceptor reads from.
-type fakeRequest struct {
-	connect.Request[struct{}]
-	hdr  http.Header
-	spec connect.Spec
-	peer connect.Peer
-}
+const procedure = "/svc/Method"
 
-func (r *fakeRequest) Any() any            { return nil }
-func (r *fakeRequest) Spec() connect.Spec  { return r.spec }
-func (r *fakeRequest) Peer() connect.Peer  { return r.peer }
-func (r *fakeRequest) Header() http.Header { return r.hdr }
-func (r *fakeRequest) HTTPMethod() string  { return http.MethodPost }
-
-// fakeResponse captures headers set by the interceptor.
-type fakeResponse struct {
-	connect.Response[struct{}]
-	hdr http.Header
-}
-
-func (r *fakeResponse) Any() any            { return nil }
-func (r *fakeResponse) Header() http.Header { return r.hdr }
-func (r *fakeResponse) Trailer() http.Header {
-	if r.Response.Trailer() == nil {
-		return http.Header{}
-	}
-	return r.Response.Trailer()
+// call dispatches one RPC through interceptor to next the way connect.Server
+// does, so the interceptor sees info on its context.
+func call(interceptor connect.ServerInterceptor, info *connect.CallInfo, next connect.ServerFunc) error {
+	server := connect.NewServer(interceptor)
+	server.Register(connect.Method{Spec: connect.Spec{Procedure: procedure}, Handler: next})
+	return server.Call(context.Background(), procedure, info, nil)
 }
 
 var _ = Describe("Interceptor", func() {
 	var (
-		interceptor connect.Interceptor
-		req         *fakeRequest
+		interceptor connect.ServerInterceptor
+		info        *connect.CallInfo
 	)
 
 	BeforeEach(func() {
 		interceptor = reqid.NewInterceptor()
-		req = &fakeRequest{
-			hdr:  http.Header{},
-			spec: connect.Spec{Procedure: "/svc/Method", IsClient: false},
-		}
+		info = &connect.CallInfo{}
 	})
 
 	It("generates a request ID when none is supplied and echoes it on the response", func() {
 		var seenID string
-		resp := &fakeResponse{hdr: http.Header{}}
-		next := connect.UnaryFunc(func(ctx context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
+		err := call(interceptor, info, func(ctx context.Context, _ connect.Spec, _ connect.ServerStream) error {
 			id, ok := reqid.FromContext(ctx)
 			Expect(ok).To(BeTrue())
 			seenID = id
-			return resp, nil
+			return nil
 		})
-
-		_, err := interceptor.WrapUnary(next)(context.Background(), req)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(seenID).NotTo(BeEmpty())
-		Expect(resp.Header().Get(reqid.HeaderName)).To(Equal(seenID))
+		Expect(info.ResponseHeader().Get(reqid.HeaderName)).To(Equal(seenID))
 	})
 
 	It("preserves an inbound X-Request-Id", func() {
-		req.hdr.Set(reqid.HeaderName, "from-caller")
-		resp := &fakeResponse{hdr: http.Header{}}
+		info.RequestHeader().Set(reqid.HeaderName, "from-caller")
 		var seenID string
-		next := connect.UnaryFunc(func(ctx context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
+		err := call(interceptor, info, func(ctx context.Context, _ connect.Spec, _ connect.ServerStream) error {
 			seenID, _ = reqid.FromContext(ctx)
-			return resp, nil
+			return nil
 		})
-
-		_, err := interceptor.WrapUnary(next)(context.Background(), req)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(seenID).To(Equal("from-caller"))
-		Expect(resp.Header().Get(reqid.HeaderName)).To(Equal("from-caller"))
+		Expect(info.ResponseHeader().Get(reqid.HeaderName)).To(Equal("from-caller"))
 	})
 
-	// A failing handler hands back a typed-nil *connect.Response, which boxes
-	// into a non-nil AnyResponse. Reading a header off it panics, which took
-	// down the connection instead of returning the error the handler chose.
-	It("survives a handler that returns an error with a typed-nil response", func() {
-		want := connect.NewError(connect.CodePermissionDenied, errors.New("denied"))
-		next := connect.UnaryFunc(func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
-			var nilResp *connect.Response[struct{}]
-			return nilResp, want
+	It("passes the handler's error through unchanged", func() {
+		want := connect.NewError(connect.CodePermissionDenied, "denied")
+		err := call(interceptor, info, func(context.Context, connect.Spec, connect.ServerStream) error {
+			return want
 		})
-
-		resp, err := interceptor.WrapUnary(next)(context.Background(), req)
-		Expect(resp).To(BeNil())
-		Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
+		Expect(err).To(MatchError(want))
 	})
 
-	It("echoes the request ID on an error's metadata", func() {
-		req.hdr.Set(reqid.HeaderName, "from-caller")
-		cerr := connect.NewError(connect.CodeNotFound, errors.New("nope"))
-		next := connect.UnaryFunc(func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
-			return nil, cerr
-		})
+	// A failed call is exactly when a caller most wants something to correlate
+	// against, so the ID has to reach the wire on an error reply too.
+	It("echoes the request ID to the caller when the handler fails", func() {
+		server := connect.NewServer(interceptor)
+		kvarnv1connect.RegisterOrchestratorServiceHandler(server, kvarnv1connect.UnimplementedOrchestratorServiceHandler{})
+		mux := http.NewServeMux()
+		connecthttp.Mount(mux, server)
+		httpServer := httptest.NewServer(mux)
+		DeferCleanup(httpServer.Close)
 
-		_, err := interceptor.WrapUnary(next)(context.Background(), req)
-		Expect(err).To(HaveOccurred())
-		var got *connect.Error
-		Expect(errors.As(err, &got)).To(BeTrue())
-		Expect(got.Meta().Get(reqid.HeaderName)).To(Equal("from-caller"))
+		client := kvarnv1connect.NewOrchestratorServiceClient(connect.NewClient(
+			connecthttp.NewTransport(httpServer.Client(), httpServer.URL),
+		))
+		ctx, callInfo := connect.NewClientContext(context.Background())
+		callInfo.RequestHeader().Set(reqid.HeaderName, "from-caller")
+
+		_, err := client.GetSession(ctx, &v1.GetSessionRequest{})
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnimplemented))
+		Expect(callInfo.ResponseHeader().Get(reqid.HeaderName)).To(Equal("from-caller"))
 	})
 
 	It("LoggerFrom returns a usable logger even without a request_id", func() {

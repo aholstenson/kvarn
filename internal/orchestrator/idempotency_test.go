@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -59,23 +59,23 @@ var _ = Describe("StartJob idempotency", func() {
 		svc.dispatcher = newDispatcher(svc, DispatchPolicy{})
 	})
 
-	start := func(key string) (*connect.Response[v1.StartJobResponse], error) {
-		return svc.StartJob(ctx, connect.NewRequest(&v1.StartJobRequest{
+	start := func(key string) (*v1.StartJobResponse, error) {
+		return svc.StartJob(ctx, &v1.StartJobRequest{
 			Project:        "alpha",
 			Prompt:         "fix the bug",
 			IdempotencyKey: key,
-		}))
+		})
 	}
 
 	It("returns the first session when the same key is replayed", func() {
 		first, err := start("req-1")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(first.Msg.Duplicate).To(BeFalse())
+		Expect(first.Duplicate).To(BeFalse())
 
 		second, err := start("req-1")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(second.Msg.SessionId).To(Equal(first.Msg.SessionId))
-		Expect(second.Msg.Duplicate).To(BeTrue())
+		Expect(second.SessionId).To(Equal(first.SessionId))
+		Expect(second.Duplicate).To(BeTrue())
 
 		// The point of the key: exactly one job exists to be dispatched.
 		pending, err := mgr.CountPending(ctx)
@@ -87,15 +87,15 @@ var _ = Describe("StartJob idempotency", func() {
 		first, err := start("req-1")
 		Expect(err).NotTo(HaveOccurred())
 
-		second, err := svc.StartJob(ctx, connect.NewRequest(&v1.StartJobRequest{
+		second, err := svc.StartJob(ctx, &v1.StartJobRequest{
 			Project:        "alpha",
 			Prompt:         "fix the bug",
 			StartFrom:      &v1.StartJobRequest_Branch{Branch: "main"},
 			IdempotencyKey: "req-1",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(second.Msg.SessionId).To(Equal(first.Msg.SessionId))
-		Expect(second.Msg.Duplicate).To(BeTrue())
+		Expect(second.SessionId).To(Equal(first.SessionId))
+		Expect(second.Duplicate).To(BeTrue())
 	})
 
 	It("starts separate jobs for different keys", func() {
@@ -103,8 +103,8 @@ var _ = Describe("StartJob idempotency", func() {
 		Expect(err).NotTo(HaveOccurred())
 		second, err := start("req-2")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(second.Msg.SessionId).NotTo(Equal(first.Msg.SessionId))
-		Expect(second.Msg.Duplicate).To(BeFalse())
+		Expect(second.SessionId).NotTo(Equal(first.SessionId))
+		Expect(second.Duplicate).To(BeFalse())
 	})
 
 	It("starts separate jobs when no key is supplied", func() {
@@ -112,19 +112,19 @@ var _ = Describe("StartJob idempotency", func() {
 		Expect(err).NotTo(HaveOccurred())
 		second, err := start("")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(second.Msg.SessionId).NotTo(Equal(first.Msg.SessionId))
-		Expect(second.Msg.Duplicate).To(BeFalse())
+		Expect(second.SessionId).NotTo(Equal(first.SessionId))
+		Expect(second.Duplicate).To(BeFalse())
 	})
 
 	It("refuses a key reused for a different submission", func() {
 		_, err := start("req-1")
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = svc.StartJob(ctx, connect.NewRequest(&v1.StartJobRequest{
+		_, err = svc.StartJob(ctx, &v1.StartJobRequest{
 			Project:        "alpha",
 			Prompt:         "something else entirely",
 			IdempotencyKey: "req-1",
-		}))
+		})
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeAlreadyExists))
 	})
 
@@ -148,7 +148,7 @@ var _ = Describe("StartJob idempotency", func() {
 				resp, err := start("req-race")
 				Expect(err).NotTo(HaveOccurred())
 				mu.Lock()
-				ids = append(ids, resp.Msg.SessionId)
+				ids = append(ids, resp.SessionId)
 				mu.Unlock()
 			}()
 		}
@@ -165,19 +165,19 @@ var _ = Describe("StartJob idempotency", func() {
 	It("does not carry the key onto a retry of the finished job", func() {
 		first, err := start("req-1")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(mgr.UpdateState(ctx, first.Msg.SessionId, session.StateFailed, "boom")).To(Succeed())
+		Expect(mgr.UpdateState(ctx, first.SessionId, session.StateFailed, "boom")).To(Succeed())
 
-		retried, err := svc.RetryJob(ctx, connect.NewRequest(&v1.RetryJobRequest{
-			SessionId: first.Msg.SessionId,
-		}))
+		retried, err := svc.RetryJob(ctx, &v1.RetryJobRequest{
+			SessionId: first.SessionId,
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(retried.Msg.SessionId).NotTo(Equal(first.Msg.SessionId))
+		Expect(retried.SessionId).NotTo(Equal(first.SessionId))
 
 		// The retry claimed nothing, so the original key still resolves to the
 		// session that took it.
 		found, err := mgr.FindByIdempotencyKey(ctx, "alpha", "req-1")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(found.ID).To(Equal(first.Msg.SessionId))
+		Expect(found.ID).To(Equal(first.SessionId))
 	})
 
 	It("reports a store conflict it cannot resolve rather than inventing a session", func() {

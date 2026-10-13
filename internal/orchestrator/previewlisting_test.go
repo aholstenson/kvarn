@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 
-	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -40,11 +39,11 @@ var _ = Describe("Listing jobs alongside preview boots", func() {
 	})
 
 	list := func(includePreviews bool) []*v1.GetSessionResponse {
-		resp, err := svc.ListSessions(ctx, connect.NewRequest(&v1.ListSessionsRequest{
+		resp, err := svc.ListSessions(ctx, &v1.ListSessionsRequest{
 			IncludePreviews: includePreviews,
-		}))
+		})
 		ExpectWithOffset(1, err).NotTo(HaveOccurred())
-		return resp.Msg.Sessions
+		return resp.Sessions
 	}
 
 	prompts := func(sessions []*v1.GetSessionResponse) []string {

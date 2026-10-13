@@ -6,11 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/aholstenson/kvarn/internal/config/apikey"
 	"github.com/aholstenson/kvarn/internal/config/tomlstore"
 	"github.com/aholstenson/kvarn/internal/observability/reqid"
@@ -40,13 +39,14 @@ type Option func(*Interceptor)
 // WithMetrics wires the auth.attempts counter sink.
 func WithMetrics(m AuthMetrics) Option { return func(i *Interceptor) { i.metrics = m } }
 
-// NewInterceptor returns an Interceptor backed by store.
-func NewInterceptor(store apikey.Store, opts ...Option) *Interceptor {
+// NewInterceptor returns a server interceptor backed by store. It
+// authenticates unary and streaming calls (e.g. WatchSession) alike.
+func NewInterceptor(store apikey.Store, opts ...Option) connect.ServerInterceptor {
 	i := &Interceptor{store: store}
 	for _, opt := range opts {
 		opt(i)
 	}
-	return i
+	return i.wrap
 }
 
 // Rejection reason categories. These are coarse enough not to leak which
@@ -67,7 +67,7 @@ const (
 // rejection returns errAuthFailed plus a category string so callers can record
 // the reason without leaking it to the wire; a store failure maps to
 // Unavailable so the service fails closed.
-func (i *Interceptor) authenticate(header http.Header) (*Identity, string, string, error) {
+func (i *Interceptor) authenticate(header *connect.Header) (*Identity, string, string, error) {
 	authz := header.Get("Authorization")
 	if !strings.HasPrefix(authz, bearerPrefix) {
 		return nil, "", reasonHeaderMissing, errAuthFailed
@@ -84,7 +84,7 @@ func (i *Interceptor) authenticate(header http.Header) (*Identity, string, strin
 			return nil, keyID, reasonUnknownKey, errAuthFailed
 		}
 		return nil, keyID, reasonStoreError,
-			connect.NewError(connect.CodeUnavailable, fmt.Errorf("read api key store: %w", err))
+			connect.NewError(connect.CodeUnavailable, fmt.Errorf("read api key store: %w", err).Error())
 	}
 
 	if subtle.ConstantTimeCompare([]byte(apikey.HashSecret(secret)), []byte(key.Hash)) != 1 {
@@ -108,7 +108,7 @@ func (i *Interceptor) authenticate(header http.Header) (*Identity, string, strin
 
 // errAuthFailed is the single opaque error returned for every authentication
 // failure to avoid leaking which check rejected the request.
-var errAuthFailed = connect.NewError(connect.CodeUnauthenticated, errors.New("authentication failed"))
+var errAuthFailed = connect.NewError(connect.CodeUnauthenticated, "authentication failed")
 
 // logSuccess emits the audit event after a successful authentication.
 func (i *Interceptor) logSuccess(ctx context.Context, id *Identity, procedure, remote string) {
@@ -150,53 +150,27 @@ func reqIDOrEmpty(ctx context.Context) string {
 	return id
 }
 
-// WrapUnary authenticates unary handler calls.
-func (i *Interceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		if req.Spec().IsClient {
-			return next(ctx, req)
+// wrap authenticates every handler call before it reaches next.
+func (i *Interceptor) wrap(next connect.ServerFunc) connect.ServerFunc {
+	return func(ctx context.Context, spec connect.Spec, stream connect.ServerStream) error {
+		var header *connect.Header
+		var remote string
+		if info, ok := connect.CallInfoForServerContext(ctx); ok {
+			header = info.RequestHeader()
+			remote = info.PeerAddr
 		}
-		id, keyID, reason, err := i.authenticate(req.Header())
-		procedure := req.Spec().Procedure
-		remote := req.Peer().Addr
+		id, keyID, reason, err := i.authenticate(header)
 		if err != nil {
-			i.logFailure(ctx, keyID, reason, procedure, remote)
-			if i.metrics != nil {
-				i.metrics.RecordAuth(ctx, "failed", reason)
-			}
-			return nil, err
-		}
-		i.logSuccess(ctx, id, procedure, remote)
-		if i.metrics != nil {
-			i.metrics.RecordAuth(ctx, "success", "")
-		}
-		return next(WithIdentity(ctx, id), req)
-	}
-}
-
-// WrapStreamingClient is a pass-through; this interceptor is server-side only.
-func (i *Interceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	return next
-}
-
-// WrapStreamingHandler authenticates server-streaming handler calls (e.g.
-// WatchSession).
-func (i *Interceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
-		id, keyID, reason, err := i.authenticate(conn.RequestHeader())
-		procedure := conn.Spec().Procedure
-		remote := conn.Peer().Addr
-		if err != nil {
-			i.logFailure(ctx, keyID, reason, procedure, remote)
+			i.logFailure(ctx, keyID, reason, spec.Procedure, remote)
 			if i.metrics != nil {
 				i.metrics.RecordAuth(ctx, "failed", reason)
 			}
 			return err
 		}
-		i.logSuccess(ctx, id, procedure, remote)
+		i.logSuccess(ctx, id, spec.Procedure, remote)
 		if i.metrics != nil {
 			i.metrics.RecordAuth(ctx, "success", "")
 		}
-		return next(WithIdentity(ctx, id), conn)
+		return next(WithIdentity(ctx, id), spec, stream)
 	}
 }

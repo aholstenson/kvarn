@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/aholstenson/kvarn/internal/session"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

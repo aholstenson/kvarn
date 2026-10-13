@@ -2,11 +2,12 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 )
@@ -21,23 +22,27 @@ func WatchSession(ctx context.Context, oc kvarnv1connect.OrchestratorServiceClie
 // fromSeq are delivered, so a client that has already seen part of the history
 // does not print it twice. Zero replays everything the store still holds.
 func WatchSessionFrom(ctx context.Context, oc kvarnv1connect.OrchestratorServiceClient, sessionID string, fromSeq int64) error {
-	stream, err := oc.WatchSession(ctx, connect.NewRequest(&v1.WatchSessionRequest{
+	stream, err := oc.WatchSession(ctx, &v1.WatchSessionRequest{
 		SessionId:    sessionID,
 		FromSequence: fromSeq,
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("watch session: %w", err)
 	}
 	defer stream.Close()
 
 	printer := NewPrinter()
-	for stream.Receive() {
-		printer.Print(stream.Msg())
+	for {
+		msg, err := stream.Receive()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return fmt.Errorf("watch stream: %w", err)
+		}
+		printer.Print(msg)
 	}
 
-	if err := stream.Err(); err != nil {
-		return fmt.Errorf("watch stream: %w", err)
-	}
 	return nil
 }
 

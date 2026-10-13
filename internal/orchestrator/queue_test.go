@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -67,18 +67,18 @@ var _ = Describe("Queue inspection", func() {
 			queued("old-high", "alpha", 5, base)
 
 			svc := build(orchestrator.DispatchPolicy{})
-			resp, err := svc.ListQueue(ctx, connect.NewRequest(&v1.ListQueueRequest{}))
+			resp, err := svc.ListQueue(ctx, &v1.ListQueueRequest{})
 			Expect(err).NotTo(HaveOccurred())
 
 			ids := []string{}
 			positions := []int32{}
-			for _, e := range resp.Msg.Entries {
+			for _, e := range resp.Entries {
 				ids = append(ids, e.Session.SessionId)
 				positions = append(positions, e.Position)
 			}
 			Expect(ids).To(Equal([]string{"old-high", "new-high", "old-low"}))
 			Expect(positions).To(Equal([]int32{1, 2, 3}))
-			Expect(resp.Msg.Backlog).To(Equal(int32(3)))
+			Expect(resp.Backlog).To(Equal(int32(3)))
 		})
 
 		It("reports the priority an aged entry is actually ordered by", func() {
@@ -86,14 +86,14 @@ var _ = Describe("Queue inspection", func() {
 			queued("important", "alpha", 2, base.Add(59*time.Minute))
 
 			svc := build(orchestrator.DispatchPolicy{PriorityAgeStep: 10 * time.Minute})
-			resp, err := svc.ListQueue(ctx, connect.NewRequest(&v1.ListQueueRequest{}))
+			resp, err := svc.ListQueue(ctx, &v1.ListQueueRequest{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Entries).To(HaveLen(2))
+			Expect(resp.Entries).To(HaveLen(2))
 
 			// Six age steps would put the waiting entry at 6; the clamp holds it
 			// at the highest priority in the backlog, and the reported value is
 			// the clamped one the ordering used.
-			first := resp.Msg.Entries[0]
+			first := resp.Entries[0]
 			Expect(first.Session.SessionId).To(Equal("waiting"))
 			Expect(first.Session.Priority).To(Equal(int32(0)))
 			Expect(first.EffectivePriority).To(Equal(int32(2)))
@@ -105,13 +105,13 @@ var _ = Describe("Queue inspection", func() {
 			queued("a2", "alpha", 1, base)
 
 			svc := build(orchestrator.DispatchPolicy{})
-			resp, err := svc.ListQueue(ctx, connect.NewRequest(&v1.ListQueueRequest{Project: "beta"}))
+			resp, err := svc.ListQueue(ctx, &v1.ListQueueRequest{Project: "beta"})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Entries).To(HaveLen(1))
-			Expect(resp.Msg.Entries[0].Session.SessionId).To(Equal("b1"))
+			Expect(resp.Entries).To(HaveLen(1))
+			Expect(resp.Entries[0].Session.SessionId).To(Equal("b1"))
 			// Second overall, even though it is the only row returned.
-			Expect(resp.Msg.Entries[0].Position).To(Equal(int32(2)))
-			Expect(resp.Msg.Backlog).To(Equal(int32(3)))
+			Expect(resp.Entries[0].Position).To(Equal(int32(2)))
+			Expect(resp.Backlog).To(Equal(int32(3)))
 		})
 
 		It("hides entries belonging to projects the key does not cover", func() {
@@ -129,13 +129,13 @@ var _ = Describe("Queue inspection", func() {
 			addr := serveOrchestrator(svc, auth.NewInterceptor(keys))
 
 			resp, err := client.NewOrchestrator(addr, token).ListQueue(ctx,
-				connect.NewRequest(&v1.ListQueueRequest{}))
+				&v1.ListQueueRequest{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Entries).To(HaveLen(1))
-			Expect(resp.Msg.Entries[0].Session.SessionId).To(Equal("mine"))
+			Expect(resp.Entries).To(HaveLen(1))
+			Expect(resp.Entries[0].Session.SessionId).To(Equal("mine"))
 			// The higher-priority entry it cannot see is still ahead of it, and
 			// the position says so rather than pretending it is next.
-			Expect(resp.Msg.Entries[0].Position).To(Equal(int32(2)))
+			Expect(resp.Entries[0].Position).To(Equal(int32(2)))
 		})
 	})
 
@@ -146,16 +146,16 @@ var _ = Describe("Queue inspection", func() {
 			queued("b1", "beta", 0, base)
 
 			svc := build(orchestrator.DispatchPolicy{MaxBacklog: 500, MaxDispatched: 8})
-			resp, err := svc.GetQueueStats(ctx, connect.NewRequest(&v1.GetQueueStatsRequest{}))
+			resp, err := svc.GetQueueStats(ctx, &v1.GetQueueStatsRequest{})
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(resp.Msg.Backlog).To(Equal(int32(3)))
-			Expect(resp.Msg.MaxBacklog).To(Equal(int32(500)))
-			Expect(resp.Msg.Dispatched).To(Equal(int32(0)))
-			Expect(resp.Msg.MaxDispatched).To(Equal(int32(8)))
+			Expect(resp.Backlog).To(Equal(int32(3)))
+			Expect(resp.MaxBacklog).To(Equal(int32(500)))
+			Expect(resp.Dispatched).To(Equal(int32(0)))
+			Expect(resp.MaxDispatched).To(Equal(int32(8)))
 
 			perProject := map[string]int32{}
-			for _, p := range resp.Msg.PerProject {
+			for _, p := range resp.PerProject {
 				perProject[p.Project] = p.Backlog
 			}
 			Expect(perProject).To(Equal(map[string]int32{"alpha": 2, "beta": 1}))
@@ -176,12 +176,12 @@ var _ = Describe("Queue inspection", func() {
 			addr := serveOrchestrator(svc, auth.NewInterceptor(keys))
 
 			resp, err := client.NewOrchestrator(addr, token).GetQueueStats(ctx,
-				connect.NewRequest(&v1.GetQueueStatsRequest{}))
+				&v1.GetQueueStatsRequest{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.PerProject).To(HaveLen(1))
-			Expect(resp.Msg.PerProject[0].Project).To(Equal("alpha"))
+			Expect(resp.PerProject).To(HaveLen(1))
+			Expect(resp.PerProject[0].Project).To(Equal("alpha"))
 			// The host-wide depth is not per-project data and stays whole.
-			Expect(resp.Msg.Backlog).To(Equal(int32(2)))
+			Expect(resp.Backlog).To(Equal(int32(2)))
 		})
 	})
 
@@ -191,16 +191,16 @@ var _ = Describe("Queue inspection", func() {
 			queued("ahead", "alpha", 5, base)
 
 			svc := build(orchestrator.DispatchPolicy{})
-			resp, err := svc.SetJobPriority(ctx, connect.NewRequest(&v1.SetJobPriorityRequest{
+			resp, err := svc.SetJobPriority(ctx, &v1.SetJobPriorityRequest{
 				SessionId: "waiting",
 				Priority:  9,
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.PreviousPriority).To(Equal(int32(1)))
+			Expect(resp.PreviousPriority).To(Equal(int32(1)))
 
-			listed, err := svc.ListQueue(ctx, connect.NewRequest(&v1.ListQueueRequest{}))
+			listed, err := svc.ListQueue(ctx, &v1.ListQueueRequest{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(listed.Msg.Entries[0].Session.SessionId).To(Equal("waiting"))
+			Expect(listed.Entries[0].Session.SessionId).To(Equal("waiting"))
 		})
 
 		It("refuses a job that has already been dispatched", func() {
@@ -208,10 +208,10 @@ var _ = Describe("Queue inspection", func() {
 			Expect(mgr.UpdateState(ctx, "started", session.StateRunning, "")).To(Succeed())
 
 			svc := build(orchestrator.DispatchPolicy{})
-			_, err := svc.SetJobPriority(ctx, connect.NewRequest(&v1.SetJobPriorityRequest{
+			_, err := svc.SetJobPriority(ctx, &v1.SetJobPriorityRequest{
 				SessionId: "started",
 				Priority:  9,
-			}))
+			})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeFailedPrecondition))
 
 			got, err := mgr.Get(ctx, "started")
@@ -235,49 +235,49 @@ var _ = Describe("Queue inspection", func() {
 		It("filters by state, mode, pull request and creation time", func() {
 			svc := build(orchestrator.DispatchPolicy{})
 
-			byState, err := svc.ListSessions(ctx, connect.NewRequest(&v1.ListSessionsRequest{
+			byState, err := svc.ListSessions(ctx, &v1.ListSessionsRequest{
 				States: []string{"failed"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(projectIDs(byState.Msg.Sessions)).To(Equal([]string{"s-failed"}))
+			Expect(projectIDs(byState.Sessions)).To(Equal([]string{"s-failed"}))
 
-			byMode, err := svc.ListSessions(ctx, connect.NewRequest(&v1.ListSessionsRequest{
+			byMode, err := svc.ListSessions(ctx, &v1.ListSessionsRequest{
 				Mode: "review",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(projectIDs(byMode.Msg.Sessions)).To(Equal([]string{"s-pending"}))
+			Expect(projectIDs(byMode.Sessions)).To(Equal([]string{"s-pending"}))
 
-			byPR, err := svc.ListSessions(ctx, connect.NewRequest(&v1.ListSessionsRequest{
+			byPR, err := svc.ListSessions(ctx, &v1.ListSessionsRequest{
 				PrRef: "42",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(projectIDs(byPR.Msg.Sessions)).To(Equal([]string{"s-failed"}))
+			Expect(projectIDs(byPR.Sessions)).To(Equal([]string{"s-failed"}))
 
-			since, err := svc.ListSessions(ctx, connect.NewRequest(&v1.ListSessionsRequest{
+			since, err := svc.ListSessions(ctx, &v1.ListSessionsRequest{
 				CreatedAfter: timestamppb.New(base.Add(30 * time.Second)),
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(projectIDs(since.Msg.Sessions)).To(Equal([]string{"s-failed"}))
+			Expect(projectIDs(since.Sessions)).To(Equal([]string{"s-failed"}))
 		})
 
 		It("rejects a state no session can be in", func() {
 			svc := build(orchestrator.DispatchPolicy{})
-			_, err := svc.ListSessions(ctx, connect.NewRequest(&v1.ListSessionsRequest{
+			_, err := svc.ListSessions(ctx, &v1.ListSessionsRequest{
 				States: []string{"canceled"},
-			}))
+			})
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 			Expect(err).To(MatchError(ContainSubstring("unknown state")))
 		})
 
 		It("carries the queue fields a listing is read for", func() {
 			svc := build(orchestrator.DispatchPolicy{})
-			resp, err := svc.GetSession(ctx, connect.NewRequest(&v1.GetSessionRequest{
+			resp, err := svc.GetSession(ctx, &v1.GetSessionRequest{
 				SessionId: "s-pending",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.CreatedAt.AsTime()).To(BeTemporally("~", base, time.Millisecond))
-			Expect(resp.Msg.QueuedAt.AsTime()).To(BeTemporally("~", base, time.Millisecond))
-			Expect(resp.Msg.Attempts).To(Equal(int32(0)))
+			Expect(resp.CreatedAt.AsTime()).To(BeTemporally("~", base, time.Millisecond))
+			Expect(resp.QueuedAt.AsTime()).To(BeTemporally("~", base, time.Millisecond))
+			Expect(resp.Attempts).To(Equal(int32(0)))
 		})
 	})
 })

@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/cmd/client"
 	"gopkg.in/yaml.v3"
@@ -63,14 +62,14 @@ func (c *StartCmd) Run() error {
 		req.StartFrom = &v1.StartJobRequest_Branch{Branch: c.Branch}
 	}
 
-	resp, err := oc.StartJob(ctx, connect.NewRequest(req))
+	resp, err := oc.StartJob(ctx, req)
 	if err != nil {
 		return fmt.Errorf("start job: %w", err)
 	}
 
-	sessionID := resp.Msg.SessionId
+	sessionID := resp.SessionId
 	fmt.Fprintf(os.Stdout, "Session: %s\n", sessionID)
-	if resp.Msg.Duplicate {
+	if resp.Duplicate {
 		fmt.Fprintf(os.Stdout, "Idempotency key %q already started this job; no new job was submitted.\n", c.IdempotencyKey)
 	}
 

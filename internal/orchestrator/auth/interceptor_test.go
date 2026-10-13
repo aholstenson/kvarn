@@ -3,10 +3,9 @@ package auth
 import (
 	"context"
 	"errors"
-	"net/http"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/aholstenson/kvarn/internal/config/apikey"
 	"github.com/aholstenson/kvarn/internal/config/tomlstore"
 	. "github.com/onsi/ginkgo/v2"
@@ -35,12 +34,18 @@ func (m *memStore) Put(context.Context, *apikey.APIKey) error      { return nil 
 func (m *memStore) Delete(context.Context, string) error           { return nil }
 
 // header builds an Authorization header carrying the given bearer value.
-func header(value string) http.Header {
-	h := http.Header{}
+func header(value string) *connect.Header {
+	h := &connect.Header{}
 	if value != "" {
 		h.Set("Authorization", value)
 	}
 	return h
+}
+
+// newTestInterceptor builds the Interceptor value behind NewInterceptor, so
+// the tests can reach authenticate directly.
+func newTestInterceptor(store apikey.Store) *Interceptor {
+	return &Interceptor{store: store}
 }
 
 var _ = Describe("Interceptor.authenticate", func() {
@@ -70,7 +75,7 @@ var _ = Describe("Interceptor.authenticate", func() {
 	})
 
 	It("accepts a valid token and returns the identity", func() {
-		id, parsedKeyID, _, err := NewInterceptor(store).authenticate(header("Bearer " + token))
+		id, parsedKeyID, _, err := newTestInterceptor(store).authenticate(header("Bearer " + token))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(id.KeyName).To(Equal("ci"))
 		Expect(id.KeyID).To(Equal(keyID))
@@ -79,40 +84,40 @@ var _ = Describe("Interceptor.authenticate", func() {
 	})
 
 	It("rejects a missing Authorization header as Unauthenticated", func() {
-		_, _, _, err := NewInterceptor(store).authenticate(header(""))
+		_, _, _, err := newTestInterceptor(store).authenticate(header(""))
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 	})
 
 	It("rejects a non-bearer Authorization header", func() {
-		_, _, _, err := NewInterceptor(store).authenticate(header("Basic " + token))
+		_, _, _, err := newTestInterceptor(store).authenticate(header("Basic " + token))
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 	})
 
 	It("rejects a malformed token", func() {
-		_, _, _, err := NewInterceptor(store).authenticate(header("Bearer not-a-real-token"))
+		_, _, _, err := newTestInterceptor(store).authenticate(header("Bearer not-a-real-token"))
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 	})
 
 	It("rejects an unknown key ID", func() {
-		_, _, _, err := NewInterceptor(store).authenticate(header("Bearer kvarn_unknownid_" + secret))
+		_, _, _, err := newTestInterceptor(store).authenticate(header("Bearer kvarn_unknownid_" + secret))
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 	})
 
 	It("rejects a wrong secret", func() {
-		_, _, _, err := NewInterceptor(store).authenticate(header("Bearer kvarn_" + keyID + "_wrongsecret"))
+		_, _, _, err := newTestInterceptor(store).authenticate(header("Bearer kvarn_" + keyID + "_wrongsecret"))
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 	})
 
 	It("rejects a disabled key", func() {
 		store.keys[keyID].Disabled = true
-		_, _, _, err := NewInterceptor(store).authenticate(header("Bearer " + token))
+		_, _, _, err := newTestInterceptor(store).authenticate(header("Bearer " + token))
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 	})
 
 	It("rejects an expired key", func() {
 		past := time.Now().Add(-time.Hour)
 		store.keys[keyID].Expires = &past
-		_, _, _, err := NewInterceptor(store).authenticate(header("Bearer " + token))
+		_, _, _, err := newTestInterceptor(store).authenticate(header("Bearer " + token))
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 	})
 
@@ -127,7 +132,7 @@ var _ = Describe("Interceptor.authenticate", func() {
 		_, disabledSecret, _ := apikey.ParseToken(disabledToken)
 		_, expiredSecret, _ := apikey.ParseToken(expiredToken)
 
-		headers := []http.Header{
+		headers := []*connect.Header{
 			header(""),
 			header("Basic " + token),
 			header("Bearer not-a-real-token"),
@@ -136,7 +141,7 @@ var _ = Describe("Interceptor.authenticate", func() {
 			header("Bearer kvarn_disabledid_" + disabledSecret),
 			header("Bearer kvarn_expiredid_" + expiredSecret),
 		}
-		interceptor := NewInterceptor(store)
+		interceptor := newTestInterceptor(store)
 		var messages []string
 		for _, h := range headers {
 			_, _, _, err := interceptor.authenticate(h)
@@ -150,7 +155,7 @@ var _ = Describe("Interceptor.authenticate", func() {
 
 	It("fails closed with Unavailable on a store error", func() {
 		store.getErr = errors.New("disk on fire")
-		_, _, _, err := NewInterceptor(store).authenticate(header("Bearer " + token))
+		_, _, _, err := newTestInterceptor(store).authenticate(header("Bearer " + token))
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnavailable))
 	})
 })

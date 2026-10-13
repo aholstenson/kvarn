@@ -9,7 +9,6 @@ import (
 	"net"
 	"time"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 )
@@ -127,17 +126,25 @@ func pumpToGuest(
 	connectionID string,
 	conn net.Conn,
 ) error {
-	stream, err := client.ReadConnection(ctx, connect.NewRequest(&v1.ReadConnectionRequest{
+	stream, err := client.ReadConnection(ctx, &v1.ReadConnectionRequest{
 		ConnectionId: connectionID,
 		Token:        token,
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("open inbound stream: %w", err)
 	}
 	defer stream.Close()
 
-	for stream.Receive() {
-		data := stream.Msg().GetData()
+	var streamErr error
+	for {
+		msg, err := stream.Receive()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				streamErr = err
+			}
+			break
+		}
+		data := msg.GetData()
 		if len(data) == 0 {
 			continue
 		}
@@ -148,7 +155,7 @@ func pumpToGuest(
 	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
 		cw.CloseWrite()
 	}
-	return stream.Err()
+	return streamErr
 }
 
 // pumpFromGuest streams what the guest server answers back out to the client.
@@ -159,7 +166,10 @@ func pumpFromGuest(
 	connectionID string,
 	conn net.Conn,
 ) error {
-	stream := client.WriteConnection(ctx)
+	stream, err := client.WriteConnection(ctx)
+	if err != nil {
+		return err
+	}
 
 	if err := stream.Send(&v1.ConnectionChunk{
 		Payload: &v1.ConnectionChunk_Start{Start: &v1.ConnectionStreamStart{

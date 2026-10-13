@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -53,14 +53,14 @@ var _ = Describe("Bulk cancel", func() {
 	}
 
 	It("cancels every active job for one project and leaves the rest", func() {
-		resp, err := svc.CancelJobs(ctx, connect.NewRequest(&v1.CancelJobsRequest{
+		resp, err := svc.CancelJobs(ctx, &v1.CancelJobsRequest{
 			Project: "alpha",
 			Reason:  "draining",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		ids := []string{}
-		for _, j := range resp.Msg.Jobs {
+		for _, j := range resp.Jobs {
 			Expect(j.Error).To(BeEmpty())
 			Expect(j.PreviousState).To(Equal(string(session.StatePending)))
 			ids = append(ids, j.SessionId)
@@ -77,41 +77,41 @@ var _ = Describe("Bulk cancel", func() {
 	})
 
 	It("narrows by mode as well as project", func() {
-		resp, err := svc.CancelJobs(ctx, connect.NewRequest(&v1.CancelJobsRequest{
+		resp, err := svc.CancelJobs(ctx, &v1.CancelJobsRequest{
 			Project: "alpha",
 			Mode:    "implement",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.Jobs).To(HaveLen(1))
-		Expect(resp.Msg.Jobs[0].SessionId).To(Equal("a2"))
+		Expect(resp.Jobs).To(HaveLen(1))
+		Expect(resp.Jobs[0].SessionId).To(Equal("a2"))
 		Expect(stateOf("a1")).To(Equal(session.StatePending))
 	})
 
 	It("reports what a dry run would cancel without cancelling it", func() {
-		resp, err := svc.CancelJobs(ctx, connect.NewRequest(&v1.CancelJobsRequest{
+		resp, err := svc.CancelJobs(ctx, &v1.CancelJobsRequest{
 			Project: "alpha",
 			DryRun:  true,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.Jobs).To(HaveLen(2))
+		Expect(resp.Jobs).To(HaveLen(2))
 		Expect(stateOf("a1")).To(Equal(session.StatePending))
 		Expect(stateOf("a2")).To(Equal(session.StatePending))
 	})
 
 	It("refuses an unfiltered sweep unless it says so", func() {
-		_, err := svc.CancelJobs(ctx, connect.NewRequest(&v1.CancelJobsRequest{}))
+		_, err := svc.CancelJobs(ctx, &v1.CancelJobsRequest{})
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 		Expect(stateOf("a1")).To(Equal(session.StatePending))
 
-		resp, err := svc.CancelJobs(ctx, connect.NewRequest(&v1.CancelJobsRequest{All: true}))
+		resp, err := svc.CancelJobs(ctx, &v1.CancelJobsRequest{All: true})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.Jobs).To(HaveLen(3))
+		Expect(resp.Jobs).To(HaveLen(3))
 	})
 
 	It("rejects a terminal state, which has nothing to cancel", func() {
-		_, err := svc.CancelJobs(ctx, connect.NewRequest(&v1.CancelJobsRequest{
+		_, err := svc.CancelJobs(ctx, &v1.CancelJobsRequest{
 			States: []string{"completed"},
-		}))
+		})
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 	})
 })
@@ -159,13 +159,13 @@ var _ = Describe("RetryJob", func() {
 	It("resubmits a failed job as a new session, leaving the original alone", func() {
 		original := finished("implement", "")
 
-		resp, err := svc.RetryJob(ctx, connect.NewRequest(&v1.RetryJobRequest{
+		resp, err := svc.RetryJob(ctx, &v1.RetryJobRequest{
 			SessionId: original.ID,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.SessionId).NotTo(Equal(original.ID))
+		Expect(resp.SessionId).NotTo(Equal(original.ID))
 
-		retried, err := mgr.Get(ctx, resp.Msg.SessionId)
+		retried, err := mgr.Get(ctx, resp.SessionId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(retried.ProjectName).To(Equal("alpha"))
 		Expect(retried.Prompt).To(Equal("fix the bug"))
@@ -183,13 +183,13 @@ var _ = Describe("RetryJob", func() {
 	It("replaces the prompt when the caller supplies one", func() {
 		original := finished("implement", "")
 
-		resp, err := svc.RetryJob(ctx, connect.NewRequest(&v1.RetryJobRequest{
+		resp, err := svc.RetryJob(ctx, &v1.RetryJobRequest{
 			SessionId: original.ID,
 			Prompt:    "fix it properly this time",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
-		retried, err := mgr.Get(ctx, resp.Msg.SessionId)
+		retried, err := mgr.Get(ctx, resp.SessionId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(retried.Prompt).To(Equal("fix it properly this time"))
 	})
@@ -201,7 +201,7 @@ var _ = Describe("RetryJob", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(mgr.UpdateState(ctx, sess.ID, session.StateRunning, "")).To(Succeed())
 
-		_, err = svc.RetryJob(ctx, connect.NewRequest(&v1.RetryJobRequest{SessionId: sess.ID}))
+		_, err = svc.RetryJob(ctx, &v1.RetryJobRequest{SessionId: sess.ID})
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeFailedPrecondition))
 		Expect(err).To(MatchError(ContainSubstring("cancel it before retrying")))
 	})
@@ -212,7 +212,7 @@ var _ = Describe("RetryJob", func() {
 		// exactly the pair the continuation marker exists to tell apart.
 		original := finished("implement", "42")
 
-		_, err := svc.RetryJob(ctx, connect.NewRequest(&v1.RetryJobRequest{SessionId: original.ID}))
+		_, err := svc.RetryJob(ctx, &v1.RetryJobRequest{SessionId: original.ID})
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeFailedPrecondition))
 		Expect(err).To(MatchError(ContainSubstring("already opened pull request 42")))
 	})

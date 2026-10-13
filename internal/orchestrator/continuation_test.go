@@ -11,7 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/agent"
@@ -203,18 +204,21 @@ var _ = Describe("StartJob continuing a pull request", func() {
 		})
 
 		mux := http.NewServeMux()
-		path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc)
-		mux.Handle(path, handler)
-		bridgePath, bridgeHandler := kvarnv1connect.NewBridgeServiceHandler(svc.BridgeHandler())
-		mux.Handle(bridgePath, bridgeHandler)
+		orchestratorRPC := connect.NewServer()
+		kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, svc)
+		connecthttp.Mount(mux, orchestratorRPC)
+		bridgeRPC := connect.NewServer()
+		kvarnv1connect.RegisterBridgeServiceHandler(bridgeRPC, svc.BridgeHandler())
+		connecthttp.Mount(mux, bridgeRPC)
 
 		server = &http.Server{Handler: mux}
 		go server.Serve(listener)
 
-		client = kvarnv1connect.NewOrchestratorServiceClient(
+		client = kvarnv1connect.NewOrchestratorServiceClient(connect.NewClient(connecthttp.NewTransport(
 			http.DefaultClient,
 			fmt.Sprintf("http://%s", listener.Addr().String()),
-		)
+			connecthttp.WithReadMaxBytes(0),
+		)))
 	})
 
 	AfterEach(func() {
@@ -229,12 +233,12 @@ var _ = Describe("StartJob continuing a pull request", func() {
 		os.RemoveAll(tmpDir)
 	})
 
-	submit := func(project, prRef, feedback string) (*connect.Response[v1.StartJobResponse], error) {
-		return client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+	submit := func(project, prRef, feedback string) (*v1.StartJobResponse, error) {
+		return client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project:   project,
 			Prompt:    feedback,
 			StartFrom: &v1.StartJobRequest_PrRef{PrRef: prRef},
-		}))
+		})
 	}
 
 	stateOf := func(sid string) func() string {
@@ -250,7 +254,7 @@ var _ = Describe("StartJob continuing a pull request", func() {
 	It("clones the head branch, pushes back to it, and comments without opening a PR", func() {
 		resp, err := submit("test-project", "42", "rename the helper and add a test")
 		Expect(err).NotTo(HaveOccurred())
-		Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+		Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 
 		mockScm.mu.Lock()
 		cloneBranch := mockScm.lastCloneOpts.Branch
@@ -283,7 +287,7 @@ var _ = Describe("StartJob continuing a pull request", func() {
 
 		resp, err := submit("test-project", "42", "rename the helper")
 		Expect(err).NotTo(HaveOccurred())
-		Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+		Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 
 		Expect(mockForgeInst.lastCommentOpts.Body).To(HavePrefix("**Preview:** https://pr-42.preview.example.com"),
 			"the pull request is open, so the site addressed by {pr} resolves without anything having started it")
@@ -292,18 +296,18 @@ var _ = Describe("StartJob continuing a pull request", func() {
 	It("records the pull request on the session and keeps the raw feedback as its prompt", func() {
 		resp, err := submit("test-project", "42", "rename the helper")
 		Expect(err).NotTo(HaveOccurred())
-		Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+		Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 
-		got, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-			SessionId: resp.Msg.SessionId,
-		}))
+		got, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+			SessionId: resp.SessionId,
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(got.Msg.PrRef).To(Equal("42"))
-		Expect(got.Msg.HeadBranch).To(Equal("kvarn/add-a-helper"))
-		Expect(got.Msg.BaseBranch).To(Equal("master"))
-		Expect(got.Msg.PullRequestUrl).To(Equal("https://github.com/owner/repo/pull/42"))
-		Expect(got.Msg.Mode).To(Equal("feedback"))
-		Expect(got.Msg.Prompt).To(Equal("rename the helper"))
+		Expect(got.PrRef).To(Equal("42"))
+		Expect(got.HeadBranch).To(Equal("kvarn/add-a-helper"))
+		Expect(got.BaseBranch).To(Equal("master"))
+		Expect(got.PullRequestUrl).To(Equal("https://github.com/owner/repo/pull/42"))
+		Expect(got.Mode).To(Equal("feedback"))
+		Expect(got.Prompt).To(Equal("rename the helper"))
 	})
 
 	It("hands the agent a context pack with the original task, PR, diff, and feedback", func() {
@@ -320,7 +324,7 @@ var _ = Describe("StartJob continuing a pull request", func() {
 
 		resp, err := submit("test-project", "42", "rename the helper")
 		Expect(err).NotTo(HaveOccurred())
-		Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+		Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 
 		prompt := testAgent.lastPrompt()
 		Expect(prompt).To(ContainSubstring("## Original task"))
@@ -332,7 +336,7 @@ var _ = Describe("StartJob continuing a pull request", func() {
 		Expect(prompt).To(ContainSubstring("## Feedback to address"))
 		Expect(prompt).To(ContainSubstring("rename the helper"))
 
-		got, err := sessionMgr.Get(context.Background(), resp.Msg.SessionId)
+		got, err := sessionMgr.Get(context.Background(), resp.SessionId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got.ParentSessionID).To(Equal(parent.ID))
 	})
@@ -340,11 +344,11 @@ var _ = Describe("StartJob continuing a pull request", func() {
 	It("omits the original task when no prior session survives", func() {
 		resp, err := submit("test-project", "42", "rename the helper")
 		Expect(err).NotTo(HaveOccurred())
-		Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+		Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 
 		Expect(testAgent.lastPrompt()).NotTo(ContainSubstring("## Original task"))
 
-		got, err := sessionMgr.Get(context.Background(), resp.Msg.SessionId)
+		got, err := sessionMgr.Get(context.Background(), resp.SessionId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got.ParentSessionID).To(BeEmpty())
 	})
@@ -359,8 +363,8 @@ var _ = Describe("StartJob continuing a pull request", func() {
 		resp, err := submit("test-project", "42", "rename the helper")
 		Expect(err).NotTo(HaveOccurred())
 
-		Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("failed"))
-		got, err := sessionMgr.Get(context.Background(), resp.Msg.SessionId)
+		Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
+		got, err := sessionMgr.Get(context.Background(), resp.SessionId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got.Error).To(ContainSubstring("moved during the run"))
 
@@ -417,12 +421,12 @@ var _ = Describe("StartJob continuing a pull request", func() {
 		_, err = submit("test-project", "42", "also add a test")
 		Expect(err).To(HaveOccurred())
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeFailedPrecondition))
-		Expect(err.Error()).To(ContainSubstring(first.Msg.SessionId))
+		Expect(err.Error()).To(ContainSubstring(first.SessionId))
 		Expect(activeSessions()).To(Equal(1))
 
 		// Once the first run finishes, the pull request accepts work again.
 		close(gate)
-		Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+		Eventually(stateOf(first.SessionId)).Should(Equal("completed"))
 
 		_, err = submit("test-project", "42", "also add a test")
 		Expect(err).NotTo(HaveOccurred())
@@ -431,43 +435,43 @@ var _ = Describe("StartJob continuing a pull request", func() {
 	It("retries a continuation against the same pull request rather than as a fresh job", func() {
 		first, err := submit("test-project", "42", "rename the helper")
 		Expect(err).NotTo(HaveOccurred())
-		Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+		Eventually(stateOf(first.SessionId)).Should(Equal("completed"))
 
-		retried, err := client.RetryJob(context.Background(), connect.NewRequest(&v1.RetryJobRequest{
-			SessionId: first.Msg.SessionId,
-		}))
+		retried, err := client.RetryJob(context.Background(), &v1.RetryJobRequest{
+			SessionId: first.SessionId,
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(retried.Msg.SessionId).NotTo(Equal(first.Msg.SessionId))
+		Expect(retried.SessionId).NotTo(Equal(first.SessionId))
 
 		// The retry is a continuation of the same pull request. Were the marker
 		// not persisted, the session's PR ref would read as one this job opened
 		// and the retry would be refused outright.
-		sess, err := sessionMgr.Get(context.Background(), retried.Msg.SessionId)
+		sess, err := sessionMgr.Get(context.Background(), retried.SessionId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(sess.Continuation).To(BeTrue())
 		Expect(sess.PRRef).To(Equal("42"))
 	})
 
 	Describe("idempotency", func() {
-		submitWithKey := func(prRef, feedback, key string) (*connect.Response[v1.StartJobResponse], error) {
-			return client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		submitWithKey := func(prRef, feedback, key string) (*v1.StartJobResponse, error) {
+			return client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:        "test-project",
 				Prompt:         feedback,
 				StartFrom:      &v1.StartJobRequest_PrRef{PrRef: prRef},
 				IdempotencyKey: key,
-			}))
+			})
 		}
 
 		It("returns the first session when the same key is replayed after the run finished", func() {
 			first, err := submitWithKey("42", "rename the helper", "req-1")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(first.Msg.Duplicate).To(BeFalse())
-			Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+			Expect(first.Duplicate).To(BeFalse())
+			Eventually(stateOf(first.SessionId)).Should(Equal("completed"))
 
 			second, err := submitWithKey("42", "rename the helper", "req-1")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(second.Msg.SessionId).To(Equal(first.Msg.SessionId))
-			Expect(second.Msg.Duplicate).To(BeTrue())
+			Expect(second.SessionId).To(Equal(first.SessionId))
+			Expect(second.Duplicate).To(BeTrue())
 
 			// The point of the key: one run, so one follow-up commit and one
 			// comment on the pull request.
@@ -490,12 +494,12 @@ var _ = Describe("StartJob continuing a pull request", func() {
 			// the pull request, so it gets that run back.
 			second, err := submitWithKey("42", "rename the helper", "req-1")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(second.Msg.SessionId).To(Equal(first.Msg.SessionId))
-			Expect(second.Msg.Duplicate).To(BeTrue())
+			Expect(second.SessionId).To(Equal(first.SessionId))
+			Expect(second.Duplicate).To(BeTrue())
 			Expect(activeSessions()).To(Equal(1))
 
 			close(gate)
-			Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(first.SessionId)).Should(Equal("completed"))
 		})
 
 		It("matches a replay that spells the pull request the way the forge does not", func() {
@@ -507,30 +511,30 @@ var _ = Describe("StartJob continuing a pull request", func() {
 
 			first, err := submitWithKey("42", "rename the helper", "req-1")
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(first.SessionId)).Should(Equal("completed"))
 
 			second, err := submitWithKey("#42", "rename the helper", "req-1")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(second.Msg.SessionId).To(Equal(first.Msg.SessionId))
-			Expect(second.Msg.Duplicate).To(BeTrue())
+			Expect(second.SessionId).To(Equal(first.SessionId))
+			Expect(second.Duplicate).To(BeTrue())
 			Expect(activeSessions()).To(Equal(1))
 		})
 
 		It("starts a second run for a different key", func() {
 			first, err := submitWithKey("42", "rename the helper", "req-1")
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(first.SessionId)).Should(Equal("completed"))
 
 			second, err := submitWithKey("42", "also add a test", "req-2")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(second.Msg.SessionId).NotTo(Equal(first.Msg.SessionId))
-			Expect(second.Msg.Duplicate).To(BeFalse())
+			Expect(second.SessionId).NotTo(Equal(first.SessionId))
+			Expect(second.Duplicate).To(BeFalse())
 		})
 
 		It("refuses a key reused for different feedback", func() {
 			first, err := submitWithKey("42", "rename the helper", "req-1")
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(first.SessionId)).Should(Equal("completed"))
 
 			_, err = submitWithKey("42", "something else entirely", "req-1")
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeAlreadyExists))

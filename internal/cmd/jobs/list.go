@@ -10,7 +10,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -31,8 +30,8 @@ type ListCmd struct {
 
 	IncludePreviews bool `help:"Also list the boot sessions of preview environments."`
 
-	All     bool              `help:"Follow pagination until every matching job has been listed."`
-	JSON    bool              `help:"Emit JSON instead of a table." name:"json"`
+	All  bool `help:"Follow pagination until every matching job has been listed."`
+	JSON bool `help:"Emit JSON instead of a table." name:"json"`
 }
 
 func (c *ListCmd) Run() error {
@@ -56,18 +55,18 @@ func (c *ListCmd) Run() error {
 
 	var sessions []*v1.GetSessionResponse
 	for {
-		resp, err := oc.ListSessions(ctx, connect.NewRequest(req))
+		resp, err := oc.ListSessions(ctx, req)
 		if err != nil {
 			return fmt.Errorf("list jobs: %w", err)
 		}
-		sessions = append(sessions, resp.Msg.Sessions...)
+		sessions = append(sessions, resp.Sessions...)
 
 		// Without --all a page is the answer; the limit is what the caller asked
 		// to see, not a page size to loop over.
-		if !c.All || resp.Msg.NextPageCursor == "" {
+		if !c.All || resp.NextPageCursor == "" {
 			break
 		}
-		req.PageCursor = resp.Msg.NextPageCursor
+		req.PageCursor = resp.NextPageCursor
 	}
 
 	if c.JSON {
@@ -114,11 +113,11 @@ type ShowCmd struct {
 
 func (c *ShowCmd) Run() error {
 	resp, err := c.client().GetSession(context.Background(),
-		connect.NewRequest(&v1.GetSessionRequest{SessionId: c.SessionID}))
+		&v1.GetSessionRequest{SessionId: c.SessionID})
 	if err != nil {
 		return fmt.Errorf("get job: %w", err)
 	}
-	s := resp.Msg
+	s := resp
 
 	if c.JSON {
 		return PrintJSON(s)

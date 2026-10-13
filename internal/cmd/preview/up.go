@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 )
 
@@ -32,16 +31,16 @@ func (c *UpCmd) Run() error {
 	// minute or more. Following the state stream rather than blocking on the
 	// call is what turns that into something legible: the same phases the
 	// holding page shows, printed as they happen.
-	resp, err := oc.StartPreview(ctx, connect.NewRequest(&v1.StartPreviewRequest{
+	resp, err := oc.StartPreview(ctx, &v1.StartPreviewRequest{
 		Project: c.Project,
 		Ref:     c.Ref,
 		Pr:      c.PR,
 		Fresh:   c.Fresh,
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("start preview: %w", err)
 	}
-	p := resp.Msg.Preview
+	p := resp.Preview
 
 	if c.Wait && p.State == "booting" {
 		p, err = c.follow(ctx, p)
@@ -60,10 +59,10 @@ func (c *UpCmd) Run() error {
 // state. Progress goes to stderr so the URL on stdout stays pipeable.
 func (c *UpCmd) follow(ctx context.Context, p *v1.Preview) (*v1.Preview, error) {
 	oc := c.client()
-	stream, err := oc.WatchPreview(ctx, connect.NewRequest(&v1.WatchPreviewRequest{
+	stream, err := oc.WatchPreview(ctx, &v1.WatchPreviewRequest{
 		Project: c.Project,
 		Ref:     c.Ref,
-	}))
+	})
 	if err != nil {
 		return nil, fmt.Errorf("watch preview: %w", err)
 	}
@@ -71,8 +70,14 @@ func (c *UpCmd) follow(ctx context.Context, p *v1.Preview) (*v1.Preview, error) 
 
 	latest := p
 	var lastPhase string
-	for stream.Receive() {
-		update := stream.Msg()
+	var streamErr error
+	for {
+		msg, err := stream.Receive()
+		if err != nil {
+			streamErr = err
+			break
+		}
+		update := msg
 		if update.Preview != nil {
 			latest = update.Preview
 		}
@@ -81,7 +86,10 @@ func (c *UpCmd) follow(ctx context.Context, p *v1.Preview) (*v1.Preview, error) 
 			lastPhase = update.Phase
 		}
 	}
-	if err := stream.Err(); err != nil && !errors.Is(err, io.EOF) {
+	if errors.Is(streamErr, io.EOF) {
+		streamErr = nil
+	}
+	if err := streamErr; err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("watch preview: %w", err)
 	}
 	return latest, nil

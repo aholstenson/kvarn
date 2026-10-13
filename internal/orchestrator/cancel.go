@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/observability/reqid"
 	"github.com/aholstenson/kvarn/internal/session"
 )
@@ -86,8 +87,8 @@ func cancelCause(reason string) error {
 // authorized the session's project.
 func (s *Service) cancelSession(ctx context.Context, sess *session.Session, cause error, reason string) error {
 	if sess.State.IsTerminal() {
-		return connect.NewError(connect.CodeFailedPrecondition,
-			fmt.Errorf("session %s has already finished (%s)", sess.ID, sess.State))
+		return connect.Errorf(connect.CodeFailedPrecondition,
+			"session %s has already finished (%s)", sess.ID, sess.State)
 	}
 
 	// A job still in the backlog has no context to cancel, so it is stopped
@@ -101,7 +102,7 @@ func (s *Service) cancelSession(ctx context.Context, sess *session.Session, caus
 			Message: cause.Error(),
 		})
 		if err != nil {
-			return connect.NewError(connect.CodeInternal, err)
+			return connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 		}
 		if cancelled {
 			reqid.LoggerFrom(ctx).Info("queued job cancelled",
@@ -117,8 +118,8 @@ func (s *Service) cancelSession(ctx context.Context, sess *session.Session, caus
 		// Non-terminal with no job behind it: the run belonged to a process that
 		// is gone. Startup reconciliation settles such sessions, so this is only
 		// reachable when a terminal write failed outright.
-		return connect.NewError(connect.CodeFailedPrecondition,
-			fmt.Errorf("session %s is not running on this orchestrator", sess.ID))
+		return connect.Errorf(connect.CodeFailedPrecondition,
+			"session %s is not running on this orchestrator", sess.ID)
 	}
 
 	job.cancel(cause)
@@ -133,24 +134,24 @@ func (s *Service) cancelSession(ctx context.Context, sess *session.Session, caus
 // running the agent — and its teardown tears the VM down on the way out. The
 // session lands in the cancelled state; the write is done by the job itself, so
 // this returns as soon as the stop is signalled rather than waiting for the VM.
-func (s *Service) CancelJob(ctx context.Context, req *connect.Request[v1.CancelJobRequest]) (*connect.Response[v1.CancelJobResponse], error) {
+func (s *Service) CancelJob(ctx context.Context, req *v1.CancelJobRequest) (*v1.CancelJobResponse, error) {
 	if s.sessionMgr == nil {
-		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+		return nil, connect.NewError(connect.CodeUnimplemented, "sessions not configured")
 	}
 
-	sess, err := s.sessionMgr.Get(ctx, req.Msg.SessionId)
+	sess, err := s.sessionMgr.Get(ctx, req.SessionId)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, err)
+		return nil, connect.NewError(connect.CodeNotFound, err.Error()).WithCause(err)
 	}
-	if err := s.authorizeProject(ctx, sess.ProjectName, req.Spec().Procedure); err != nil {
+	if err := s.authorizeProject(ctx, sess.ProjectName, kvarnv1connect.OrchestratorServiceCancelJobProcedure); err != nil {
 		return nil, err
 	}
 
-	if err := s.cancelSession(ctx, sess, cancelCause(req.Msg.Reason), req.Msg.Reason); err != nil {
+	if err := s.cancelSession(ctx, sess, cancelCause(req.Reason), req.Reason); err != nil {
 		return nil, err
 	}
 
-	return connect.NewResponse(&v1.CancelJobResponse{PreviousState: string(sess.State)}), nil
+	return &v1.CancelJobResponse{PreviousState: string(sess.State)}, nil
 }
 
 // defaultCancelJobsLimit bounds one bulk cancel when the caller names no limit.
@@ -164,20 +165,19 @@ const defaultCancelJobsLimit = 100
 // on their entry rather than failing the call, because the common one — a job
 // finishing between the listing and the cancel — is the sweep working as
 // intended, not an error the caller can act on.
-func (s *Service) CancelJobs(ctx context.Context, req *connect.Request[v1.CancelJobsRequest]) (*connect.Response[v1.CancelJobsResponse], error) {
+func (s *Service) CancelJobs(ctx context.Context, msg *v1.CancelJobsRequest) (*v1.CancelJobsResponse, error) {
 	if s.sessionMgr == nil {
-		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("sessions not configured"))
+		return nil, connect.NewError(connect.CodeUnimplemented, "sessions not configured")
 	}
-	msg := req.Msg
 
 	states, err := parseStates(msg.States)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		return nil, connect.NewError(connect.CodeInvalidArgument, err.Error()).WithCause(err)
 	}
 	for _, st := range states {
 		if st.IsTerminal() {
-			return nil, connect.NewError(connect.CodeInvalidArgument,
-				fmt.Errorf("state %q is terminal and has nothing to cancel", st))
+			return nil, connect.Errorf(connect.CodeInvalidArgument,
+				"state %q is terminal and has nothing to cancel", st)
 		}
 	}
 
@@ -185,7 +185,7 @@ func (s *Service) CancelJobs(ctx context.Context, req *connect.Request[v1.Cancel
 	// legitimate thing to want and a bad thing to do by accident.
 	if msg.Project == "" && len(states) == 0 && msg.Mode == "" && msg.PrRef == "" && !msg.All {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			errors.New("cancelling every active job requires the all flag"))
+			"cancelling every active job requires the all flag")
 	}
 
 	// A sweep that names no project reaches every job the caller can see. For a
@@ -195,7 +195,7 @@ func (s *Service) CancelJobs(ctx context.Context, req *connect.Request[v1.Cancel
 	// the host capability is for. The all flag is a separate question: it guards
 	// against an abbreviated command line, not against a caller's reach.
 	if msg.Project == "" && s.callerIsWildcard(ctx) {
-		if err := s.authorizeHost(ctx, req.Spec().Procedure); err != nil {
+		if err := s.authorizeHost(ctx, kvarnv1connect.OrchestratorServiceCancelJobsProcedure); err != nil {
 			return nil, err
 		}
 	}
@@ -217,7 +217,7 @@ func (s *Service) CancelJobs(ctx context.Context, req *connect.Request[v1.Cancel
 		Limit:      limit,
 	})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 
 	cause := cancelCause(msg.Reason)
@@ -226,7 +226,7 @@ func (s *Service) CancelJobs(ctx context.Context, req *connect.Request[v1.Cancel
 		// Sessions the key does not cover are skipped rather than refused: the
 		// filter describes a set, and a bulk operation acts on the part of it
 		// the caller owns.
-		if err := s.authorizeProject(ctx, sess.ProjectName, req.Spec().Procedure); err != nil {
+		if err := s.authorizeProject(ctx, sess.ProjectName, kvarnv1connect.OrchestratorServiceCancelJobsProcedure); err != nil {
 			continue
 		}
 		entry := &v1.CancelledJob{
@@ -245,5 +245,5 @@ func (s *Service) CancelJobs(ctx context.Context, req *connect.Request[v1.Cancel
 	reqid.LoggerFrom(ctx).Info("bulk cancel",
 		"project", msg.Project, "matched", len(jobs), "dry_run", msg.DryRun, "reason", msg.Reason)
 
-	return connect.NewResponse(&v1.CancelJobsResponse{Jobs: jobs}), nil
+	return &v1.CancelJobsResponse{Jobs: jobs}, nil
 }

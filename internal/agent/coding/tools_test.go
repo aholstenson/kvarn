@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -397,7 +397,7 @@ var _ = Describe("CodingToolkit", func() {
 
 		It("renders anchor-mismatch failure with a recovery hint", func() {
 			runner.editFileFunc = func(_ context.Context, _ *v1.EditFileRequest) (*v1.EditFileResponse, error) {
-				return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("anchor_mismatch: anchor \"cedar\" matches no line"))
+				return nil, connect.NewError(connect.CodeFailedPrecondition, "anchor_mismatch: anchor \"cedar\" matches no line")
 			}
 			result, err := tools["edit_file"].Execute(ctx, &coding.EditFileInput{
 				Path:            "main.go",

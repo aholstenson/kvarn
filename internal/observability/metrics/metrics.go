@@ -13,7 +13,7 @@ import (
 	"log/slog"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
@@ -67,20 +67,15 @@ func Setup(ctx context.Context, cfg Config) (metric.Meter, func(context.Context)
 	return provider.Meter("kvarn"), provider.Shutdown, nil
 }
 
-// RPCInterceptor records kvarn.rpc.duration_seconds for every handled call,
-// tagged with procedure and connect status code.
-type RPCInterceptor struct {
-	duration metric.Float64Histogram
-}
-
-// NewRPCInterceptor builds an RPC-duration interceptor. A nil meter is
-// tolerated and yields a no-op interceptor (used by tests / when metrics are
-// off).
-func NewRPCInterceptor(m metric.Meter) (*RPCInterceptor, error) {
+// NewRPCInterceptor builds a server interceptor that records
+// kvarn.rpc.duration_seconds for every handled call, tagged with procedure and
+// connect status code. A nil meter is tolerated and yields a no-op recorder
+// (used by tests / when metrics are off).
+func NewRPCInterceptor(m metric.Meter) (connect.ServerInterceptor, error) {
 	if m == nil {
 		m = noop.NewMeterProvider().Meter("kvarn")
 	}
-	h, err := m.Float64Histogram(
+	duration, err := m.Float64Histogram(
 		"kvarn.rpc.duration_seconds",
 		metric.WithDescription("ConnectRPC handler duration in seconds"),
 		metric.WithUnit("s"),
@@ -88,7 +83,19 @@ func NewRPCInterceptor(m metric.Meter) (*RPCInterceptor, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &RPCInterceptor{duration: h}, nil
+	return func(next connect.ServerFunc) connect.ServerFunc {
+		return func(ctx context.Context, spec connect.Spec, stream connect.ServerStream) error {
+			start := time.Now()
+			err := next(ctx, spec, stream)
+			duration.Record(ctx, time.Since(start).Seconds(),
+				metric.WithAttributes(
+					attrStr("procedure", spec.Procedure),
+					attrStr("code", codeOf(err)),
+				),
+			)
+			return err
+		}
+	}, nil
 }
 
 // codeOf maps a handler error to its connect code string, or "ok" when nil.
@@ -101,44 +108,6 @@ func codeOf(err error) string {
 		return cerr.Code().String()
 	}
 	return connect.CodeUnknown.String()
-}
-
-// WrapUnary records duration once per unary call.
-func (i *RPCInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		if req.Spec().IsClient {
-			return next(ctx, req)
-		}
-		start := time.Now()
-		resp, err := next(ctx, req)
-		i.duration.Record(ctx, time.Since(start).Seconds(),
-			metric.WithAttributes(
-				attrStr("procedure", req.Spec().Procedure),
-				attrStr("code", codeOf(err)),
-			),
-		)
-		return resp, err
-	}
-}
-
-// WrapStreamingClient is a pass-through; server-side only.
-func (i *RPCInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	return next
-}
-
-// WrapStreamingHandler records duration once per streaming call.
-func (i *RPCInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
-		start := time.Now()
-		err := next(ctx, conn)
-		i.duration.Record(ctx, time.Since(start).Seconds(),
-			metric.WithAttributes(
-				attrStr("procedure", conn.Spec().Procedure),
-				attrStr("code", codeOf(err)),
-			),
-		)
-		return err
-	}
 }
 
 // LogStartupError logs an OTel setup failure consistently from callers. We

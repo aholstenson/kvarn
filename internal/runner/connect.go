@@ -15,7 +15,8 @@ import (
 	"errors"
 	"fmt"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 )
@@ -41,18 +42,24 @@ func connectToOrchestrator(ctx context.Context, httpClient *http.Client, addr st
 	ctx, cancelConnection := context.WithCancel(ctx)
 	defer cancelConnection()
 
-	client := kvarnv1connect.NewBridgeServiceClient(httpClient, addr)
+	client := kvarnv1connect.NewBridgeServiceClient(connect.NewClient(
+		connecthttp.NewTransport(httpClient, addr, connecthttp.WithReadMaxBytes(0)),
+	))
 
 	// Retry registration — the vsock modules or bridge server may not be ready
 	// immediately after boot.
-	var stream *connect.ServerStreamForClient[v1.RunnerCommand]
+	var (
+		stream     kvarnv1connect.BridgeServiceRegisterClientStream
+		registered bool
+	)
 	for attempt := range 20 {
 		var err error
-		stream, err = client.Register(ctx, connect.NewRequest(&v1.RegisterRequest{
+		stream, err = client.Register(ctx, &v1.RegisterRequest{
 			Token:  token,
 			VmInfo: gatherVmInfo(),
-		}))
+		})
 		if err == nil {
+			registered = true
 			break
 		}
 		slog.Warn("failed to register with orchestrator, retrying", "attempt", attempt+1, "error", err)
@@ -62,7 +69,7 @@ func connectToOrchestrator(ctx context.Context, httpClient *http.Client, addr st
 		case <-time.After(time.Second):
 		}
 	}
-	if stream == nil {
+	if !registered {
 		return errors.New("register with orchestrator: failed after retries")
 	}
 	defer stream.Close()
@@ -100,9 +107,16 @@ func connectToOrchestrator(ctx context.Context, httpClient *http.Client, addr st
 		cancelConnection()
 	}
 
+	var streamErr error
 receive:
-	for stream.Receive() {
-		cmd := stream.Msg()
+	for {
+		cmd, err := stream.Receive()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				streamErr = err
+			}
+			break
+		}
 		slog.Info("received command", "command_id", cmd.CommandId)
 
 		// Taking a slot before reading the next command is what makes the cap
@@ -124,7 +138,7 @@ receive:
 			// until its own deadline, so nothing leaves here that the wire could
 			// refuse.
 			sanitizeForWire(result)
-			if _, err := client.ReportResult(ctx, connect.NewRequest(result)); err != nil {
+			if _, err := client.ReportResult(ctx, result); err != nil {
 				slog.Error("failed to report command result; closing the connection",
 					"command_id", cmd.CommandId, "command", commandKind(cmd), "error", err)
 				failConnection(fmt.Errorf("report result for command %s (%s): %w", cmd.CommandId, commandKind(cmd), err))
@@ -146,8 +160,8 @@ receive:
 		return reportErr
 	}
 
-	if err := stream.Err(); err != nil {
-		return fmt.Errorf("command stream error: %w", err)
+	if streamErr != nil {
+		return fmt.Errorf("command stream error: %w", streamErr)
 	}
 
 	return nil
@@ -170,73 +184,73 @@ func handleCommand(
 
 	switch c := cmd.Command.(type) {
 	case *v1.RunnerCommand_Exec:
-		resp, execErr := h.Exec(ctx, connect.NewRequest(c.Exec))
+		resp, execErr := h.Exec(ctx, c.Exec)
 		if execErr != nil {
 			result.Error = execErr.Error()
 		} else {
-			result.Result = &v1.CommandResult_Exec{Exec: resp.Msg}
+			result.Result = &v1.CommandResult_Exec{Exec: resp}
 		}
 	case *v1.RunnerCommand_UploadFiles:
-		resp, execErr := h.UploadFiles(ctx, connect.NewRequest(c.UploadFiles))
+		resp, execErr := h.UploadFiles(ctx, c.UploadFiles)
 		if execErr != nil {
 			result.Error = execErr.Error()
 		} else {
-			result.Result = &v1.CommandResult_UploadFiles{UploadFiles: resp.Msg}
+			result.Result = &v1.CommandResult_UploadFiles{UploadFiles: resp}
 		}
 	case *v1.RunnerCommand_ReadFile:
-		resp, execErr := h.ReadFile(ctx, connect.NewRequest(c.ReadFile))
+		resp, execErr := h.ReadFile(ctx, c.ReadFile)
 		if execErr != nil {
 			result.Error = execErr.Error()
 		} else {
-			result.Result = &v1.CommandResult_ReadFile{ReadFile: resp.Msg}
+			result.Result = &v1.CommandResult_ReadFile{ReadFile: resp}
 		}
 	case *v1.RunnerCommand_EditFile:
-		resp, execErr := h.EditFile(ctx, connect.NewRequest(c.EditFile))
+		resp, execErr := h.EditFile(ctx, c.EditFile)
 		if execErr != nil {
 			result.Error = execErr.Error()
 		} else {
-			result.Result = &v1.CommandResult_EditFile{EditFile: resp.Msg}
+			result.Result = &v1.CommandResult_EditFile{EditFile: resp}
 		}
 	case *v1.RunnerCommand_WriteFile:
-		resp, execErr := h.WriteFile(ctx, connect.NewRequest(c.WriteFile))
+		resp, execErr := h.WriteFile(ctx, c.WriteFile)
 		if execErr != nil {
 			result.Error = execErr.Error()
 		} else {
-			result.Result = &v1.CommandResult_WriteFile{WriteFile: resp.Msg}
+			result.Result = &v1.CommandResult_WriteFile{WriteFile: resp}
 		}
 	case *v1.RunnerCommand_CreateSession:
-		resp, execErr := h.CreateSession(ctx, connect.NewRequest(c.CreateSession))
+		resp, execErr := h.CreateSession(ctx, c.CreateSession)
 		if execErr != nil {
 			result.Error = execErr.Error()
 		} else {
-			result.Result = &v1.CommandResult_CreateSession{CreateSession: resp.Msg}
+			result.Result = &v1.CommandResult_CreateSession{CreateSession: resp}
 		}
 	case *v1.RunnerCommand_SessionExec:
 		onOutput := func(stdout, stderr string) {
-			client.ReportOutput(ctx, connect.NewRequest(&v1.OutputChunk{
+			client.ReportOutput(ctx, &v1.OutputChunk{
 				CommandId: cmd.CommandId,
 				Token:     token,
 				Stdout:    validText(stdout),
 				Stderr:    validText(stderr),
-			}))
+			})
 		}
 		resp, execErr := h.SessionExecWithOutput(ctx, c.SessionExec, onOutput)
 		if execErr != nil {
 			result.Error = execErr.Error()
 		} else {
-			result.Result = &v1.CommandResult_SessionExec{SessionExec: resp.Msg}
+			result.Result = &v1.CommandResult_SessionExec{SessionExec: resp}
 		}
 	case *v1.RunnerCommand_StartProcess:
 		// Output and exit are keyed on the process ID, not the command ID:
 		// the command that started the process completes immediately, and
 		// everything the process goes on to do arrives long after.
 		onOutput := func(processID, stdout, stderr string) {
-			client.ReportOutput(ctx, connect.NewRequest(&v1.OutputChunk{
+			client.ReportOutput(ctx, &v1.OutputChunk{
 				CommandId: processID,
 				Token:     token,
 				Stdout:    validText(stdout),
 				Stderr:    validText(stderr),
-			}))
+			})
 		}
 		onExit := func(processID string, exitCode int32, exitErr error) {
 			event := &v1.ProcessEvent{
@@ -248,7 +262,7 @@ func handleCommand(
 			if exitErr != nil {
 				event.Error = exitErr.Error()
 			}
-			if _, err := client.ReportProcessEvent(ctx, connect.NewRequest(event)); err != nil {
+			if _, err := client.ReportProcessEvent(ctx, event); err != nil {
 				slog.Warn("failed to report process exit", "process_id", processID, "error", err)
 			}
 		}
@@ -256,28 +270,28 @@ func handleCommand(
 		if execErr != nil {
 			result.Error = execErr.Error()
 		} else {
-			result.Result = &v1.CommandResult_StartProcess{StartProcess: resp.Msg}
+			result.Result = &v1.CommandResult_StartProcess{StartProcess: resp}
 		}
 	case *v1.RunnerCommand_StopProcess:
-		resp, execErr := h.StopProcess(ctx, connect.NewRequest(c.StopProcess))
+		resp, execErr := h.StopProcess(ctx, c.StopProcess)
 		if execErr != nil {
 			result.Error = execErr.Error()
 		} else {
-			result.Result = &v1.CommandResult_StopProcess{StopProcess: resp.Msg}
+			result.Result = &v1.CommandResult_StopProcess{StopProcess: resp}
 		}
 	case *v1.RunnerCommand_ListProcesses:
-		resp, execErr := h.ListProcesses(ctx, connect.NewRequest(c.ListProcesses))
+		resp, execErr := h.ListProcesses(ctx, c.ListProcesses)
 		if execErr != nil {
 			result.Error = execErr.Error()
 		} else {
-			result.Result = &v1.CommandResult_ListProcesses{ListProcesses: resp.Msg}
+			result.Result = &v1.CommandResult_ListProcesses{ListProcesses: resp}
 		}
 	case *v1.RunnerCommand_CloseSession:
-		resp, execErr := h.CloseSession(ctx, connect.NewRequest(c.CloseSession))
+		resp, execErr := h.CloseSession(ctx, c.CloseSession)
 		if execErr != nil {
 			result.Error = execErr.Error()
 		} else {
-			result.Result = &v1.CommandResult_CloseSession{CloseSession: resp.Msg}
+			result.Result = &v1.CommandResult_CloseSession{CloseSession: resp}
 		}
 	case *v1.RunnerCommand_DownloadFile:
 		written, execErr := handleDownloadFile(ctx, client, token, c.DownloadFile)
@@ -319,24 +333,25 @@ func commandKind(cmd *v1.RunnerCommand) string {
 // handleDownloadFile calls DownloadFile on the orchestrator and writes the
 // streamed data to a local file.
 func handleDownloadFile(ctx context.Context, client kvarnv1connect.BridgeServiceClient, token string, cmd *v1.DownloadFileCommand) (int64, error) {
-	stream, err := client.DownloadFile(ctx, connect.NewRequest(&v1.DownloadFileRequest{
+	stream, err := client.DownloadFile(ctx, &v1.DownloadFileRequest{
 		TransferId: cmd.TransferId,
 		Token:      token,
-	}))
+	})
 	if err != nil {
 		return 0, fmt.Errorf("call DownloadFile: %w", err)
 	}
 	defer stream.Close()
 
 	// First chunk must be start metadata.
-	if !stream.Receive() {
-		if err := stream.Err(); err != nil {
-			return 0, err
+	first, err := stream.Receive()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return 0, errors.New("empty download stream")
 		}
-		return 0, errors.New("empty download stream")
+		return 0, err
 	}
 
-	start := stream.Msg().GetStart()
+	start := first.GetStart()
 	if start == nil {
 		return 0, errors.New("first chunk must be start metadata")
 	}
@@ -358,8 +373,15 @@ func handleDownloadFile(ctx context.Context, client kvarnv1connect.BridgeService
 	defer f.Close()
 
 	var total int64
-	for stream.Receive() {
-		data := stream.Msg().GetData()
+	for {
+		msg, err := stream.Receive()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return total, err
+		}
+		data := msg.GetData()
 		if data == nil {
 			continue
 		}
@@ -368,9 +390,6 @@ func handleDownloadFile(ctx context.Context, client kvarnv1connect.BridgeService
 			return total, fmt.Errorf("write file: %w", writeErr)
 		}
 		total += int64(n)
-	}
-	if err := stream.Err(); err != nil {
-		return total, err
 	}
 
 	// Fix ownership for files under /home/kvarn.
@@ -392,7 +411,10 @@ func handleUploadFile(ctx context.Context, client kvarnv1connect.BridgeServiceCl
 		return 0, fmt.Errorf("stat source file: %w", err)
 	}
 
-	uploadStream := client.UploadFile(ctx)
+	uploadStream, err := client.UploadFile(ctx)
+	if err != nil {
+		return 0, err
+	}
 
 	// Ensure the stream is always closed, even on early errors.
 	var streamClosed bool
@@ -444,7 +466,7 @@ func handleUploadFile(ctx context.Context, client kvarnv1connect.BridgeServiceCl
 		return total, fmt.Errorf("close upload stream: %w", err)
 	}
 
-	return resp.Msg.BytesWritten, nil
+	return resp.BytesWritten, nil
 }
 
 // chownToKvarn changes file ownership to the kvarn user if it exists.

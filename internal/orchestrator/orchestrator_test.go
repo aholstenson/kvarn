@@ -13,8 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"connectrpc.com/connect"
 	stderrors "errors"
+
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/agent"
@@ -118,19 +120,19 @@ type localRunnerProxy struct {
 }
 
 func (p *localRunnerProxy) Exec(ctx context.Context, req *v1.ExecRequest) (*v1.ExecResponse, error) {
-	resp, err := p.handler.Exec(ctx, connect.NewRequest(req))
+	resp, err := p.handler.Exec(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	return resp.Msg, nil
+	return resp, nil
 }
 
 func (p *localRunnerProxy) CreateSession(ctx context.Context, req *v1.CreateSessionRequest) (*v1.CreateSessionResponse, error) {
-	resp, err := p.handler.CreateSession(ctx, connect.NewRequest(req))
+	resp, err := p.handler.CreateSession(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	return resp.Msg, nil
+	return resp, nil
 }
 
 func (p *localRunnerProxy) SessionExec(ctx context.Context, req *v1.SessionExecRequest, onOutput sandbox.OutputCallback) (*v1.SessionExecResponse, error) {
@@ -142,47 +144,47 @@ func (p *localRunnerProxy) SessionExec(ctx context.Context, req *v1.SessionExecR
 	if err != nil {
 		return nil, err
 	}
-	return resp.Msg, nil
+	return resp, nil
 }
 
 func (p *localRunnerProxy) CloseSession(ctx context.Context, req *v1.CloseSessionRequest) (*v1.CloseSessionResponse, error) {
-	resp, err := p.handler.CloseSession(ctx, connect.NewRequest(req))
+	resp, err := p.handler.CloseSession(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	return resp.Msg, nil
+	return resp, nil
 }
 
 func (p *localRunnerProxy) UploadFiles(ctx context.Context, req *v1.UploadFilesRequest) (*v1.UploadFilesResponse, error) {
-	resp, err := p.handler.UploadFiles(ctx, connect.NewRequest(req))
+	resp, err := p.handler.UploadFiles(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	return resp.Msg, nil
+	return resp, nil
 }
 
 func (p *localRunnerProxy) ReadFile(ctx context.Context, req *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
-	resp, err := p.handler.ReadFile(ctx, connect.NewRequest(req))
+	resp, err := p.handler.ReadFile(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	return resp.Msg, nil
+	return resp, nil
 }
 
 func (p *localRunnerProxy) EditFile(ctx context.Context, req *v1.EditFileRequest) (*v1.EditFileResponse, error) {
-	resp, err := p.handler.EditFile(ctx, connect.NewRequest(req))
+	resp, err := p.handler.EditFile(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	return resp.Msg, nil
+	return resp, nil
 }
 
 func (p *localRunnerProxy) WriteFile(ctx context.Context, req *v1.WriteFileRequest) (*v1.WriteFileResponse, error) {
-	resp, err := p.handler.WriteFile(ctx, connect.NewRequest(req))
+	resp, err := p.handler.WriteFile(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	return resp.Msg, nil
+	return resp, nil
 }
 
 func (p *localRunnerProxy) StreamToGuest(_ context.Context, _ string, _ io.Reader, _ int64) error {
@@ -589,19 +591,22 @@ var _ = Describe("StartJob", func() {
 		})
 
 		mux := http.NewServeMux()
-		path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc)
-		mux.Handle(path, handler)
+		orchestratorRPC := connect.NewServer()
+		kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, svc)
+		connecthttp.Mount(mux, orchestratorRPC)
 
-		bridgePath, bridgeHandler := kvarnv1connect.NewBridgeServiceHandler(svc.BridgeHandler())
-		mux.Handle(bridgePath, bridgeHandler)
+		bridgeRPC := connect.NewServer()
+		kvarnv1connect.RegisterBridgeServiceHandler(bridgeRPC, svc.BridgeHandler())
+		connecthttp.Mount(mux, bridgeRPC)
 
 		server = &http.Server{Handler: mux}
 		go server.Serve(listener)
 
-		client = kvarnv1connect.NewOrchestratorServiceClient(
+		client = kvarnv1connect.NewOrchestratorServiceClient(connect.NewClient(connecthttp.NewTransport(
 			http.DefaultClient,
 			fmt.Sprintf("http://%s", listener.Addr().String()),
-		)
+			connecthttp.WithReadMaxBytes(0),
+		)))
 	})
 
 	AfterEach(func() {
@@ -610,88 +615,88 @@ var _ = Describe("StartJob", func() {
 	})
 
 	It("starts a job and returns session ID", func() {
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "fix the bug",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.SessionId).NotTo(BeEmpty())
+		Expect(resp.SessionId).NotTo(BeEmpty())
 	})
 
 	It("returns error for unknown project", func() {
-		_, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		_, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "nonexistent",
 			Prompt:  "do something",
-		}))
+		})
 		Expect(err).To(HaveOccurred())
 	})
 
 	It("transitions session through states to completion", func() {
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "fix the bug",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		// Poll until the session reaches a terminal state.
 		Eventually(func() string {
-			sess, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			sess, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			return sess.Msg.State
+			return sess.State
 		}).Should(Equal("completed"))
 	})
 
 	It("lists sessions", func() {
-		_, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		_, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "prompt 1",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
-		listResp, err := client.ListSessions(context.Background(), connect.NewRequest(&v1.ListSessionsRequest{}))
+		listResp, err := client.ListSessions(context.Background(), &v1.ListSessionsRequest{})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(listResp.Msg.Sessions).To(HaveLen(1))
+		Expect(listResp.Sessions).To(HaveLen(1))
 	})
 
 	It("destroys VM after job completes", func() {
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "fix it",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() string {
-			sess, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			sess, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			return sess.Msg.State
+			return sess.State
 		}).Should(Equal("completed"))
 	})
 
 	It("fails session when SCM clone fails", func() {
 		mockScm.cloneErr = fmt.Errorf("clone failed")
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "fix it",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() string {
-			sess, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			sess, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			return sess.Msg.State
+			return sess.State
 		}).Should(Equal("failed"))
 	})
 
@@ -700,20 +705,20 @@ var _ = Describe("StartJob", func() {
 			"kvarn.yml": []byte("setup:\n  steps:\n    - name: Install\n      run: echo installed\n"),
 		}
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "fix the bug",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() string {
-			sess, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			sess, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			return sess.Msg.State
+			return sess.State
 		}).Should(Equal("completed"))
 	})
 
@@ -722,20 +727,20 @@ var _ = Describe("StartJob", func() {
 			"kvarn.yml": []byte("setup:\n  steps:\n    - name: Fail step\n      run: exit 1\n"),
 		}
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "fix the bug",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() string {
-			sess, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			sess, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			return sess.Msg.State
+			return sess.State
 		}).Should(Equal("failed"))
 	})
 
@@ -744,20 +749,20 @@ var _ = Describe("StartJob", func() {
 			"kvarn.yml": []byte("validation:\n  required:\n    - name: Tests\n      run: echo pass\n"),
 		}
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "fix the bug",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() string {
-			sess, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			sess, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			return sess.Msg.State
+			return sess.State
 		}).Should(Equal("completed"))
 	})
 
@@ -766,20 +771,20 @@ var _ = Describe("StartJob", func() {
 			"kvarn.yml": []byte("validation:\n  required:\n    - name: Tests\n      run: exit 1\n"),
 		}
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "fix the bug",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() string {
-			sess, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			sess, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			return sess.Msg.State
+			return sess.State
 		}).Should(Equal("failed"))
 	})
 
@@ -788,20 +793,20 @@ var _ = Describe("StartJob", func() {
 			"kvarn.yml": []byte("validation:\n  advisory:\n    - name: Lint\n      run: exit 1\n"),
 		}
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "fix the bug",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() string {
-			sess, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			sess, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			return sess.Msg.State
+			return sess.State
 		}).Should(Equal("completed"))
 	})
 })
@@ -936,18 +941,21 @@ var _ = Describe("StartJob with secrets", func() {
 		})
 
 		mux := http.NewServeMux()
-		path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc)
-		mux.Handle(path, handler)
-		bridgePath, bridgeHandler := kvarnv1connect.NewBridgeServiceHandler(svc.BridgeHandler())
-		mux.Handle(bridgePath, bridgeHandler)
+		orchestratorRPC := connect.NewServer()
+		kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, svc)
+		connecthttp.Mount(mux, orchestratorRPC)
+		bridgeRPC := connect.NewServer()
+		kvarnv1connect.RegisterBridgeServiceHandler(bridgeRPC, svc.BridgeHandler())
+		connecthttp.Mount(mux, bridgeRPC)
 
 		server = &http.Server{Handler: mux}
 		go server.Serve(listener)
 
-		client = kvarnv1connect.NewOrchestratorServiceClient(
+		client = kvarnv1connect.NewOrchestratorServiceClient(connect.NewClient(connecthttp.NewTransport(
 			http.DefaultClient,
 			fmt.Sprintf("http://%s", listener.Addr().String()),
-		)
+			connecthttp.WithReadMaxBytes(0),
+		)))
 	})
 
 	AfterEach(func() {
@@ -968,20 +976,20 @@ var _ = Describe("StartJob with secrets", func() {
 			Type: secret.TypeManaged, Value: "real-dockerhub-token",
 		})).To(Succeed())
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "do",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() string {
-			s, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			s, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			return s.Msg.State
+			return s.State
 		}).Should(Equal("completed"))
 
 		raw := capturedOpts.Load()
@@ -1000,27 +1008,27 @@ var _ = Describe("StartJob with secrets", func() {
 			"kvarn.yml": []byte("secrets:\n  - MISSING_SECRET\n"),
 		}
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "do",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() string {
-			s, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			s, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			return s.Msg.State
+			return s.State
 		}).Should(Equal("failed"))
 
-		s, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-			SessionId: resp.Msg.SessionId,
-		}))
+		s, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+			SessionId: resp.SessionId,
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(s.Msg.Error).To(ContainSubstring("MISSING_SECRET"))
+		Expect(s.Error).To(ContainSubstring("MISSING_SECRET"))
 	})
 })
 
@@ -1164,18 +1172,21 @@ var _ = Describe("StartJob submission flow", func() {
 		})
 
 		mux := http.NewServeMux()
-		path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc)
-		mux.Handle(path, handler)
-		bridgePath, bridgeHandler := kvarnv1connect.NewBridgeServiceHandler(svc.BridgeHandler())
-		mux.Handle(bridgePath, bridgeHandler)
+		orchestratorRPC := connect.NewServer()
+		kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, svc)
+		connecthttp.Mount(mux, orchestratorRPC)
+		bridgeRPC := connect.NewServer()
+		kvarnv1connect.RegisterBridgeServiceHandler(bridgeRPC, svc.BridgeHandler())
+		connecthttp.Mount(mux, bridgeRPC)
 
 		server = &http.Server{Handler: mux}
 		go server.Serve(listener)
 
-		client = kvarnv1connect.NewOrchestratorServiceClient(
+		client = kvarnv1connect.NewOrchestratorServiceClient(connect.NewClient(connecthttp.NewTransport(
 			http.DefaultClient,
 			fmt.Sprintf("http://%s", listener.Addr().String()),
-		)
+			connecthttp.WithReadMaxBytes(0),
+		)))
 	})
 
 	AfterEach(func() {
@@ -1184,20 +1195,20 @@ var _ = Describe("StartJob submission flow", func() {
 	})
 
 	It("submits a PR with commit body == PR body and posts a work-log comment", func() {
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "Please add a greeting file.",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() string {
-			s, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			s, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			return s.Msg.State
+			return s.State
 		}).Should(Equal("completed"))
 
 		Expect(mockForgeInst.prCalls).To(Equal(1))
@@ -1225,20 +1236,20 @@ var _ = Describe("StartJob submission flow", func() {
 		rotating := &rotatingCredentials{}
 		mockForgeInst.credSource = rotating
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "Please add a greeting file.",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() string {
-			s, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			s, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			return s.Msg.State
+			return s.State
 		}).Should(Equal("completed"))
 
 		Expect(mockScm.lastCloneToken).NotTo(BeEmpty())
@@ -1249,22 +1260,22 @@ var _ = Describe("StartJob submission flow", func() {
 	It("fails the session when the push fails", func() {
 		mockScm.pushErr = stderrors.New("remote rejected")
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "Please add a greeting file.",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		var final *v1.GetSessionResponse
 		Eventually(func() string {
-			s, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			s, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			final = s.Msg
-			return s.Msg.State
+			final = s
+			return s.State
 		}).Should(Equal("failed"))
 
 		Expect(final.Error).To(ContainSubstring("remote rejected"))
@@ -1275,22 +1286,22 @@ var _ = Describe("StartJob submission flow", func() {
 	It("fails the session when pull request creation fails", func() {
 		mockForgeInst.prErr = stderrors.New("forge unavailable")
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "Please add a greeting file.",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		var final *v1.GetSessionResponse
 		Eventually(func() string {
-			s, err := client.GetSession(context.Background(), connect.NewRequest(&v1.GetSessionRequest{
-				SessionId: resp.Msg.SessionId,
-			}))
+			s, err := client.GetSession(context.Background(), &v1.GetSessionRequest{
+				SessionId: resp.SessionId,
+			})
 			if err != nil {
 				return ""
 			}
-			final = s.Msg
-			return s.Msg.State
+			final = s
+			return s.State
 		}).Should(Equal("failed"))
 
 		Expect(final.Error).To(ContainSubstring("forge unavailable"))
@@ -1404,17 +1415,20 @@ var _ = Describe("StartJob admission scheduler", func() {
 		})
 
 		mux := http.NewServeMux()
-		path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc)
-		mux.Handle(path, handler)
-		bridgePath, bridgeHandler := kvarnv1connect.NewBridgeServiceHandler(svc.BridgeHandler())
-		mux.Handle(bridgePath, bridgeHandler)
+		orchestratorRPC := connect.NewServer()
+		kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, svc)
+		connecthttp.Mount(mux, orchestratorRPC)
+		bridgeRPC := connect.NewServer()
+		kvarnv1connect.RegisterBridgeServiceHandler(bridgeRPC, svc.BridgeHandler())
+		connecthttp.Mount(mux, bridgeRPC)
 		server = &http.Server{Handler: mux}
 		go server.Serve(listener)
 
-		client = kvarnv1connect.NewOrchestratorServiceClient(
+		client = kvarnv1connect.NewOrchestratorServiceClient(connect.NewClient(connecthttp.NewTransport(
 			http.DefaultClient,
 			fmt.Sprintf("http://%s", listener.Addr().String()),
-		)
+			connecthttp.WithReadMaxBytes(0),
+		)))
 	})
 
 	AfterEach(func() {
@@ -1467,12 +1481,12 @@ var _ = Describe("StartJob admission scheduler", func() {
 	It("admits up to capacity, queues the rest, and admits queued jobs as slots free", func() {
 		ids := make([]string, 3)
 		for i := 0; i < 3; i++ {
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project: "test-project",
 				Prompt:  fmt.Sprintf("job %d", i),
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			ids[i] = resp.Msg.SessionId
+			ids[i] = resp.SessionId
 		}
 
 		// Two of the three fill the pool and reach provisioning; the third

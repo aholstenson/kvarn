@@ -8,7 +8,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/runner"
@@ -32,7 +33,7 @@ var _ = Describe("Runner", func() {
 		server = runner.NewServer()
 		go server.Serve(listener)
 
-		client = kvarnv1connect.NewRunnerServiceClient(http.DefaultClient, fmt.Sprintf("http://%s", addr))
+		client = kvarnv1connect.NewRunnerServiceClient(connect.NewClient(connecthttp.NewTransport(http.DefaultClient, fmt.Sprintf("http://%s", addr), connecthttp.WithReadMaxBytes(0))))
 	})
 
 	AfterEach(func() {
@@ -40,98 +41,98 @@ var _ = Describe("Runner", func() {
 	})
 
 	It("executes a command successfully", func() {
-		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
+		resp, err := client.Exec(context.Background(), &v1.ExecRequest{
 			Command: "echo",
 			Args:    []string{"hello", "world"},
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.ExitCode).To(Equal(int32(0)))
-		Expect(resp.Msg.Stdout).To(Equal("hello world\n"))
-		Expect(resp.Msg.Stderr).To(BeEmpty())
+		Expect(resp.ExitCode).To(Equal(int32(0)))
+		Expect(resp.Stdout).To(Equal("hello world\n"))
+		Expect(resp.Stderr).To(BeEmpty())
 	})
 
 	It("reports a timed-out command as a result carrying what it printed", func() {
-		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
+		resp, err := client.Exec(context.Background(), &v1.ExecRequest{
 			Command:        "sh",
 			Args:           []string{"-c", "echo started; sleep 60"},
 			TimeoutSeconds: 1,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.TimedOut).To(BeTrue())
-		Expect(resp.Msg.ExitCode).To(Equal(int32(124)))
-		Expect(resp.Msg.Stdout).To(ContainSubstring("started"))
+		Expect(resp.TimedOut).To(BeTrue())
+		Expect(resp.ExitCode).To(Equal(int32(124)))
+		Expect(resp.Stdout).To(ContainSubstring("started"))
 	})
 
 	It("caps output at max_output_bytes and reports the true size", func() {
-		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
+		resp, err := client.Exec(context.Background(), &v1.ExecRequest{
 			Command:        "sh",
 			Args:           []string{"-c", "printf 'HEAD'; head -c 200000 /dev/zero | tr '\\0' 'x'; printf 'TAIL'"},
 			MaxOutputBytes: 1024,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.ExitCode).To(Equal(int32(0)))
-		Expect(resp.Msg.Stdout).To(HavePrefix("HEAD"))
-		Expect(resp.Msg.Stdout).To(HaveSuffix("TAIL"))
-		Expect(resp.Msg.Stdout).To(ContainSubstring("of output omitted"))
-		Expect(len(resp.Msg.Stdout)).To(BeNumerically("<", 1200))
-		Expect(resp.Msg.StdoutTotalBytes).To(Equal(uint64(200008)))
+		Expect(resp.ExitCode).To(Equal(int32(0)))
+		Expect(resp.Stdout).To(HavePrefix("HEAD"))
+		Expect(resp.Stdout).To(HaveSuffix("TAIL"))
+		Expect(resp.Stdout).To(ContainSubstring("of output omitted"))
+		Expect(len(resp.Stdout)).To(BeNumerically("<", 1200))
+		Expect(resp.StdoutTotalBytes).To(Equal(uint64(200008)))
 	})
 
 	It("leaves output uncapped by default", func() {
-		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
+		resp, err := client.Exec(context.Background(), &v1.ExecRequest{
 			Command: "sh",
 			Args:    []string{"-c", "head -c 100000 /dev/zero | tr '\\0' 'x'"},
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.Stdout).To(HaveLen(100000))
-		Expect(resp.Msg.StdoutTotalBytes).To(BeZero())
+		Expect(resp.Stdout).To(HaveLen(100000))
+		Expect(resp.StdoutTotalBytes).To(BeZero())
 	})
 
 	It("captures stderr", func() {
-		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
+		resp, err := client.Exec(context.Background(), &v1.ExecRequest{
 			Command: "sh",
 			Args:    []string{"-c", "echo error >&2"},
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.ExitCode).To(Equal(int32(0)))
-		Expect(resp.Msg.Stderr).To(Equal("error\n"))
+		Expect(resp.ExitCode).To(Equal(int32(0)))
+		Expect(resp.Stderr).To(Equal("error\n"))
 	})
 
 	It("returns non-zero exit code", func() {
-		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
+		resp, err := client.Exec(context.Background(), &v1.ExecRequest{
 			Command: "sh",
 			Args:    []string{"-c", "exit 42"},
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.ExitCode).To(Equal(int32(42)))
+		Expect(resp.ExitCode).To(Equal(int32(42)))
 	})
 
 	It("returns non-zero exit code for invalid command", func() {
-		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
+		resp, err := client.Exec(context.Background(), &v1.ExecRequest{
 			Command: "nonexistent-command-xyz",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.ExitCode).NotTo(Equal(int32(0)))
+		Expect(resp.ExitCode).NotTo(Equal(int32(0)))
 	})
 
 	It("respects working directory", func() {
-		resp, err := client.Exec(context.Background(), connect.NewRequest(&v1.ExecRequest{
+		resp, err := client.Exec(context.Background(), &v1.ExecRequest{
 			Command:    "pwd",
 			WorkingDir: "/tmp",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Msg.ExitCode).To(Equal(int32(0)))
+		Expect(resp.ExitCode).To(Equal(int32(0)))
 		// macOS /tmp is a symlink to /private/tmp
-		Expect(resp.Msg.Stdout).To(SatisfyAny(Equal("/tmp\n"), Equal("/private/tmp\n")))
+		Expect(resp.Stdout).To(SatisfyAny(Equal("/tmp\n"), Equal("/private/tmp\n")))
 	})
 
 	It("handles context cancellation", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		_, err := client.Exec(ctx, connect.NewRequest(&v1.ExecRequest{
+		_, err := client.Exec(ctx, &v1.ExecRequest{
 			Command: "sleep",
 			Args:    []string{"10"},
-		}))
+		})
 		Expect(err).To(HaveOccurred())
 	})
 
@@ -149,15 +150,15 @@ var _ = Describe("Runner", func() {
 		})
 
 		It("uploads multiple files", func() {
-			resp, err := client.UploadFiles(context.Background(), connect.NewRequest(&v1.UploadFilesRequest{
+			resp, err := client.UploadFiles(context.Background(), &v1.UploadFilesRequest{
 				WorkingDir: workDir,
 				Files: []*v1.FileContent{
 					{Path: "a.txt", Content: []byte("hello")},
 					{Path: "b.txt", Content: []byte("world")},
 				},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.FilesWritten).To(Equal(int32(2)))
+			Expect(resp.FilesWritten).To(Equal(int32(2)))
 
 			content, err := os.ReadFile(filepath.Join(workDir, "a.txt"))
 			Expect(err).NotTo(HaveOccurred())
@@ -169,14 +170,14 @@ var _ = Describe("Runner", func() {
 		})
 
 		It("creates nested directories automatically", func() {
-			resp, err := client.UploadFiles(context.Background(), connect.NewRequest(&v1.UploadFilesRequest{
+			resp, err := client.UploadFiles(context.Background(), &v1.UploadFilesRequest{
 				WorkingDir: workDir,
 				Files: []*v1.FileContent{
 					{Path: "sub/dir/file.txt", Content: []byte("nested")},
 				},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.FilesWritten).To(Equal(int32(1)))
+			Expect(resp.FilesWritten).To(Equal(int32(1)))
 
 			content, err := os.ReadFile(filepath.Join(workDir, "sub", "dir", "file.txt"))
 			Expect(err).NotTo(HaveOccurred())
@@ -184,26 +185,26 @@ var _ = Describe("Runner", func() {
 		})
 
 		It("rejects path traversal", func() {
-			_, err := client.UploadFiles(context.Background(), connect.NewRequest(&v1.UploadFilesRequest{
+			_, err := client.UploadFiles(context.Background(), &v1.UploadFilesRequest{
 				WorkingDir: workDir,
 				Files: []*v1.FileContent{
 					{Path: "../../../etc/passwd", Content: []byte("evil")},
 				},
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 		})
 
 		It("uploads binary content", func() {
 			binData := []byte{0x00, 0x01, 0x02, 0xFF, 0xFE, 0xFD}
-			resp, err := client.UploadFiles(context.Background(), connect.NewRequest(&v1.UploadFilesRequest{
+			resp, err := client.UploadFiles(context.Background(), &v1.UploadFilesRequest{
 				WorkingDir: workDir,
 				Files: []*v1.FileContent{
 					{Path: "binary.bin", Content: binData},
 				},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.FilesWritten).To(Equal(int32(1)))
+			Expect(resp.FilesWritten).To(Equal(int32(1)))
 
 			content, err := os.ReadFile(filepath.Join(workDir, "binary.bin"))
 			Expect(err).NotTo(HaveOccurred())
@@ -225,71 +226,71 @@ var _ = Describe("Runner", func() {
 		})
 
 		It("returns tagged lines and a version hash", func() {
-			_, err := client.UploadFiles(context.Background(), connect.NewRequest(&v1.UploadFilesRequest{
+			_, err := client.UploadFiles(context.Background(), &v1.UploadFilesRequest{
 				WorkingDir: workDir,
 				Files: []*v1.FileContent{
 					{Path: "test.txt", Content: []byte("hello\nworld\n")},
 				},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			resp, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+			resp, err := client.ReadFile(context.Background(), &v1.ReadFileRequest{
 				WorkingDir: workDir,
 				Path:       "test.txt",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Version).NotTo(BeEmpty())
-			Expect(resp.Msg.TotalLines).To(Equal(int32(2)))
-			Expect(resp.Msg.Lines).To(HaveLen(2))
-			Expect(resp.Msg.Lines[0].Content).To(Equal("hello"))
-			Expect(resp.Msg.Lines[0].Hash).NotTo(BeEmpty())
+			Expect(resp.Version).NotTo(BeEmpty())
+			Expect(resp.TotalLines).To(Equal(int32(2)))
+			Expect(resp.Lines).To(HaveLen(2))
+			Expect(resp.Lines[0].Content).To(Equal("hello"))
+			Expect(resp.Lines[0].Hash).NotTo(BeEmpty())
 		})
 
 		It("returns CodeNotFound for missing file", func() {
-			_, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+			_, err := client.ReadFile(context.Background(), &v1.ReadFileRequest{
 				WorkingDir: workDir,
 				Path:       "nonexistent.txt",
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeNotFound))
 		})
 
 		It("rejects non-UTF-8 content", func() {
 			binData := []byte{0xFF, 0xFE, 0xFD}
-			_, err := client.UploadFiles(context.Background(), connect.NewRequest(&v1.UploadFilesRequest{
+			_, err := client.UploadFiles(context.Background(), &v1.UploadFilesRequest{
 				WorkingDir: workDir,
 				Files: []*v1.FileContent{
 					{Path: "binary.bin", Content: binData},
 				},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			_, err = client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+			_, err = client.ReadFile(context.Background(), &v1.ReadFileRequest{
 				WorkingDir: workDir,
 				Path:       "binary.bin",
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 		})
 
 		Context("with an absolute path", func() {
 			BeforeEach(func() {
-				_, err := client.UploadFiles(context.Background(), connect.NewRequest(&v1.UploadFilesRequest{
+				_, err := client.UploadFiles(context.Background(), &v1.UploadFilesRequest{
 					WorkingDir: workDir,
 					Files: []*v1.FileContent{
 						{Path: "src/Core/App.php", Content: []byte("hello\nworld\n")},
 					},
-				}))
+				})
 				Expect(err).NotTo(HaveOccurred())
 			})
 
 			It("reads a file named by its full path", func() {
-				resp, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+				resp, err := client.ReadFile(context.Background(), &v1.ReadFileRequest{
 					WorkingDir: workDir,
 					Path:       filepath.Join(workDir, "src/Core/App.php"),
-				}))
+				})
 				Expect(err).NotTo(HaveOccurred())
-				Expect(resp.Msg.TotalLines).To(Equal(int32(2)))
-				Expect(resp.Msg.Lines[0].Content).To(Equal("hello"))
+				Expect(resp.TotalLines).To(Equal(int32(2)))
+				Expect(resp.Lines[0].Content).To(Equal("hello"))
 			})
 
 			It("reads a file named through the resolved working directory", func() {
@@ -299,19 +300,19 @@ var _ = Describe("Runner", func() {
 				resolved, err := filepath.EvalSymlinks(workDir)
 				Expect(err).NotTo(HaveOccurred())
 
-				resp, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+				resp, err := client.ReadFile(context.Background(), &v1.ReadFileRequest{
 					WorkingDir: workDir,
 					Path:       filepath.Join(resolved, "src/Core/App.php"),
-				}))
+				})
 				Expect(err).NotTo(HaveOccurred())
-				Expect(resp.Msg.TotalLines).To(Equal(int32(2)))
+				Expect(resp.TotalLines).To(Equal(int32(2)))
 			})
 
 			It("rejects a path outside the working directory", func() {
-				_, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+				_, err := client.ReadFile(context.Background(), &v1.ReadFileRequest{
 					WorkingDir: workDir,
 					Path:       "/etc/passwd",
-				}))
+				})
 				Expect(err).To(HaveOccurred())
 				Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 				Expect(err.Error()).To(ContainSubstring("outside the working directory"))
@@ -323,19 +324,19 @@ var _ = Describe("Runner", func() {
 				DeferCleanup(func() { os.RemoveAll(sibling) })
 				Expect(os.WriteFile(filepath.Join(sibling, "secret.txt"), []byte("nope\n"), 0o644)).To(Succeed())
 
-				_, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+				_, err := client.ReadFile(context.Background(), &v1.ReadFileRequest{
 					WorkingDir: workDir,
 					Path:       filepath.Join(sibling, "secret.txt"),
-				}))
+				})
 				Expect(err).To(HaveOccurred())
 				Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 			})
 
 			It("rejects the working directory itself", func() {
-				_, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+				_, err := client.ReadFile(context.Background(), &v1.ReadFileRequest{
 					WorkingDir: workDir,
 					Path:       workDir,
-				}))
+				})
 				Expect(err).To(HaveOccurred())
 				Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 				Expect(err.Error()).To(ContainSubstring("not a file"))
@@ -357,31 +358,31 @@ var _ = Describe("Runner", func() {
 		})
 
 		It("applies a single REPLACE op", func() {
-			_, err := client.UploadFiles(context.Background(), connect.NewRequest(&v1.UploadFilesRequest{
+			_, err := client.UploadFiles(context.Background(), &v1.UploadFilesRequest{
 				WorkingDir: workDir,
 				Files: []*v1.FileContent{
 					{Path: "test.txt", Content: []byte("hello\nworld\n")},
 				},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			read, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+			read, err := client.ReadFile(context.Background(), &v1.ReadFileRequest{
 				WorkingDir: workDir,
 				Path:       "test.txt",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			resp, err := client.EditFile(context.Background(), connect.NewRequest(&v1.EditFileRequest{
+			resp, err := client.EditFile(context.Background(), &v1.EditFileRequest{
 				WorkingDir:      workDir,
 				Path:            "test.txt",
-				ExpectedVersion: read.Msg.Version,
+				ExpectedVersion: read.Version,
 				Operations: []*v1.EditOperation{
-					{Op: v1.EditOp_EDIT_OP_REPLACE, Line: 1, Hash: read.Msg.Lines[0].Hash, Lines: []string{"hi"}},
+					{Op: v1.EditOp_EDIT_OP_REPLACE, Line: 1, Hash: read.Lines[0].Hash, Lines: []string{"hi"}},
 				},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Version).NotTo(BeEmpty())
-			Expect(resp.Msg.TotalLines).To(Equal(int32(2)))
+			Expect(resp.Version).NotTo(BeEmpty())
+			Expect(resp.TotalLines).To(Equal(int32(2)))
 
 			content, err := os.ReadFile(filepath.Join(workDir, "test.txt"))
 			Expect(err).NotTo(HaveOccurred())
@@ -389,57 +390,57 @@ var _ = Describe("Runner", func() {
 		})
 
 		It("reports version_drift but applies edits when expected_version is stale and anchor still resolves", func() {
-			_, err := client.UploadFiles(context.Background(), connect.NewRequest(&v1.UploadFilesRequest{
+			_, err := client.UploadFiles(context.Background(), &v1.UploadFilesRequest{
 				WorkingDir: workDir,
 				Files: []*v1.FileContent{
 					{Path: "test.txt", Content: []byte("hello\n")},
 				},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			read, err := client.ReadFile(context.Background(), connect.NewRequest(&v1.ReadFileRequest{
+			read, err := client.ReadFile(context.Background(), &v1.ReadFileRequest{
 				WorkingDir: workDir,
 				Path:       "test.txt",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			resp, err := client.EditFile(context.Background(), connect.NewRequest(&v1.EditFileRequest{
+			resp, err := client.EditFile(context.Background(), &v1.EditFileRequest{
 				WorkingDir:      workDir,
 				Path:            "test.txt",
 				ExpectedVersion: "deadbeef",
 				Operations: []*v1.EditOperation{
-					{Op: v1.EditOp_EDIT_OP_REPLACE, Line: 1, Hash: read.Msg.Lines[0].Hash, Lines: []string{"hi"}},
+					{Op: v1.EditOp_EDIT_OP_REPLACE, Line: 1, Hash: read.Lines[0].Hash, Lines: []string{"hi"}},
 				},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.VersionDrift).To(BeTrue())
+			Expect(resp.VersionDrift).To(BeTrue())
 		})
 
 		It("rejects path traversal", func() {
-			_, err := client.EditFile(context.Background(), connect.NewRequest(&v1.EditFileRequest{
+			_, err := client.EditFile(context.Background(), &v1.EditFileRequest{
 				WorkingDir: workDir,
 				Path:       "../../../etc/passwd",
 				Operations: []*v1.EditOperation{
 					{Op: v1.EditOp_EDIT_OP_REPLACE, Line: 1, Hash: "ab", Lines: []string{"evil"}},
 				},
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 		})
 
 		It("errors when operations is empty", func() {
-			_, err := client.UploadFiles(context.Background(), connect.NewRequest(&v1.UploadFilesRequest{
+			_, err := client.UploadFiles(context.Background(), &v1.UploadFilesRequest{
 				WorkingDir: workDir,
 				Files: []*v1.FileContent{
 					{Path: "test.txt", Content: []byte("hello\n")},
 				},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			_, err = client.EditFile(context.Background(), connect.NewRequest(&v1.EditFileRequest{
+			_, err = client.EditFile(context.Background(), &v1.EditFileRequest{
 				WorkingDir: workDir,
 				Path:       "test.txt",
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 		})
@@ -459,14 +460,14 @@ var _ = Describe("Runner", func() {
 		})
 
 		It("creates a new file when expected_version is empty", func() {
-			resp, err := client.WriteFile(context.Background(), connect.NewRequest(&v1.WriteFileRequest{
+			resp, err := client.WriteFile(context.Background(), &v1.WriteFileRequest{
 				WorkingDir: workDir,
 				Path:       "new.txt",
 				Content:    []byte("hello\n"),
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.Msg.Version).NotTo(BeEmpty())
-			Expect(resp.Msg.TotalLines).To(Equal(int32(1)))
+			Expect(resp.Version).NotTo(BeEmpty())
+			Expect(resp.TotalLines).To(Equal(int32(1)))
 
 			content, err := os.ReadFile(filepath.Join(workDir, "new.txt"))
 			Expect(err).NotTo(HaveOccurred())
@@ -474,36 +475,36 @@ var _ = Describe("Runner", func() {
 		})
 
 		It("refuses to overwrite an existing file without a version", func() {
-			_, err := client.WriteFile(context.Background(), connect.NewRequest(&v1.WriteFileRequest{
+			_, err := client.WriteFile(context.Background(), &v1.WriteFileRequest{
 				WorkingDir: workDir,
 				Path:       "a.txt",
 				Content:    []byte("first\n"),
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			_, err = client.WriteFile(context.Background(), connect.NewRequest(&v1.WriteFileRequest{
+			_, err = client.WriteFile(context.Background(), &v1.WriteFileRequest{
 				WorkingDir: workDir,
 				Path:       "a.txt",
 				Content:    []byte("second\n"),
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 		})
 
 		It("overwrites with matching expected_version", func() {
-			resp, err := client.WriteFile(context.Background(), connect.NewRequest(&v1.WriteFileRequest{
+			resp, err := client.WriteFile(context.Background(), &v1.WriteFileRequest{
 				WorkingDir: workDir,
 				Path:       "a.txt",
 				Content:    []byte("first\n"),
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
-			_, err = client.WriteFile(context.Background(), connect.NewRequest(&v1.WriteFileRequest{
+			_, err = client.WriteFile(context.Background(), &v1.WriteFileRequest{
 				WorkingDir:      workDir,
 				Path:            "a.txt",
 				Content:         []byte("second\n"),
-				ExpectedVersion: resp.Msg.Version,
-			}))
+				ExpectedVersion: resp.Version,
+			})
 			Expect(err).NotTo(HaveOccurred())
 
 			content, err := os.ReadFile(filepath.Join(workDir, "a.txt"))
@@ -512,11 +513,11 @@ var _ = Describe("Runner", func() {
 		})
 
 		It("creates a file named by its full path", func() {
-			_, err := client.WriteFile(context.Background(), connect.NewRequest(&v1.WriteFileRequest{
+			_, err := client.WriteFile(context.Background(), &v1.WriteFileRequest{
 				WorkingDir: workDir,
 				Path:       filepath.Join(workDir, "nested/new.txt"),
 				Content:    []byte("hello\n"),
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
 			content, err := os.ReadFile(filepath.Join(workDir, "nested/new.txt"))

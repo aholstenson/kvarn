@@ -11,7 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connectproto"
 	llms "github.com/aholstenson/llms-go"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
@@ -616,7 +617,7 @@ func extractSnapshot(err error) *v1.ReadFileResponse {
 		return nil
 	}
 	for _, d := range cerr.Details() {
-		val, vErr := d.Value()
+		val, vErr := connectproto.UnmarshalErrorDetail(d)
 		if vErr != nil {
 			continue
 		}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/cmd/client"
 	"google.golang.org/protobuf/proto"
@@ -37,28 +36,28 @@ type EventsCmd struct {
 
 func (c *EventsCmd) Run() error {
 	resp, err := c.client().ListSessionEvents(context.Background(),
-		connect.NewRequest(&v1.ListSessionEventsRequest{
+		&v1.ListSessionEventsRequest{
 			SessionId:     c.SessionID,
 			AfterSequence: c.After,
 			Limit:         int32(c.Limit),
-		}))
+		})
 	if err != nil {
 		return fmt.Errorf("list events: %w", err)
 	}
 
 	if c.JSON {
-		msgs := make([]proto.Message, 0, len(resp.Msg.Events))
-		for _, e := range resp.Msg.Events {
+		msgs := make([]proto.Message, 0, len(resp.Events))
+		for _, e := range resp.Events {
 			msgs = append(msgs, e)
 		}
 		return PrintJSONList(msgs)
 	}
 
 	printer := client.NewPrinter()
-	for _, ev := range resp.Msg.Events {
+	for _, ev := range resp.Events {
 		printer.Print(ev)
 	}
-	if len(resp.Msg.Events) == 0 {
+	if len(resp.Events) == 0 {
 		fmt.Fprintln(os.Stdout, "No recorded events")
 	}
 	return nil

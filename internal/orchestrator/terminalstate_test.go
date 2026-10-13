@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -138,12 +137,12 @@ var _ = Describe("Terminal state persistence", func() {
 	})
 
 	It("records the failure when the job context is already cancelled", func() {
-		resp, err := svc.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := svc.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "do the thing",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		sessionID := resp.Msg.SessionId
+		sessionID := resp.SessionId
 
 		Eventually(ag.started).Should(BeClosed())
 

@@ -10,7 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -170,17 +171,20 @@ var _ = Describe("StartJob validation retry", func() {
 		})
 
 		mux := http.NewServeMux()
-		path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc)
-		mux.Handle(path, handler)
-		bridgePath, bridgeHandler := kvarnv1connect.NewBridgeServiceHandler(svc.BridgeHandler())
-		mux.Handle(bridgePath, bridgeHandler)
+		orchestratorRPC := connect.NewServer()
+		kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, svc)
+		connecthttp.Mount(mux, orchestratorRPC)
+		bridgeRPC := connect.NewServer()
+		kvarnv1connect.RegisterBridgeServiceHandler(bridgeRPC, svc.BridgeHandler())
+		connecthttp.Mount(mux, bridgeRPC)
 		server = &http.Server{Handler: mux}
 		go server.Serve(listener)
 
-		client = kvarnv1connect.NewOrchestratorServiceClient(
+		client = kvarnv1connect.NewOrchestratorServiceClient(connect.NewClient(connecthttp.NewTransport(
 			http.DefaultClient,
 			fmt.Sprintf("http://%s", listener.Addr().String()),
-		)
+			connecthttp.WithReadMaxBytes(0),
+		)))
 	})
 
 	AfterEach(func() {
@@ -212,13 +216,13 @@ var _ = Describe("StartJob validation retry", func() {
 			return nil
 		}
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "do the thing",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
-		Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+		Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 
 		ag.mu.Lock()
 		defer ag.mu.Unlock()
@@ -257,13 +261,13 @@ var _ = Describe("StartJob validation retry", func() {
 			return nil
 		}
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "do the thing",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
-		Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+		Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 
 		Expect(mockForgeInst.prCalls).To(Equal(1))
 		Expect(string(pushed)).To(Equal("seed\nagent\n"),
@@ -279,15 +283,15 @@ var _ = Describe("StartJob validation retry", func() {
 			"kvarn.yml": []byte("validation:\n  required:\n    - name: AlwaysFails\n      run: exit 1\n"),
 		}
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "do the thing",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
-		Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("failed"))
+		Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
 
-		s, err := sessionMgr.Get(context.Background(), resp.Msg.SessionId)
+		s, err := sessionMgr.Get(context.Background(), resp.SessionId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(s.Error).To(ContainSubstring("after 2 attempts"))
 
@@ -305,13 +309,13 @@ var _ = Describe("StartJob validation retry", func() {
 			"kvarn.yml": []byte("validation:\n  required:\n    - name: AlwaysFails\n      run: exit 1\n"),
 		}
 
-		resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
 			Prompt:  "do the thing",
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
 
-		Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("failed"))
+		Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
 
 		ag.mu.Lock()
 		defer ag.mu.Unlock()

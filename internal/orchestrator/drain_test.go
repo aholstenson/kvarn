@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"connectrpc.com/connect"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/config/credential"
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
@@ -97,26 +96,26 @@ var _ = Describe("Draining", func() {
 	}
 
 	drain := func(svc *orchestrator.Service, reason string) *v1.SetDrainResponse {
-		resp, err := svc.SetDrain(context.Background(), connect.NewRequest(&v1.SetDrainRequest{
+		resp, err := svc.SetDrain(context.Background(), &v1.SetDrainRequest{
 			Draining: true, Reason: reason,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		return resp.Msg
+		return resp
 	}
 
 	resume := func(svc *orchestrator.Service) *v1.SetDrainResponse {
-		resp, err := svc.SetDrain(context.Background(), connect.NewRequest(&v1.SetDrainRequest{
+		resp, err := svc.SetDrain(context.Background(), &v1.SetDrainRequest{
 			Draining: false,
-		}))
+		})
 		Expect(err).NotTo(HaveOccurred())
-		return resp.Msg
+		return resp
 	}
 
 	stats := func(svc *orchestrator.Service) *v1.GetQueueStatsResponse {
 		resp, err := svc.GetQueueStats(context.Background(),
-			connect.NewRequest(&v1.GetQueueStatsRequest{}))
+			&v1.GetQueueStatsRequest{})
 		Expect(err).NotTo(HaveOccurred())
-		return resp.Msg
+		return resp
 	}
 
 	BeforeEach(func() {

@@ -7,11 +7,9 @@ package reqid
 
 import (
 	"context"
-	"errors"
 	"log/slog"
-	"net/http"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/google/uuid"
 )
 
@@ -55,60 +53,32 @@ func generate() string {
 	return id.String()
 }
 
-// Interceptor generates and propagates request IDs. It is intentionally first
-// in the chain so subsequent interceptors (auth, metrics) see the ID on ctx
-// and can include it in their own log lines.
-type Interceptor struct{}
-
-// NewInterceptor returns a new request-ID interceptor.
-func NewInterceptor() *Interceptor { return &Interceptor{} }
+// NewInterceptor returns a server interceptor that generates and propagates
+// request IDs. It is intentionally first in the chain so subsequent
+// interceptors (auth, metrics) see the ID on ctx and can include it in their
+// own log lines.
+//
+// The ID goes on the response header before the handler runs. connect-go
+// writes the response headers on an error reply too, so a caller gets the ID
+// back exactly when it most wants something to correlate against.
+func NewInterceptor() connect.ServerInterceptor {
+	return func(next connect.ServerFunc) connect.ServerFunc {
+		return func(ctx context.Context, spec connect.Spec, stream connect.ServerStream) error {
+			info, ok := connect.CallInfoForServerContext(ctx)
+			if !ok {
+				return next(ctx, spec, stream)
+			}
+			id := resolve(info.RequestHeader())
+			info.ResponseHeader().Set(HeaderName, id)
+			return next(WithRequestID(ctx, id), spec, stream)
+		}
+	}
+}
 
 // resolve picks the inbound ID off h or mints a new one.
-func resolve(h http.Header) string {
+func resolve(h *connect.Header) string {
 	if id := h.Get(HeaderName); id != "" {
 		return id
 	}
 	return generate()
-}
-
-// WrapUnary attaches a request ID to ctx and echoes it on the response.
-func (*Interceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		if req.Spec().IsClient {
-			return next(ctx, req)
-		}
-		id := resolve(req.Header())
-		ctx = WithRequestID(ctx, id)
-		resp, err := next(ctx, req)
-		if err != nil {
-			// A handler that fails returns a typed-nil response, which boxes
-			// into a non-nil AnyResponse — reading its header would panic, and
-			// there is no response for the caller to read it off anyway. The ID
-			// goes on the error's metadata instead, which is where connect-go
-			// puts headers for an error reply, and is exactly when a caller
-			// most wants something to correlate against.
-			var cerr *connect.Error
-			if errors.As(err, &cerr) {
-				cerr.Meta().Set(HeaderName, id)
-			}
-			return nil, err
-		}
-		resp.Header().Set(HeaderName, id)
-		return resp, nil
-	}
-}
-
-// WrapStreamingClient is a pass-through; this interceptor is server-side only.
-func (*Interceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	return next
-}
-
-// WrapStreamingHandler attaches a request ID to ctx and echoes it on the
-// response stream's header.
-func (*Interceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
-		id := resolve(conn.RequestHeader())
-		conn.ResponseHeader().Set(HeaderName, id)
-		return next(WithRequestID(ctx, id), conn)
-	}
 }

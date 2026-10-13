@@ -3,11 +3,10 @@ package auth_test
 import (
 	"context"
 	"log/slog"
-	"net/http"
 	"sync"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/aholstenson/kvarn/internal/config/apikey"
 	"github.com/aholstenson/kvarn/internal/config/tomlstore"
 	"github.com/aholstenson/kvarn/internal/orchestrator/auth"
@@ -57,20 +56,16 @@ func (m *memStore) List(context.Context) ([]*apikey.APIKey, error) { return nil,
 func (m *memStore) Put(context.Context, *apikey.APIKey) error      { return nil }
 func (m *memStore) Delete(context.Context, string) error           { return nil }
 
-// fakeReq is a tiny stand-in for the bits of connect.AnyRequest the
-// interceptor reads from.
-type fakeReq struct {
-	connect.Request[struct{}]
-	hdr  http.Header
-	spec connect.Spec
-	peer connect.Peer
+// call dispatches one RPC for procedure through interceptor to next the way
+// connect.Server does, so the interceptor sees info on its context.
+func call(ctx context.Context, interceptor connect.ServerInterceptor, procedure string, info *connect.CallInfo, next connect.ServerFunc) error {
+	server := connect.NewServer(interceptor)
+	server.Register(connect.Method{Spec: connect.Spec{Procedure: procedure}, Handler: next})
+	return server.Call(ctx, procedure, info, nil)
 }
 
-func (r *fakeReq) Any() any            { return nil }
-func (r *fakeReq) Spec() connect.Spec  { return r.spec }
-func (r *fakeReq) Peer() connect.Peer  { return r.peer }
-func (r *fakeReq) Header() http.Header { return r.hdr }
-func (r *fakeReq) HTTPMethod() string  { return http.MethodPost }
+// noop is a handler that succeeds without doing anything.
+func noop(context.Context, connect.Spec, connect.ServerStream) error { return nil }
 
 func attrMap(r slog.Record) map[string]any {
 	out := map[string]any{}
@@ -107,17 +102,10 @@ var _ = Describe("Auth audit logging", func() {
 		slog.SetDefault(previous)
 	})
 
-	It("emits api_key_used on a successful unary auth", func() {
-		interceptor := auth.NewInterceptor(store)
-		req := &fakeReq{
-			hdr:  http.Header{"Authorization": []string{"Bearer " + token}},
-			spec: connect.Spec{Procedure: "/svc/Method"},
-			peer: connect.Peer{Addr: "10.0.0.1"},
-		}
-		next := connect.UnaryFunc(func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
-			return connect.NewResponse(&struct{}{}), nil
-		})
-		_, err := interceptor.WrapUnary(next)(context.Background(), req)
+	It("emits api_key_used on a successful auth", func() {
+		info := &connect.CallInfo{PeerAddr: "10.0.0.1"}
+		info.RequestHeader().Set("Authorization", "Bearer "+token)
+		err := call(context.Background(), auth.NewInterceptor(store), "/svc/Method", info, noop)
 		Expect(err).NotTo(HaveOccurred())
 
 		rec, ok := capture.match("api_key_used")
@@ -131,15 +119,9 @@ var _ = Describe("Auth audit logging", func() {
 	})
 
 	It("emits api_key_auth_failed with a reason on rejection", func() {
-		interceptor := auth.NewInterceptor(store)
-		req := &fakeReq{
-			hdr:  http.Header{"Authorization": []string{"Bearer not-a-real-token"}},
-			spec: connect.Spec{Procedure: "/svc/Method"},
-			peer: connect.Peer{Addr: "10.0.0.2"},
-		}
-		_, err := interceptor.WrapUnary(connect.UnaryFunc(func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
-			return nil, nil
-		}))(context.Background(), req)
+		info := &connect.CallInfo{PeerAddr: "10.0.0.2"}
+		info.RequestHeader().Set("Authorization", "Bearer not-a-real-token")
+		err := call(context.Background(), auth.NewInterceptor(store), "/svc/Method", info, noop)
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 
 		rec, ok := capture.match("api_key_auth_failed")

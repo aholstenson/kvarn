@@ -6,7 +6,7 @@ import (
 	"net"
 	"path/filepath"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	"github.com/aholstenson/kvarn/internal/config/apikey"
 	"github.com/aholstenson/kvarn/internal/orchestrator/auth"
 	. "github.com/onsi/ginkgo/v2"
@@ -42,15 +42,16 @@ func unixPair() (server, client net.Conn) {
 }
 
 var _ = Describe("LocalInterceptor", func() {
-	var (
-		interceptor connect.Interceptor
-		req         *fakeReq
-	)
+	var interceptor connect.ServerInterceptor
 
 	BeforeEach(func() {
 		interceptor = auth.NewLocalInterceptor()
-		req = &fakeReq{spec: connect.Spec{Procedure: "/svc/Method"}}
 	})
+
+	// run dispatches one RPC through the interceptor to next.
+	run := func(ctx context.Context, next connect.ServerFunc) error {
+		return call(ctx, interceptor, "/svc/Method", &connect.CallInfo{}, next)
+	}
 
 	// Arriving on the socket is the whole claim, and what it buys is host
 	// authority — a caller who owns the orchestrator's config directory cannot
@@ -60,14 +61,12 @@ var _ = Describe("LocalInterceptor", func() {
 		ctx := auth.ConnContext(context.Background(), conn)
 
 		var got *auth.Identity
-		next := connect.UnaryFunc(func(ctx context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
+		err := run(ctx, func(ctx context.Context, _ connect.Spec, _ connect.ServerStream) error {
 			id, ok := auth.IdentityFrom(ctx)
 			Expect(ok).To(BeTrue())
 			got = id
-			return connect.NewResponse(&struct{}{}), nil
+			return nil
 		})
-
-		_, err := interceptor.WrapUnary(next)(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got.Source).To(Equal(auth.SourceLocal))
 		Expect(got.Allows(apikey.CapabilityHost)).To(BeTrue())
@@ -86,12 +85,10 @@ var _ = Describe("LocalInterceptor", func() {
 		ctx := auth.ConnContext(context.Background(), server)
 
 		called := false
-		next := connect.UnaryFunc(func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
+		err := run(ctx, func(context.Context, connect.Spec, connect.ServerStream) error {
 			called = true
-			return connect.NewResponse(&struct{}{}), nil
+			return nil
 		})
-
-		_, err := interceptor.WrapUnary(next)(ctx, req)
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 		Expect(called).To(BeFalse())
 	})
@@ -100,12 +97,10 @@ var _ = Describe("LocalInterceptor", func() {
 	// interceptor cannot tell where the request came from and must not guess.
 	It("refuses a request with no connection on the context", func() {
 		called := false
-		next := connect.UnaryFunc(func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
+		err := run(context.Background(), func(context.Context, connect.Spec, connect.ServerStream) error {
 			called = true
-			return connect.NewResponse(&struct{}{}), nil
+			return nil
 		})
-
-		_, err := interceptor.WrapUnary(next)(context.Background(), req)
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnauthenticated))
 		Expect(called).To(BeFalse())
 	})
@@ -128,10 +123,7 @@ var _ = Describe("LocalInterceptor", func() {
 		It("records the local caller and its peer", func() {
 			conn, _ := unixPair()
 			ctx := auth.ConnContext(context.Background(), conn)
-			next := connect.UnaryFunc(func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
-				return connect.NewResponse(&struct{}{}), nil
-			})
-			_, err := interceptor.WrapUnary(next)(ctx, req)
+			err := run(ctx, noop)
 			Expect(err).NotTo(HaveOccurred())
 
 			rec, ok := capture.match("local_control_used")
@@ -145,10 +137,7 @@ var _ = Describe("LocalInterceptor", func() {
 		})
 
 		It("records a rejection", func() {
-			_, err := interceptor.WrapUnary(connect.UnaryFunc(
-				func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
-					return connect.NewResponse(&struct{}{}), nil
-				}))(context.Background(), req)
+			err := run(context.Background(), noop)
 			Expect(err).To(HaveOccurred())
 
 			rec, ok := capture.match("local_control_rejected")

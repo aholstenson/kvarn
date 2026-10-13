@@ -10,6 +10,8 @@ import (
 	"os"
 	"time"
 
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -32,8 +34,9 @@ func serve(store session.Store, policy orchestrator.DispatchPolicy) string {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	Expect(err).NotTo(HaveOccurred())
 	mux := http.NewServeMux()
-	path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc)
-	mux.Handle(path, handler)
+	orchestratorRPC := connect.NewServer()
+	kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, svc)
+	connecthttp.Mount(mux, orchestratorRPC)
 	server := &http.Server{Handler: mux}
 	go server.Serve(listener)
 	DeferCleanup(server.Close)

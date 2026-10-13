@@ -10,7 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/agent"
@@ -158,16 +159,18 @@ var _ = Describe("Custom agent modes", func() {
 		})
 
 		mux := http.NewServeMux()
-		path, handler := kvarnv1connect.NewOrchestratorServiceHandler(svc)
-		mux.Handle(path, handler)
-		bridgePath, bridgeHandler := kvarnv1connect.NewBridgeServiceHandler(svc.BridgeHandler())
-		mux.Handle(bridgePath, bridgeHandler)
+		orchestratorRPC := connect.NewServer()
+		kvarnv1connect.RegisterOrchestratorServiceHandler(orchestratorRPC, svc)
+		connecthttp.Mount(mux, orchestratorRPC)
+		bridgeRPC := connect.NewServer()
+		kvarnv1connect.RegisterBridgeServiceHandler(bridgeRPC, svc.BridgeHandler())
+		connecthttp.Mount(mux, bridgeRPC)
 
 		server = &http.Server{Handler: mux}
 		go server.Serve(listener)
 
-		client = kvarnv1connect.NewOrchestratorServiceClient(
-			http.DefaultClient, fmt.Sprintf("http://%s", listener.Addr().String()))
+		client = kvarnv1connect.NewOrchestratorServiceClient(connect.NewClient(connecthttp.NewTransport(
+			http.DefaultClient, fmt.Sprintf("http://%s", listener.Addr().String()), connecthttp.WithReadMaxBytes(0))))
 	}
 
 	BeforeEach(func() {
@@ -225,14 +228,14 @@ modes:
 	Describe("a repository-defined read-only mode delivering a comment", func() {
 		It("posts the result on the pull request without pushing anything", func() {
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "review this",
 				Mode:      "review-pr",
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 
 			Expect(testAgent.sawReadOnlyMode()).To(BeTrue())
 
@@ -250,14 +253,14 @@ modes:
 
 		It("hands the agent the context blocks the mode asked for and no others", func() {
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "review this",
 				Mode:      "review-pr",
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 
 			prompt := testAgent.lastPrompt()
 			Expect(prompt).To(ContainSubstring("## Current pull request"))
@@ -268,56 +271,56 @@ modes:
 
 		It("records the result so it can be read back after the run", func() {
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "review this",
 				Mode:      "review-pr",
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 
 			got, err := client.GetSessionResult(context.Background(),
-				connect.NewRequest(&v1.GetSessionResultRequest{SessionId: resp.Msg.SessionId}))
+				&v1.GetSessionResultRequest{SessionId: resp.SessionId})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Msg.State).To(Equal("completed"))
-			Expect(got.Msg.Result).To(ContainSubstring("Approve with comments"))
+			Expect(got.State).To(Equal("completed"))
+			Expect(got.Result).To(ContainSubstring("Approve with comments"))
 		})
 
 		It("fails the run when the comment cannot be posted", func() {
 			mockForgeInst.commentErr = fmt.Errorf("forge unavailable")
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "review this",
 				Mode:      "review-pr",
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("failed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
 
-			sess, err := sessionMgr.Get(context.Background(), resp.Msg.SessionId)
+			sess, err := sessionMgr.Get(context.Background(), resp.SessionId)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sess.Error).To(ContainSubstring("post result comment"))
 		})
 
 		It("allows two concurrent runs on one pull request, since neither pushes", func() {
 			startService()
-			first, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			first, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "review this",
 				Mode:      "review-pr",
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(first.SessionId)).Should(Equal("completed"))
 
-			_, err = client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			_, err = client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "review it again",
 				Mode:      "review-pr",
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 		})
 	})
@@ -342,30 +345,30 @@ modes:
 
 		It("runs the project's checks and fails the run on a red required step", func() {
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "does this pass?",
 				Mode:      "test-pr",
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("failed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
 
-			sess, err := sessionMgr.Get(context.Background(), resp.Msg.SessionId)
+			sess, err := sessionMgr.Get(context.Background(), resp.SessionId)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sess.Error).To(ContainSubstring("required validation steps failed"))
 		})
 
 		It("posts the failing verdict before failing the run", func() {
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "does this pass?",
 				Mode:      "test-pr",
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("failed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
 
 			Expect(mockForgeInst.commentCalls).To(Equal(1),
 				"the verdict is what the mode exists to produce, so a red run still delivers it")
@@ -374,9 +377,9 @@ modes:
 			Expect(mockForgeInst.lastCommentOpts.Body).To(ContainSubstring("Tests — failed (exit 1)"))
 
 			got, err := client.GetSessionResult(context.Background(),
-				connect.NewRequest(&v1.GetSessionResultRequest{SessionId: resp.Msg.SessionId}))
+				&v1.GetSessionResultRequest{SessionId: resp.SessionId})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Msg.Result).To(ContainSubstring("Approve with comments"))
+			Expect(got.Result).To(ContainSubstring("Approve with comments"))
 		})
 
 		It("runs path-scoped required steps, which a run with no diff of its own would otherwise skip", func() {
@@ -397,14 +400,14 @@ modes:
       - pr-comment
 `
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "does this pass?",
 				Mode:      "test-pr",
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("failed"),
+			Eventually(stateOf(resp.SessionId)).Should(Equal("failed"),
 				"gating on an empty diff would have skipped the step into a green result")
 			Expect(mockForgeInst.lastCommentOpts.Body).To(ContainSubstring("Tests — failed (exit 1)"))
 		})
@@ -425,14 +428,14 @@ modes:
       - pr-comment
 `
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "does this pass?",
 				Mode:      "test-pr",
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 			Expect(mockForgeInst.commentCalls).To(Equal(1))
 		})
 	})
@@ -450,14 +453,14 @@ modes:
 
 		It("commits onto the pull request rather than delivering nothing", func() {
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "add the test",
 				Mode:      "implement",
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 
 			mockScm.mu.Lock()
 			pushCalls := mockScm.pushCalls
@@ -488,16 +491,16 @@ modes:
 			kvarnYML = "" // no repository modes at all
 			startService()
 
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "review this",
 				ModeSpec:  inlineReview(),
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 
-			sess, err := sessionMgr.Get(context.Background(), resp.Msg.SessionId)
+			sess, err := sessionMgr.Get(context.Background(), resp.SessionId)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sess.Mode).To(Equal("review-inline"))
 			Expect(sess.ModeSpecJSON).To(ContainSubstring(`"extends":"review"`))
@@ -509,7 +512,7 @@ modes:
 
 		It("is rejected when its axes do not make sense", func() {
 			startService()
-			_, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			_, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project: "test-project",
 				Prompt:  "review this",
 				ModeSpec: &v1.ModeSpec{
@@ -518,7 +521,7 @@ modes:
 					Workspace: "read-only",
 					Deliver:   []string{"new-pull-request"},
 				},
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 			Expect(err.Error()).To(ContainSubstring("read-write"))
@@ -526,11 +529,11 @@ modes:
 
 		It("is rejected when it starts somewhere the mode does not accept", func() {
 			startService()
-			_, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			_, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:  "test-project",
 				Prompt:   "review this",
 				ModeSpec: inlineReview(),
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 			Expect(err.Error()).To(ContainSubstring("existing pull request"))
@@ -538,11 +541,11 @@ modes:
 
 		It("inherits the start point of the mode it extends rather than accepting a branch", func() {
 			startService()
-			_, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			_, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:  "test-project",
 				Prompt:   "revise this",
 				ModeSpec: &v1.ModeSpec{Name: "revise", Extends: "feedback"},
-			}))
+			})
 			Expect(err).To(HaveOccurred(), "a follow-up commit has nowhere to land without a pull request")
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 			Expect(err.Error()).To(ContainSubstring("existing pull request"))
@@ -550,7 +553,7 @@ modes:
 
 		It("is rejected when it comments on a pull request the run would not have", func() {
 			startService()
-			_, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			_, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project: "test-project",
 				Prompt:  "review this",
 				ModeSpec: &v1.ModeSpec{
@@ -558,7 +561,7 @@ modes:
 					Extends: "review",
 					Deliver: []string{"pr-comment"},
 				},
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 			Expect(err.Error()).To(ContainSubstring("comment on a pull request"))
@@ -566,44 +569,44 @@ modes:
 
 		It("replays an idempotency key that carries the same definition", func() {
 			startService()
-			req := func() *connect.Request[v1.StartJobRequest] {
-				return connect.NewRequest(&v1.StartJobRequest{
+			req := func() *v1.StartJobRequest {
+				return &v1.StartJobRequest{
 					Project:        "test-project",
 					Prompt:         "review this",
 					ModeSpec:       inlineReview(),
 					StartFrom:      &v1.StartJobRequest_PrRef{PrRef: "42"},
 					IdempotencyKey: "key-1",
-				})
+				}
 			}
 			first, err := client.StartJob(context.Background(), req())
 			Expect(err).NotTo(HaveOccurred())
 
 			second, err := client.StartJob(context.Background(), req())
 			Expect(err).NotTo(HaveOccurred())
-			Expect(second.Msg.SessionId).To(Equal(first.Msg.SessionId))
-			Expect(second.Msg.Duplicate).To(BeTrue())
+			Expect(second.SessionId).To(Equal(first.SessionId))
+			Expect(second.Duplicate).To(BeTrue())
 		})
 
 		It("refuses an idempotency key reused for a different definition", func() {
 			startService()
-			_, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			_, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:        "test-project",
 				Prompt:         "review this",
 				ModeSpec:       inlineReview(),
 				StartFrom:      &v1.StartJobRequest_PrRef{PrRef: "42"},
 				IdempotencyKey: "key-1",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
 
 			differing := inlineReview()
 			differing.Prompt = "Something else entirely."
-			_, err = client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			_, err = client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:        "test-project",
 				Prompt:         "review this",
 				ModeSpec:       differing,
 				StartFrom:      &v1.StartJobRequest_PrRef{PrRef: "42"},
 				IdempotencyKey: "key-1",
-			}))
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeAlreadyExists))
 		})
@@ -612,22 +615,22 @@ modes:
 			kvarnYML = ""
 			startService()
 
-			first, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			first, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "review this",
 				ModeSpec:  inlineReview(),
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(first.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(first.SessionId)).Should(Equal("completed"))
 
 			retried, err := client.RetryJob(context.Background(),
-				connect.NewRequest(&v1.RetryJobRequest{SessionId: first.Msg.SessionId}))
+				&v1.RetryJobRequest{SessionId: first.SessionId})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(retried.Msg.SessionId)).Should(Equal("completed"),
+			Eventually(stateOf(retried.SessionId)).Should(Equal("completed"),
 				"the retry resolves the same definition rather than a name nothing defines")
 
-			sess, err := sessionMgr.Get(context.Background(), retried.Msg.SessionId)
+			sess, err := sessionMgr.Get(context.Background(), retried.SessionId)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sess.ModeSpecJSON).To(ContainSubstring(`"extends":"review"`))
 			Expect(mockForgeInst.commentCalls).To(Equal(2))
@@ -637,27 +640,27 @@ modes:
 	Describe("a mode name the orchestrator cannot see yet", func() {
 		It("is accepted at submission and resolved once the repository is cloned", func() {
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",
 				Prompt:    "review this",
 				Mode:      "review-pr",
 				StartFrom: &v1.StartJobRequest_PrRef{PrRef: "42"},
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred(), "submission cannot read the repository's modes")
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("completed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
 		})
 
 		It("fails the run, naming what the project does define, when nothing defines it", func() {
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project: "test-project",
 				Prompt:  "review this",
 				Mode:    "nonesuch",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("failed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
 
-			sess, err := sessionMgr.Get(context.Background(), resp.Msg.SessionId)
+			sess, err := sessionMgr.Get(context.Background(), resp.SessionId)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sess.Error).To(ContainSubstring(`unknown mode "nonesuch"`))
 			Expect(sess.Error).To(ContainSubstring("review-pr"), "the message lists what is available")
@@ -666,14 +669,14 @@ modes:
 		It("fails the run when the repository's own modes do not parse", func() {
 			kvarnYML = "modes:\n  bad:\n    workspace: read-mostly\n"
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project: "test-project",
 				Prompt:  "do it",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("failed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
 
-			sess, err := sessionMgr.Get(context.Background(), resp.Msg.SessionId)
+			sess, err := sessionMgr.Get(context.Background(), resp.SessionId)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sess.Error).To(ContainSubstring("invalid workspace"))
 		})
@@ -681,15 +684,15 @@ modes:
 		It("fails the run before booting a VM when the mode has nowhere to deliver", func() {
 			kvarnYML = "modes:\n  revise:\n    extends: feedback\n"
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project: "test-project",
 				Prompt:  "revise this",
 				Mode:    "revise",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred(), "submission cannot read the repository's modes")
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("failed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
 
-			sess, err := sessionMgr.Get(context.Background(), resp.Msg.SessionId)
+			sess, err := sessionMgr.Get(context.Background(), resp.SessionId)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sess.Error).To(ContainSubstring("existing pull request"))
 			Expect(testAgent.lastPrompt()).To(BeEmpty(), "the agent never ran")
@@ -697,15 +700,15 @@ modes:
 
 		It("fails the run when the mode cannot start where the job did", func() {
 			startService()
-			resp, err := client.StartJob(context.Background(), connect.NewRequest(&v1.StartJobRequest{
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project: "test-project",
 				Prompt:  "review this",
 				Mode:    "review-pr",
-			}))
+			})
 			Expect(err).NotTo(HaveOccurred(), "submission cannot know the mode needs a pull request")
-			Eventually(stateOf(resp.Msg.SessionId)).Should(Equal("failed"))
+			Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
 
-			sess, err := sessionMgr.Get(context.Background(), resp.Msg.SessionId)
+			sess, err := sessionMgr.Get(context.Background(), resp.SessionId)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sess.Error).To(ContainSubstring("existing pull request"))
 		})

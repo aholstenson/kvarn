@@ -18,7 +18,8 @@ import (
 
 	"errors"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"golang.org/x/net/http2"
@@ -102,20 +103,18 @@ func (h *Handler) Close() {
 	}
 }
 
-func (h *Handler) CreateSession(_ context.Context, req *connect.Request[v1.CreateSessionRequest]) (*connect.Response[v1.CreateSessionResponse], error) {
-	msg := req.Msg
-
+func (h *Handler) CreateSession(_ context.Context, msg *v1.CreateSessionRequest) (*v1.CreateSessionResponse, error) {
 	h.sessionMu.Lock()
 	count := len(h.sessions)
 	h.sessionMu.Unlock()
 
 	if count >= maxSessions {
-		return nil, connect.NewError(connect.CodeResourceExhausted, fmt.Errorf("too many sessions (%d), limit is %d", count, maxSessions))
+		return nil, connect.Errorf(connect.CodeResourceExhausted, "too many sessions (%d), limit is %d", count, maxSessions)
 	}
 
 	sess, err := newShellSession(msg.WorkingDir, h.kvarnCred)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create shell session: %w", err))
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create shell session: %w", err).Error())
 	}
 
 	id := fmt.Sprintf("sess-%d", h.nextSessID.Add(1))
@@ -124,24 +123,24 @@ func (h *Handler) CreateSession(_ context.Context, req *connect.Request[v1.Creat
 	h.sessions[id] = sess
 	h.sessionMu.Unlock()
 
-	return connect.NewResponse(&v1.CreateSessionResponse{
+	return &v1.CreateSessionResponse{
 		SessionId: id,
-	}), nil
+	}, nil
 }
 
-func (h *Handler) SessionExec(ctx context.Context, req *connect.Request[v1.SessionExecRequest]) (*connect.Response[v1.SessionExecResponse], error) {
-	return h.SessionExecWithOutput(ctx, req.Msg, nil)
+func (h *Handler) SessionExec(ctx context.Context, req *v1.SessionExecRequest) (*v1.SessionExecResponse, error) {
+	return h.SessionExecWithOutput(ctx, req, nil)
 }
 
 // SessionExecWithOutput executes a command in a session, calling onOutput with
 // incremental stdout/stderr chunks as they become available.
-func (h *Handler) SessionExecWithOutput(ctx context.Context, msg *v1.SessionExecRequest, onOutput OutputCallback) (*connect.Response[v1.SessionExecResponse], error) {
+func (h *Handler) SessionExecWithOutput(ctx context.Context, msg *v1.SessionExecRequest, onOutput OutputCallback) (*v1.SessionExecResponse, error) {
 	h.sessionMu.Lock()
 	sess, ok := h.sessions[msg.SessionId]
 	h.sessionMu.Unlock()
 
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("session %q not found", msg.SessionId))
+		return nil, connect.Errorf(connect.CodeNotFound, "session %q not found", msg.SessionId)
 	}
 
 	timeout := time.Duration(msg.TimeoutSeconds) * time.Second
@@ -152,10 +151,10 @@ func (h *Handler) SessionExecWithOutput(ctx context.Context, msg *v1.SessionExec
 	// doing. Reporting the timeout as a failed call would throw it away, so it
 	// comes back as a result carrying TimedOut and the timeout exit code.
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 
-	return connect.NewResponse(&v1.SessionExecResponse{
+	return &v1.SessionExecResponse{
 		ExitCode:         result.ExitCode,
 		Stdout:           result.Stdout,
 		Stderr:           result.Stderr,
@@ -164,12 +163,10 @@ func (h *Handler) SessionExecWithOutput(ctx context.Context, msg *v1.SessionExec
 		TimedOut:         result.TimedOut,
 		StdoutTotalBytes: uint64(result.StdoutTotal),
 		StderrTotalBytes: uint64(result.StderrTotal),
-	}), nil
+	}, nil
 }
 
-func (h *Handler) CloseSession(_ context.Context, req *connect.Request[v1.CloseSessionRequest]) (*connect.Response[v1.CloseSessionResponse], error) {
-	msg := req.Msg
-
+func (h *Handler) CloseSession(_ context.Context, msg *v1.CloseSessionRequest) (*v1.CloseSessionResponse, error) {
 	h.sessionMu.Lock()
 	sess, ok := h.sessions[msg.SessionId]
 	if ok {
@@ -178,16 +175,14 @@ func (h *Handler) CloseSession(_ context.Context, req *connect.Request[v1.CloseS
 	h.sessionMu.Unlock()
 
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("session %q not found", msg.SessionId))
+		return nil, connect.Errorf(connect.CodeNotFound, "session %q not found", msg.SessionId)
 	}
 
 	sess.Close()
-	return connect.NewResponse(&v1.CloseSessionResponse{}), nil
+	return &v1.CloseSessionResponse{}, nil
 }
 
-func (h *Handler) Exec(ctx context.Context, req *connect.Request[v1.ExecRequest]) (*connect.Response[v1.ExecResponse], error) {
-	msg := req.Msg
-
+func (h *Handler) Exec(ctx context.Context, msg *v1.ExecRequest) (*v1.ExecResponse, error) {
 	timeout := msg.TimeoutSeconds
 	if timeout == 0 {
 		timeout = DefaultExecTimeout
@@ -270,7 +265,7 @@ func (h *Handler) Exec(ctx context.Context, req *connect.Request[v1.ExecRequest]
 	if stderr.Truncated() {
 		resp.StderrTotalBytes = uint64(stderr.Total())
 	}
-	return connect.NewResponse(resp), nil
+	return resp, nil
 }
 
 // safePath resolves path within workingDir and ensures it doesn't escape.
@@ -285,7 +280,7 @@ func (h *Handler) Exec(ctx context.Context, req *connect.Request[v1.ExecRequest]
 // files. Anything genuinely outside is still rejected.
 func safePath(workingDir, path string) (string, error) {
 	if path == "" {
-		return "", connect.NewError(connect.CodeInvalidArgument, errors.New("path must not be empty"))
+		return "", connect.NewError(connect.CodeInvalidArgument, "path must not be empty")
 	}
 
 	// Resolve the working directory fully (handles symlinks like macOS /tmp -> /private/tmp)
@@ -302,8 +297,8 @@ func safePath(workingDir, path string) (string, error) {
 	if filepath.IsAbs(rel) {
 		inside, ok := relativeToAny(rel, resolvedDir, absDir)
 		if !ok {
-			return "", connect.NewError(connect.CodeInvalidArgument,
-				fmt.Errorf("absolute path %s is outside the working directory %s; pass a path relative to it", path, absDir))
+			return "", connect.Errorf(connect.CodeInvalidArgument,
+				"absolute path %s is outside the working directory %s; pass a path relative to it", path, absDir)
 		}
 		rel = inside
 	}
@@ -313,11 +308,11 @@ func safePath(workingDir, path string) (string, error) {
 
 	// Check the cleaned path stays within the working directory
 	if joined == resolvedDir {
-		return "", connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("path %s is the working directory itself, not a file", path))
+		return "", connect.Errorf(connect.CodeInvalidArgument,
+			"path %s is the working directory itself, not a file", path)
 	}
 	if !strings.HasPrefix(joined, withSeparator(resolvedDir)) {
-		return "", connect.NewError(connect.CodeInvalidArgument, errors.New("path escapes working directory"))
+		return "", connect.NewError(connect.CodeInvalidArgument, "path escapes working directory")
 	}
 
 	return joined, nil
@@ -380,10 +375,9 @@ func isUnderKvarnHome(path string) bool {
 	return strings.HasPrefix(path, kvarnHome+string(filepath.Separator))
 }
 
-func (h *Handler) UploadFiles(ctx context.Context, req *connect.Request[v1.UploadFilesRequest]) (*connect.Response[v1.UploadFilesResponse], error) {
-	msg := req.Msg
+func (h *Handler) UploadFiles(ctx context.Context, msg *v1.UploadFilesRequest) (*v1.UploadFilesResponse, error) {
 	if msg.WorkingDir == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("working_dir is required"))
+		return nil, connect.NewError(connect.CodeInvalidArgument, "working_dir is required")
 	}
 
 	var count int32
@@ -395,14 +389,14 @@ func (h *Handler) UploadFiles(ctx context.Context, req *connect.Request[v1.Uploa
 
 		dir := filepath.Dir(resolved)
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 		}
 
 		if f.SymlinkTarget != "" {
 			// Remove any existing file/symlink at the path before creating.
 			os.Remove(resolved)
 			if err := os.Symlink(f.SymlinkTarget, resolved); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 			}
 		} else {
 			mode := fs.FileMode(f.Mode)
@@ -411,7 +405,7 @@ func (h *Handler) UploadFiles(ctx context.Context, req *connect.Request[v1.Uploa
 			}
 
 			if err := os.WriteFile(resolved, f.Content, mode); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 			}
 		}
 
@@ -431,15 +425,14 @@ func (h *Handler) UploadFiles(ctx context.Context, req *connect.Request[v1.Uploa
 		count++
 	}
 
-	return connect.NewResponse(&v1.UploadFilesResponse{
+	return &v1.UploadFilesResponse{
 		FilesWritten: count,
-	}), nil
+	}, nil
 }
 
-func (h *Handler) ReadFile(ctx context.Context, req *connect.Request[v1.ReadFileRequest]) (*connect.Response[v1.ReadFileResponse], error) {
-	msg := req.Msg
+func (h *Handler) ReadFile(ctx context.Context, msg *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
 	if msg.WorkingDir == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("working_dir is required"))
+		return nil, connect.NewError(connect.CodeInvalidArgument, "working_dir is required")
 	}
 
 	resolved, err := safePath(msg.WorkingDir, msg.Path)
@@ -450,20 +443,20 @@ func (h *Handler) ReadFile(ctx context.Context, req *connect.Request[v1.ReadFile
 	content, err := readAnchorableFile(resolved)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("file not found: %s", msg.Path))
+			return nil, connect.Errorf(connect.CodeNotFound, "file not found: %s", msg.Path)
 		}
 		var ae *AnchoredError
 		if errors.As(err, &ae) {
 			return nil, ae.toConnectError()
 		}
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 
 	resp, anchoredErr := buildReadResponse(content, int(msg.StartLine), int(msg.EndLine))
 	if anchoredErr != nil {
 		return nil, anchoredErr.toConnectError()
 	}
-	return connect.NewResponse(resp), nil
+	return resp, nil
 }
 
 // buildReadResponse runs the read-side anchoring logic and returns the proto
@@ -522,13 +515,12 @@ func buildReadResponse(content []byte, startLine, endLine int) (*v1.ReadFileResp
 	}, nil
 }
 
-func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFileRequest]) (*connect.Response[v1.EditFileResponse], error) {
-	msg := req.Msg
+func (h *Handler) EditFile(ctx context.Context, msg *v1.EditFileRequest) (*v1.EditFileResponse, error) {
 	if msg.WorkingDir == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("working_dir is required"))
+		return nil, connect.NewError(connect.CodeInvalidArgument, "working_dir is required")
 	}
 	if len(msg.Operations) == 0 {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("operations must not be empty"))
+		return nil, connect.NewError(connect.CodeInvalidArgument, "operations must not be empty")
 	}
 
 	resolved, err := safePath(msg.WorkingDir, msg.Path)
@@ -543,9 +535,9 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 	info, err := os.Stat(resolved)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("file not found: %s", msg.Path))
+			return nil, connect.Errorf(connect.CodeNotFound, "file not found: %s", msg.Path)
 		}
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 
 	content, err := readAnchorableFile(resolved)
@@ -554,14 +546,14 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 		if errors.As(err, &ae) {
 			return nil, ae.toConnectError()
 		}
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 
 	if vErr := validateFileContent(content); vErr != nil {
 		if ae, ok := vErr.(*AnchoredError); ok {
 			return nil, ae.toConnectError()
 		}
-		return nil, connect.NewError(connect.CodeInvalidArgument, vErr)
+		return nil, connect.NewError(connect.CodeInvalidArgument, vErr.Error()).WithCause(vErr)
 	}
 
 	lines, newline, trailingNewline, splitErr := splitLines(content)
@@ -569,7 +561,7 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 		if ae, ok := splitErr.(*AnchoredError); ok {
 			return nil, ae.toConnectError()
 		}
-		return nil, connect.NewError(connect.CodeInvalidArgument, splitErr)
+		return nil, connect.NewError(connect.CodeInvalidArgument, splitErr.Error()).WithCause(splitErr)
 	}
 
 	currentVersion := hashFile(content)
@@ -587,7 +579,7 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 			if ae, ok := err.(*AnchoredError); ok {
 				return nil, ae.toConnectError()
 			}
-			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+			return nil, connect.NewError(connect.CodeInvalidArgument, err.Error()).WithCause(err)
 		}
 	}
 
@@ -673,7 +665,7 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 		if ae, ok := err.(*AnchoredError); ok {
 			return nil, ae.toConnectError()
 		}
-		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		return nil, connect.NewError(connect.CodeInvalidArgument, err.Error()).WithCause(err)
 	}
 
 	// Capture original anchor lines for context computation after the edit.
@@ -724,7 +716,7 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 	}
 
 	if err := writeFileAtomic(resolved, updated, info.Mode()); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 	// The atomic write replaces the file with one the runner created, so the
 	// edit would otherwise hand a workspace file to root.
@@ -748,12 +740,12 @@ func (h *Handler) EditFile(ctx context.Context, req *connect.Request[v1.EditFile
 	}
 	sort.Slice(contextSet, func(i, j int) bool { return contextSet[i].Line < contextSet[j].Line })
 
-	return connect.NewResponse(&v1.EditFileResponse{
+	return &v1.EditFileResponse{
 		Version:      hashFile(updated),
 		TotalLines:   int32(len(newLines)),
 		Context:      contextSet,
 		VersionDrift: versionDrifted,
-	}), nil
+	}, nil
 }
 
 // spliceLines returns lines[:start] + replacement + lines[end:].
@@ -783,10 +775,9 @@ func stringsToByteSlices(ss []string) [][]byte {
 	return out
 }
 
-func (h *Handler) WriteFile(ctx context.Context, req *connect.Request[v1.WriteFileRequest]) (*connect.Response[v1.WriteFileResponse], error) {
-	msg := req.Msg
+func (h *Handler) WriteFile(ctx context.Context, msg *v1.WriteFileRequest) (*v1.WriteFileResponse, error) {
 	if msg.WorkingDir == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("working_dir is required"))
+		return nil, connect.NewError(connect.CodeInvalidArgument, "working_dir is required")
 	}
 
 	resolved, err := safePath(msg.WorkingDir, msg.Path)
@@ -802,14 +793,14 @@ func (h *Handler) WriteFile(ctx context.Context, req *connect.Request[v1.WriteFi
 		if ae, ok := vErr.(*AnchoredError); ok {
 			return nil, ae.toConnectError()
 		}
-		return nil, connect.NewError(connect.CodeInvalidArgument, vErr)
+		return nil, connect.NewError(connect.CodeInvalidArgument, vErr.Error()).WithCause(vErr)
 	}
 	lines, _, _, splitErr := splitLines(msg.Content)
 	if splitErr != nil {
 		if ae, ok := splitErr.(*AnchoredError); ok {
 			return nil, ae.toConnectError()
 		}
-		return nil, connect.NewError(connect.CodeInvalidArgument, splitErr)
+		return nil, connect.NewError(connect.CodeInvalidArgument, splitErr.Error()).WithCause(splitErr)
 	}
 
 	mode := fs.FileMode(msg.Mode)
@@ -819,7 +810,7 @@ func (h *Handler) WriteFile(ctx context.Context, req *connect.Request[v1.WriteFi
 
 	dir := filepath.Dir(resolved)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 
 	existing, statErr := os.Stat(resolved)
@@ -829,18 +820,18 @@ func (h *Handler) WriteFile(ctx context.Context, req *connect.Request[v1.WriteFi
 			return nil, ae.toConnectError()
 		}
 		if !errors.Is(statErr, os.ErrNotExist) {
-			return nil, connect.NewError(connect.CodeInternal, statErr)
+			return nil, connect.NewError(connect.CodeInternal, statErr.Error()).WithCause(statErr)
 		}
 	} else {
 		if statErr != nil {
 			if errors.Is(statErr, os.ErrNotExist) {
-				return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("file not found: %s", msg.Path))
+				return nil, connect.Errorf(connect.CodeNotFound, "file not found: %s", msg.Path)
 			}
-			return nil, connect.NewError(connect.CodeInternal, statErr)
+			return nil, connect.NewError(connect.CodeInternal, statErr.Error()).WithCause(statErr)
 		}
 		existingContent, readErr := os.ReadFile(resolved)
 		if readErr != nil {
-			return nil, connect.NewError(connect.CodeInternal, readErr)
+			return nil, connect.NewError(connect.CodeInternal, readErr.Error()).WithCause(readErr)
 		}
 		current := hashFile(existingContent)
 		if current != msg.ExpectedVersion {
@@ -859,14 +850,14 @@ func (h *Handler) WriteFile(ctx context.Context, req *connect.Request[v1.WriteFi
 	}
 
 	if err := writeFileAtomic(resolved, msg.Content, mode); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 	h.chownToKvarn(resolved, dir)
 
-	return connect.NewResponse(&v1.WriteFileResponse{
+	return &v1.WriteFileResponse{
 		Version:    hashFile(msg.Content),
 		TotalLines: int32(len(lines)),
-	}), nil
+	}, nil
 }
 
 // resolveExitCode extracts a meaningful exit code from an exec error, and
@@ -880,7 +871,7 @@ func resolveExitCode(ctx context.Context, err error) (code int32, timedOut bool,
 
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
-		return 0, false, connect.NewError(connect.CodeInternal, err)
+		return 0, false, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 
 	// A timeout is an outcome of the command, not a failure of the call: what
@@ -903,9 +894,10 @@ func resolveExitCode(ctx context.Context, err error) (code int32, timedOut bool,
 
 // NewServer creates an HTTP server with the runner service registered.
 func NewServer() *http.Server {
+	server := connect.NewServer()
+	kvarnv1connect.RegisterRunnerServiceHandler(server, NewHandler())
 	mux := http.NewServeMux()
-	path, svcHandler := kvarnv1connect.NewRunnerServiceHandler(NewHandler())
-	mux.Handle(path, svcHandler)
+	connecthttp.Mount(mux, server, connecthttp.WithReadMaxBytes(0))
 	return &http.Server{
 		Handler: h2c.NewHandler(mux, &http2.Server{}),
 	}

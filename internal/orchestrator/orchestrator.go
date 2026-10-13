@@ -8,7 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"github.com/aholstenson/kvarn/internal/localsock"
 	"github.com/aholstenson/kvarn/internal/observability/metrics"
@@ -138,7 +139,7 @@ func run(ctx context.Context, listen serveOpts, svcOpts ServiceOpts) error {
 // not leak onto this mux — exposing it would publish an unauthenticated
 // runner-impersonation entry point.
 func PublicMux(svc *Service) *http.ServeMux {
-	var authInterceptor connect.Interceptor
+	var authInterceptor connect.ServerInterceptor
 	if svc.authEnabled {
 		authInterceptor = auth.NewInterceptor(svc.apiKeyStore, auth.WithMetrics(svc.instruments))
 	}
@@ -165,10 +166,10 @@ func LocalMux(svc *Service) *http.ServeMux {
 // histogram both carry it; auth before the RPC timer keeps unauthenticated
 // rejects out of the per-procedure latency distribution for authenticated
 // traffic.
-func (s *Service) mux(authInterceptor connect.Interceptor) *http.ServeMux {
+func (s *Service) mux(authInterceptor connect.ServerInterceptor) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	interceptors := []connect.Interceptor{reqid.NewInterceptor()}
+	interceptors := []connect.ServerInterceptor{reqid.NewInterceptor()}
 	if authInterceptor != nil {
 		interceptors = append(interceptors, authInterceptor)
 	}
@@ -178,8 +179,9 @@ func (s *Service) mux(authInterceptor connect.Interceptor) *http.ServeMux {
 		slog.Warn("rpc duration metric disabled", "error", err)
 	}
 
-	path, handler := kvarnv1connect.NewOrchestratorServiceHandler(s, connect.WithInterceptors(interceptors...))
-	mux.Handle(path, handler)
+	server := connect.NewServer(interceptors...)
+	kvarnv1connect.RegisterOrchestratorServiceHandler(server, s)
+	connecthttp.Mount(mux, server, connecthttp.WithReadMaxBytes(0))
 
 	return mux
 }

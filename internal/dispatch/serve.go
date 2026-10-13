@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -27,9 +29,10 @@ func ConnFromContext(ctx context.Context) (net.Conn, bool) {
 // BridgeService using the provided handler. It blocks until the listener
 // is closed or an error occurs.
 func Serve(listener net.Listener, handler kvarnv1connect.BridgeServiceHandler) {
+	server := connect.NewServer()
+	kvarnv1connect.RegisterBridgeServiceHandler(server, handler)
 	mux := http.NewServeMux()
-	path, h := kvarnv1connect.NewBridgeServiceHandler(handler)
-	mux.Handle(path, h)
+	connecthttp.Mount(mux, server, connecthttp.WithReadMaxBytes(0))
 
 	srv := &http.Server{
 		Handler: h2c.NewHandler(mux, &http2.Server{}),

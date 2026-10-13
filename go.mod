@@ -1,11 +1,12 @@
 module github.com/aholstenson/kvarn
 
-go 1.26
+go 1.26.0
 
 require (
-	connectrpc.com/connect v1.19.1
+	connectrpc.com/connect/v2 v2.0.0
 	github.com/Code-Hex/vz/v3 v3.7.1
 	github.com/Masterminds/semver/v3 v3.4.0
+	github.com/aholstenson/llms-go v0.11.0
 	github.com/alecthomas/kong v1.15.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/diskfs/go-diskfs v1.7.0

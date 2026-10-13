@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"connectrpc.com/connect"
+	"connectrpc.com/connect/v2"
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/gen/kvarn/v1/kvarnv1connect"
 )
@@ -61,23 +61,23 @@ func checkPeerBinding(ctx context.Context, pr *PendingRunner) error {
 		return nil
 	}
 	if cid != expected {
-		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("peer CID %d does not own this token", cid))
+		return connect.Errorf(connect.CodePermissionDenied, "peer CID %d does not own this token", cid)
 	}
 	return nil
 }
 
 // Register implements BridgeServiceHandler. The runner calls this to receive commands.
-func (h *Handler) Register(ctx context.Context, req *connect.Request[v1.RegisterRequest], stream *connect.ServerStream[v1.RunnerCommand]) error {
-	token := req.Msg.Token
+func (h *Handler) Register(ctx context.Context, req *v1.RegisterRequest, stream kvarnv1connect.BridgeServiceRegisterServerStream) error {
+	token := req.Token
 	pr, ok := h.registry.Lookup(token)
 	if !ok {
-		return connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+		return connect.NewError(connect.CodeNotFound, "unknown token")
 	}
 
 	// Only one Register stream may own the token at a time. The flag is
 	// released when this handler returns so a runner restart can re-register.
 	if !pr.RegisteredOnce.CompareAndSwap(false, true) {
-		return connect.NewError(connect.CodeAlreadyExists, errors.New("token already has an active runner"))
+		return connect.NewError(connect.CodeAlreadyExists, "token already has an active runner")
 	}
 	defer pr.RegisteredOnce.Store(false)
 
@@ -97,7 +97,7 @@ func (h *Handler) Register(ctx context.Context, req *connect.Request[v1.Register
 	}
 
 	// Store VM info from the runner.
-	pr.VmInfo = req.Msg.VmInfo
+	pr.VmInfo = req.VmInfo
 
 	// Signal that the runner is connected.
 	pr.MarkReady()
@@ -116,27 +116,27 @@ func (h *Handler) Register(ctx context.Context, req *connect.Request[v1.Register
 }
 
 // ReportResult implements BridgeServiceHandler. The runner calls this to return results.
-func (h *Handler) ReportResult(ctx context.Context, req *connect.Request[v1.CommandResult]) (*connect.Response[v1.ReportResultResponse], error) {
-	token := req.Msg.Token
+func (h *Handler) ReportResult(ctx context.Context, req *v1.CommandResult) (*v1.ReportResultResponse, error) {
+	token := req.Token
 	pr, ok := h.registry.Lookup(token)
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+		return nil, connect.NewError(connect.CodeNotFound, "unknown token")
 	}
 	if err := checkPeerBinding(ctx, pr); err != nil {
 		return nil, err
 	}
 
-	pr.ResultCh <- req.Msg
+	pr.ResultCh <- req
 
-	return connect.NewResponse(&v1.ReportResultResponse{}), nil
+	return &v1.ReportResultResponse{}, nil
 }
 
 // ReportOutput implements BridgeServiceHandler. The runner calls this to stream output chunks.
-func (h *Handler) ReportOutput(ctx context.Context, req *connect.Request[v1.OutputChunk]) (*connect.Response[v1.ReportOutputResponse], error) {
-	token := req.Msg.Token
+func (h *Handler) ReportOutput(ctx context.Context, req *v1.OutputChunk) (*v1.ReportOutputResponse, error) {
+	token := req.Token
 	pr, ok := h.registry.Lookup(token)
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+		return nil, connect.NewError(connect.CodeNotFound, "unknown token")
 	}
 	if err := checkPeerBinding(ctx, pr); err != nil {
 		return nil, err
@@ -144,11 +144,11 @@ func (h *Handler) ReportOutput(ctx context.Context, req *connect.Request[v1.Outp
 
 	// Non-blocking send to avoid blocking the runner on slow consumers.
 	select {
-	case pr.OutputCh <- req.Msg:
+	case pr.OutputCh <- req:
 	default:
 	}
 
-	return connect.NewResponse(&v1.ReportOutputResponse{}), nil
+	return &v1.ReportOutputResponse{}, nil
 }
 
 // ReportProcessEvent implements BridgeServiceHandler. The runner calls this
@@ -158,42 +158,42 @@ func (h *Handler) ReportOutput(ctx context.Context, req *connect.Request[v1.Outp
 // notice the orchestrator gets that a service is gone, and a preview whose
 // server died silently would keep answering requests with connection refused.
 // The channel is buffered and a blocked send is bounded by the request context.
-func (h *Handler) ReportProcessEvent(ctx context.Context, req *connect.Request[v1.ProcessEvent]) (*connect.Response[v1.ReportProcessEventResponse], error) {
-	pr, ok := h.registry.Lookup(req.Msg.Token)
+func (h *Handler) ReportProcessEvent(ctx context.Context, req *v1.ProcessEvent) (*v1.ReportProcessEventResponse, error) {
+	pr, ok := h.registry.Lookup(req.Token)
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+		return nil, connect.NewError(connect.CodeNotFound, "unknown token")
 	}
 	if err := checkPeerBinding(ctx, pr); err != nil {
 		return nil, err
 	}
 
 	select {
-	case pr.ProcessEventCh <- req.Msg:
+	case pr.ProcessEventCh <- req:
 	case <-ctx.Done():
-		return nil, connect.NewError(connect.CodeDeadlineExceeded, ctx.Err())
+		return nil, connect.NewError(connect.CodeDeadlineExceeded, ctx.Err().Error())
 	}
 
-	return connect.NewResponse(&v1.ReportProcessEventResponse{}), nil
+	return &v1.ReportProcessEventResponse{}, nil
 }
 
 // DownloadFile implements BridgeServiceHandler. The runner calls this to
 // download a file from the orchestrator as a server-streamed sequence of chunks.
-func (h *Handler) DownloadFile(ctx context.Context, req *connect.Request[v1.DownloadFileRequest], stream *connect.ServerStream[v1.FileStreamChunk]) error {
-	pr, ok := h.registry.Lookup(req.Msg.Token)
+func (h *Handler) DownloadFile(ctx context.Context, req *v1.DownloadFileRequest, stream kvarnv1connect.BridgeServiceDownloadFileServerStream) error {
+	pr, ok := h.registry.Lookup(req.Token)
 	if !ok {
-		return connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+		return connect.NewError(connect.CodeNotFound, "unknown token")
 	}
 	if err := checkPeerBinding(ctx, pr); err != nil {
 		return err
 	}
 
-	t, ok := pr.LookupTransfer(req.Msg.TransferId)
+	t, ok := pr.LookupTransfer(req.TransferId)
 	if !ok {
-		return connect.NewError(connect.CodeNotFound, errors.New("unknown transfer"))
+		return connect.NewError(connect.CodeNotFound, "unknown transfer")
 	}
 	defer func() {
 		t.Reader.Close()
-		pr.RemoveTransfer(req.Msg.TransferId)
+		pr.RemoveTransfer(req.TransferId)
 		close(t.Done)
 	}()
 
@@ -234,18 +234,18 @@ func (h *Handler) DownloadFile(ctx context.Context, req *connect.Request[v1.Down
 // per proxied connection to receive what the client outside the VM sent. The
 // stream ends when the client half-closes, which the runner turns into a
 // half-close on the guest socket so a request/response protocol completes.
-func (h *Handler) ReadConnection(ctx context.Context, req *connect.Request[v1.ReadConnectionRequest], stream *connect.ServerStream[v1.ConnectionChunk]) error {
-	pr, ok := h.registry.Lookup(req.Msg.Token)
+func (h *Handler) ReadConnection(ctx context.Context, req *v1.ReadConnectionRequest, stream kvarnv1connect.BridgeServiceReadConnectionServerStream) error {
+	pr, ok := h.registry.Lookup(req.Token)
 	if !ok {
-		return connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+		return connect.NewError(connect.CodeNotFound, "unknown token")
 	}
 	if err := checkPeerBinding(ctx, pr); err != nil {
 		return err
 	}
 
-	c, ok := pr.LookupConn(req.Msg.ConnectionId)
+	c, ok := pr.LookupConn(req.ConnectionId)
 	if !ok {
-		return connect.NewError(connect.CodeNotFound, errors.New("unknown connection"))
+		return connect.NewError(connect.CodeNotFound, "unknown connection")
 	}
 	defer c.Reader.Close()
 
@@ -277,22 +277,23 @@ func (h *Handler) ReadConnection(ctx context.Context, req *connect.Request[v1.Re
 
 // WriteConnection implements BridgeServiceHandler. The runner calls this once
 // per proxied connection to send back what the guest server answered.
-func (h *Handler) WriteConnection(ctx context.Context, clientStream *connect.ClientStream[v1.ConnectionChunk]) (*connect.Response[v1.WriteConnectionResult], error) {
-	if !clientStream.Receive() {
-		if err := clientStream.Err(); err != nil {
-			return nil, err
+func (h *Handler) WriteConnection(ctx context.Context, clientStream kvarnv1connect.BridgeServiceWriteConnectionServerStream) (*v1.WriteConnectionResult, error) {
+	first, err := clientStream.Receive()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, connect.NewError(connect.CodeInvalidArgument, "empty stream")
 		}
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("empty stream"))
+		return nil, err
 	}
 
-	start := clientStream.Msg().GetStart()
+	start := first.GetStart()
 	if start == nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("first chunk must be start metadata"))
+		return nil, connect.NewError(connect.CodeInvalidArgument, "first chunk must be start metadata")
 	}
 
 	pr, ok := h.registry.Lookup(start.Token)
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+		return nil, connect.NewError(connect.CodeNotFound, "unknown token")
 	}
 	if err := checkPeerBinding(ctx, pr); err != nil {
 		return nil, err
@@ -300,14 +301,21 @@ func (h *Handler) WriteConnection(ctx context.Context, clientStream *connect.Cli
 
 	c, ok := pr.LookupConn(start.ConnectionId)
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown connection"))
+		return nil, connect.NewError(connect.CodeNotFound, "unknown connection")
 	}
 	// Closing the writer is what tells the client the guest is done answering.
 	defer c.Writer.Close()
 
 	var total int64
-	for clientStream.Receive() {
-		data := clientStream.Msg().GetData()
+	for {
+		msg, err := clientStream.Receive()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		data := msg.GetData()
 		if data == nil {
 			continue
 		}
@@ -317,33 +325,30 @@ func (h *Handler) WriteConnection(ctx context.Context, clientStream *connect.Cli
 		}
 		total += int64(n)
 	}
-	if err := clientStream.Err(); err != nil {
-		return nil, err
-	}
 
-	return connect.NewResponse(&v1.WriteConnectionResult{BytesWritten: total}), nil
+	return &v1.WriteConnectionResult{BytesWritten: total}, nil
 }
 
 // UploadFile implements BridgeServiceHandler. The runner calls this to
 // upload a file to the orchestrator as a client-streamed sequence of chunks.
-func (h *Handler) UploadFile(ctx context.Context, clientStream *connect.ClientStream[v1.FileStreamChunk]) (*connect.Response[v1.FileStreamResult], error) {
+func (h *Handler) UploadFile(ctx context.Context, clientStream kvarnv1connect.BridgeServiceUploadFileServerStream) (*v1.FileStreamResult, error) {
 	// First message must be the start metadata.
-	if !clientStream.Receive() {
-		if err := clientStream.Err(); err != nil {
-			return nil, err
+	first, err := clientStream.Receive()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, connect.NewError(connect.CodeInvalidArgument, "empty stream")
 		}
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("empty stream"))
+		return nil, err
 	}
 
-	first := clientStream.Msg()
 	start := first.GetStart()
 	if start == nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("first chunk must be start metadata"))
+		return nil, connect.NewError(connect.CodeInvalidArgument, "first chunk must be start metadata")
 	}
 
 	pr, ok := h.registry.Lookup(start.Token)
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown token"))
+		return nil, connect.NewError(connect.CodeNotFound, "unknown token")
 	}
 	if err := checkPeerBinding(ctx, pr); err != nil {
 		return nil, err
@@ -351,7 +356,7 @@ func (h *Handler) UploadFile(ctx context.Context, clientStream *connect.ClientSt
 
 	t, ok := pr.LookupTransfer(start.TransferId)
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errors.New("unknown transfer"))
+		return nil, connect.NewError(connect.CodeNotFound, "unknown transfer")
 	}
 	var writeErr error
 	defer func() {
@@ -368,8 +373,16 @@ func (h *Handler) UploadFile(ctx context.Context, clientStream *connect.ClientSt
 
 	// Receive data chunks and write to the transfer writer.
 	var total int64
-	for clientStream.Receive() {
-		data := clientStream.Msg().GetData()
+	for {
+		msg, err := clientStream.Receive()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			writeErr = err
+			return nil, err
+		}
+		data := msg.GetData()
 		if data == nil {
 			continue
 		}
@@ -380,12 +393,8 @@ func (h *Handler) UploadFile(ctx context.Context, clientStream *connect.ClientSt
 		}
 		total += int64(n)
 	}
-	if err := clientStream.Err(); err != nil {
-		writeErr = err
-		return nil, err
-	}
 
-	return connect.NewResponse(&v1.FileStreamResult{
+	return &v1.FileStreamResult{
 		BytesWritten: total,
-	}), nil
+	}, nil
 }
