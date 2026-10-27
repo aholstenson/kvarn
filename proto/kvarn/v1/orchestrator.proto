@@ -59,6 +59,40 @@ message StartJobRequest {
   // that value on the pull request — everyone, on a public repository.
   // Keys beginning "kvarn." are reserved.
   map<string, string> metadata = 8;
+
+  // Optional validation steps for this run, added to the ones the project's
+  // kvarn.yml declares. They can only add checks: the repository's own steps
+  // always run too. They follow the same rules as the kvarn.yml steps and run
+  // only when the mode runs validation.
+  Validation validation = 9;
+}
+
+// Validation is the wire form of the `validation:` block in kvarn.yml. A
+// required step that fails sends the run back to the agent; an advisory step
+// is reported and changes nothing.
+message Validation {
+  repeated ValidationStep required = 1;
+  repeated ValidationStep advisory = 2;
+}
+
+// ValidationStep is one check. It has exactly one of `run` and `prompt`.
+message ValidationStep {
+  string name = 1;
+  // A shell command, run in the workspace. Exit code 0 passes.
+  string run = 2;
+  // A criterion for an agent to check the change against. The agent works
+  // apart from the one that made the change, with read-only tools and a shell,
+  // and anything it writes is removed when it finishes. Its model is the
+  // `validator` agent in agents.toml. Prompt steps run only after every
+  // required `run` step has passed.
+  string prompt = 3;
+  // Run the step only when the change touches a file matching one of these
+  // doublestar patterns. Empty means always.
+  repeated string paths = 4;
+  // Optional limit on how long the step may take. 0 means no limit.
+  uint32 timeout_seconds = 5;
+  // Directory to run a `run` command in, relative to the workspace.
+  string working_dir = 6;
 }
 
 // ModeSpec is a mode definition: the axes that decide what an agent run may do,

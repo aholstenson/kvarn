@@ -110,6 +110,7 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*Session, er
 		Prompt:          params.Prompt,
 		Mode:            params.Mode,
 		ModeSpecJSON:    params.ModeSpecJSON,
+		ValidationJSON:  params.ValidationJSON,
 		State:           StatePending,
 		PRRef:           params.PRRef,
 		HeadBranch:      params.HeadBranch,

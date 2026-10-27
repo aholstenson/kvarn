@@ -319,7 +319,7 @@ var _ = Describe("RunValidation", func() {
 			},
 		}
 
-		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", nil, nil, nil)
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", nil, nil, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequiredPassed).To(BeTrue())
 		Expect(result.Required).To(HaveLen(2))
@@ -338,7 +338,7 @@ var _ = Describe("RunValidation", func() {
 			},
 		}
 
-		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", nil, nil, nil)
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", nil, nil, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequiredPassed).To(BeFalse())
 		Expect(result.Required).To(HaveLen(2))
@@ -360,7 +360,7 @@ var _ = Describe("RunValidation", func() {
 			},
 		}
 
-		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", nil, nil, nil)
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", nil, nil, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequiredPassed).To(BeTrue())
 		Expect(result.Advisory).To(HaveLen(1))
@@ -376,7 +376,7 @@ var _ = Describe("RunValidation", func() {
 			},
 		}
 
-		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{"frontend/app.ts"}, nil, nil)
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{"frontend/app.ts"}, nil, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Required).To(HaveLen(1))
 		Expect(result.Required[0].Skipped).To(BeTrue())
@@ -393,7 +393,7 @@ var _ = Describe("RunValidation", func() {
 			},
 		}
 
-		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{"backend/src/foo.php"}, nil, nil)
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{"backend/src/foo.php"}, nil, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Required).To(HaveLen(1))
 		Expect(result.Required[0].Skipped).To(BeFalse())
@@ -409,7 +409,7 @@ var _ = Describe("RunValidation", func() {
 			},
 		}
 
-		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{"unrelated/file.txt"}, nil, nil)
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{"unrelated/file.txt"}, nil, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Required[0].Skipped).To(BeFalse())
 		Expect(runner.sessionExecCalls).To(HaveLen(1))
@@ -424,7 +424,7 @@ var _ = Describe("RunValidation", func() {
 			},
 		}
 
-		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", nil, nil, nil)
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", nil, nil, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Required[0].Skipped).To(BeFalse(),
 			"a nil list is the caller having no diff, not a diff that touched nothing")
@@ -440,7 +440,7 @@ var _ = Describe("RunValidation", func() {
 			},
 		}
 
-		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{}, nil, nil)
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{}, nil, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Required[0].Skipped).To(BeTrue())
 		Expect(runner.sessionExecCalls).To(BeEmpty())
@@ -448,7 +448,7 @@ var _ = Describe("RunValidation", func() {
 
 	It("returns success immediately for empty config", func() {
 		cfg := &project.Config{}
-		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", nil, nil, nil)
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", nil, nil, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequiredPassed).To(BeTrue())
 		Expect(result.Required).To(BeEmpty())
@@ -498,7 +498,7 @@ var _ = Describe("ShouldRun (via RunValidation)", func() {
 				},
 			},
 		}
-		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{"any/file.go"}, nil, nil)
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{"any/file.go"}, nil, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Required[0].Skipped).To(BeFalse())
 	})
@@ -511,11 +511,11 @@ var _ = Describe("ShouldRun (via RunValidation)", func() {
 				},
 			},
 		}
-		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{"internal/pkg/main.go"}, nil, nil)
+		result, err := sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{"internal/pkg/main.go"}, nil, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Required[0].Skipped).To(BeFalse())
 
-		result, err = sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{"README.md"}, nil, nil)
+		result, err = sandbox.RunValidation(ctx, runner, cfg, "sess-1", []string{"README.md"}, nil, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Required[0].Skipped).To(BeTrue())
 	})

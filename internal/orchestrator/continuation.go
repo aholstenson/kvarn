@@ -77,7 +77,7 @@ func (s *Service) startContinuation(
 	// request started is still active, so the check would refuse the retry with
 	// "already running" instead of handing back the session it is asking about.
 	replay := func(claimed *session.Session) (*submissionResult, error) {
-		if err := sameSubmission(claimed, p.prompt, choice.name, specJSON, pr.Ref, claimed.PRRef); err != nil {
+		if err := sameSubmission(claimed, p, choice.name, specJSON, pr.Ref, claimed.PRRef); err != nil {
 			return nil, err
 		}
 		log.Info("idempotent replay", "session_id", claimed.ID)
@@ -133,6 +133,7 @@ func (s *Service) startContinuation(
 		Prompt:          p.prompt,
 		Mode:            choice.name,
 		ModeSpecJSON:    specJSON,
+		ValidationJSON:  p.validationJSON,
 		PRRef:           pr.Ref,
 		HeadBranch:      pr.HeadBranch,
 		BaseBranch:      pr.BaseBranch,

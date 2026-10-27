@@ -234,12 +234,14 @@ func (m *testSandbox) RunSetup(ctx context.Context, cfg *projconfig.Config, onDo
 	return sandbox.RunSetup(ctx, m.runner, cfg, m.shellSessionID, onDone, onOutput)
 }
 
-func (m *testSandbox) RunValidation(ctx context.Context, cfg *projconfig.Config, changedFiles []string, onDone sandbox.OnStepDone, onOutput sandbox.OnOutput) (*sandbox.ValidationResult, error) {
+func (m *testSandbox) RunValidation(ctx context.Context, cfg *projconfig.Config, changedFiles []string, judge sandbox.PromptJudge, onDone sandbox.OnStepDone, onOutput sandbox.OnOutput) (*sandbox.ValidationResult, error) {
 	if cfg == nil {
 		return &sandbox.ValidationResult{RequiredPassed: true}, nil
 	}
-	return sandbox.RunValidation(ctx, m.runner, cfg, m.shellSessionID, changedFiles, onDone, onOutput)
+	return sandbox.RunValidation(ctx, m.runner, cfg, m.shellSessionID, changedFiles, judge, onDone, onOutput)
 }
+
+func (m *testSandbox) GetBaseCommit() string { return m.baseCommit }
 
 func (m *testSandbox) ChangedFiles(ctx context.Context) ([]string, error) {
 	return sandbox.ChangedFiles(ctx, m.runner, m.workingDir, m.baseCommit)

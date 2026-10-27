@@ -140,6 +140,10 @@ type Session struct {
 	// here: the orchestrator owns the vocabulary, and the session store's job is
 	// to hold what was asked for until the run resolves it.
 	ModeSpecJSON string
+	// ValidationJSON is the validation steps the submission added to the
+	// project's own, as JSON, or empty when it added none. Opaque here for the
+	// same reason as ModeSpecJSON.
+	ValidationJSON string
 	// Result is what the run produced in writing — a read-only mode's final
 	// answer, or the summary that became the commit message. Empty until the
 	// agent has produced one.
@@ -450,7 +454,10 @@ type CreateParams struct {
 	// ModeSpecJSON is the inline mode definition the submission carried; see
 	// the field of the same name on Session. Empty for a submission that named
 	// a mode instead of defining one.
-	ModeSpecJSON    string
+	ModeSpecJSON string
+	// ValidationJSON is the validation steps the submission added; see the
+	// field of the same name on Session.
+	ValidationJSON  string
 	PRRef           string
 	HeadBranch      string
 	BaseBranch      string

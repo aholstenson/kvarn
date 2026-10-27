@@ -38,6 +38,36 @@ var _ = Describe("BuildRetryPrompt", func() {
 		Expect(out).To(ContainSubstring("lint error in foo.go:1"))
 	})
 
+	It("renders a failed prompt step with its findings rather than an exit code", func() {
+		val := &sandbox.ValidationResult{
+			Required: []sandbox.StepResult{
+				{Name: "Acceptance", Prompt: true, ExitCode: 1, Stdout: "- The export has no header row."},
+			},
+		}
+		out := agent.BuildRetryPrompt(val, 1, 3)
+		Expect(out).To(ContainSubstring("Step Acceptance was checked by a separate review agent and did not pass"))
+		Expect(out).To(ContainSubstring("| - The export has no header row."))
+		Expect(out).NotTo(ContainSubstring("exited"))
+	})
+
+	It("keeps the start of long findings", func() {
+		long := "- first finding\n" + strings.Repeat("x", agent.MaxRetryPromptFindingsBytes)
+		val := &sandbox.ValidationResult{
+			Required: []sandbox.StepResult{{Name: "Acceptance", Prompt: true, ExitCode: 1, Stdout: long}},
+		}
+		out := agent.BuildRetryPrompt(val, 1, 3)
+		Expect(out).To(ContainSubstring("first finding"))
+		Expect(out).To(ContainSubstring("(truncated)"))
+	})
+
+	It("reports a prompt step that could not reach a verdict as a failure to run", func() {
+		val := &sandbox.ValidationResult{
+			Required: []sandbox.StepResult{{Name: "Acceptance", Prompt: true, Err: errors.New("model unavailable")}},
+		}
+		out := agent.BuildRetryPrompt(val, 1, 3)
+		Expect(out).To(ContainSubstring("Step Acceptance failed to run: model unavailable"))
+	})
+
 	It("surfaces RPC-level step errors distinctly", func() {
 		val := &sandbox.ValidationResult{
 			Required: []sandbox.StepResult{

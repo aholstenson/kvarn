@@ -378,12 +378,13 @@ func (s *Session) RunSetup(ctx context.Context, cfg *project.Config, onDone OnSt
 
 // RunValidation runs validation steps from the config.
 // If changedFiles is nil, all steps run; otherwise path-filtered steps are
-// skipped when no changed files match.
-func (s *Session) RunValidation(ctx context.Context, cfg *project.Config, changedFiles []string, onDone OnStepDone, onOutput OnOutput) (*ValidationResult, error) {
+// skipped when no changed files match. judge checks the prompt steps; nil
+// skips them.
+func (s *Session) RunValidation(ctx context.Context, cfg *project.Config, changedFiles []string, judge PromptJudge, onDone OnStepDone, onOutput OnOutput) (*ValidationResult, error) {
 	if cfg == nil {
 		return &ValidationResult{RequiredPassed: true}, nil
 	}
-	result, err := RunValidation(ctx, s.Runner, cfg, s.ShellSessionID, changedFiles, onDone, onOutput)
+	result, err := RunValidation(ctx, s.Runner, cfg, s.ShellSessionID, changedFiles, judge, onDone, onOutput)
 	return result, s.annotateEgress(err)
 }
 

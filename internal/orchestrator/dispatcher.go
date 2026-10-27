@@ -341,6 +341,10 @@ func (s *Service) resolveSpec(ctx context.Context, sess *session.Session) (jobSp
 	if err != nil {
 		return jobSpec{}, err
 	}
+	validation, err := decodeValidation(sess.ValidationJSON)
+	if err != nil {
+		return jobSpec{}, err
+	}
 
 	proj, err := s.projectStore.Get(ctx, sess.ProjectName)
 	if err != nil {
@@ -357,6 +361,7 @@ func (s *Service) resolveSpec(ctx context.Context, sess *session.Session) (jobSp
 		proj:         proj,
 		modeName:     sess.Mode,
 		modeSpec:     modeSpec,
+		validation:   validation,
 		userPrompt:   sess.Prompt,
 		metadata:     sess.Metadata,
 		agentContext: coding.ContextInput{Task: sess.Prompt},

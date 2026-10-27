@@ -68,6 +68,62 @@ func (c *answeringConversation) Summarize(context.Context) (*agent.Result, error
 
 func (c *answeringConversation) Close() error { return nil }
 
+// judgingAgent writes a file on every turn and checks prompt steps itself, so
+// a test can see what the run asked it to check and what the coding agent was
+// told when a check failed. The first check of each step fails; every later
+// one passes.
+type judgingAgent struct {
+	mu        sync.Mutex
+	followups []string
+	checks    []agent.PromptCheck
+	// err, when set, is what every check returns instead of a verdict.
+	err error
+}
+
+func (a *judgingAgent) Start(_ context.Context, agentCtx *agent.Context) (agent.Conversation, error) {
+	return &judgingConversation{a: a, agentCtx: agentCtx}, nil
+}
+
+func (a *judgingAgent) seen() ([]string, []agent.PromptCheck) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.followups...), append([]agent.PromptCheck(nil), a.checks...)
+}
+
+type judgingConversation struct {
+	a        *judgingAgent
+	agentCtx *agent.Context
+	turn     int
+}
+
+func (c *judgingConversation) Run(_ context.Context, followup string) (string, error) {
+	c.turn++
+	c.a.mu.Lock()
+	c.a.followups = append(c.a.followups, followup)
+	c.a.mu.Unlock()
+	body := fmt.Sprintf("# Test\n\nturn %d\n", c.turn)
+	return "", os.WriteFile(filepath.Join(c.agentCtx.WorkingDir, "README.md"), []byte(body), 0o644)
+}
+
+func (c *judgingConversation) ValidatePrompt(_ context.Context, check agent.PromptCheck) (sandbox.PromptVerdict, error) {
+	c.a.mu.Lock()
+	defer c.a.mu.Unlock()
+	c.a.checks = append(c.a.checks, check)
+	if c.a.err != nil {
+		return sandbox.PromptVerdict{}, c.a.err
+	}
+	if len(c.a.checks) == 1 {
+		return sandbox.PromptVerdict{Passed: false, Findings: "- README.md does not mention the export"}, nil
+	}
+	return sandbox.PromptVerdict{Passed: true}, nil
+}
+
+func (c *judgingConversation) Summarize(context.Context) (*agent.Result, error) {
+	return &agent.Result{Title: "Document the export", Description: "Documents the export."}, nil
+}
+
+func (c *judgingConversation) Close() error { return nil }
+
 var _ = Describe("Custom agent modes", func() {
 	var (
 		client        kvarnv1connect.OrchestratorServiceClient
@@ -711,6 +767,167 @@ modes:
 			sess, err := sessionMgr.Get(context.Background(), resp.SessionId)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sess.Error).To(ContainSubstring("existing pull request"))
+		})
+	})
+	Describe("validation steps added by the request", func() {
+		var judging *judgingAgent
+
+		BeforeEach(func() {
+			kvarnYML = ""
+			judging = &judgingAgent{}
+			runAgent = judging
+		})
+
+		acceptance := func() *v1.Validation {
+			return &v1.Validation{Required: []*v1.ValidationStep{
+				{Name: "Acceptance", Prompt: "Check that README.md documents the export."},
+			}}
+		}
+
+		It("checks the prompt step and sends its findings back to the agent", func() {
+			startService()
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
+				Project:    "test-project",
+				Prompt:     "document the export",
+				Validation: acceptance(),
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
+
+			followups, checks := judging.seen()
+			Expect(checks).To(HaveLen(2), "the failed check runs again after the retry")
+			Expect(checks[0].Step.Name).To(Equal("Acceptance"))
+			Expect(checks[0].BaseCommit).NotTo(BeEmpty())
+			Expect(followups).To(HaveLen(2))
+			Expect(followups[1]).To(ContainSubstring("Step Acceptance was checked by a separate review agent"))
+			Expect(followups[1]).To(ContainSubstring("README.md does not mention the export"))
+
+			sess, err := sessionMgr.Get(context.Background(), resp.SessionId)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sess.ValidationJSON).To(ContainSubstring(`"prompt":"Check that README.md documents the export."`))
+		})
+
+		It("fails the run without another agent pass or a delivery when a check cannot run", func() {
+			judging.err = fmt.Errorf("restore workspace: exit code 1")
+			startService()
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
+				Project:    "test-project",
+				Prompt:     "document the export",
+				Validation: acceptance(),
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
+
+			followups, checks := judging.seen()
+			Expect(checks).To(HaveLen(1))
+			Expect(followups).To(HaveLen(1), "the coding agent is not sent round again")
+
+			mockScm.mu.Lock()
+			pushCalls := mockScm.pushCalls
+			mockScm.mu.Unlock()
+			Expect(pushCalls).To(BeZero(), "a workspace nobody can vouch for is not delivered")
+
+			sess, err := sessionMgr.Get(context.Background(), resp.SessionId)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sess.Error).To(ContainSubstring(`prompt step "Acceptance": restore workspace`))
+		})
+
+		It("sends a timed-out check back to the agent like a failed one", func() {
+			judging.err = fmt.Errorf("%w (10m0s)", sandbox.ErrPromptTimeout)
+			startService()
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
+				Project:    "test-project",
+				Prompt:     "document the export",
+				Validation: acceptance(),
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
+
+			followups, _ := judging.seen()
+			Expect(len(followups)).To(BeNumerically(">", 1), "a timeout is retried like a failed command")
+			Expect(followups[1]).To(ContainSubstring("ran past its timeout"))
+		})
+
+		It("runs the request's steps after the repository's own", func() {
+			kvarnYML = `
+validation:
+  required:
+    - name: Tests
+      run: "false"
+`
+			startService()
+			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
+				Project:    "test-project",
+				Prompt:     "document the export",
+				Validation: acceptance(),
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(stateOf(resp.SessionId)).Should(Equal("failed"))
+
+			_, checks := judging.seen()
+			Expect(checks).To(BeEmpty(), "a prompt step waits for the required commands to pass")
+		})
+
+		It("refuses a step that has both a command and a prompt", func() {
+			startService()
+			_, err := client.StartJob(context.Background(), &v1.StartJobRequest{
+				Project: "test-project",
+				Prompt:  "document the export",
+				Validation: &v1.Validation{Required: []*v1.ValidationStep{
+					{Name: "Both", Run: "make test", Prompt: "Check it."},
+				}},
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
+			Expect(err.Error()).To(ContainSubstring("both run and prompt"))
+		})
+
+		It("refuses an idempotency key reused with different validation steps", func() {
+			startService()
+			req := func(v *v1.Validation) *v1.StartJobRequest {
+				return &v1.StartJobRequest{
+					Project:        "test-project",
+					Prompt:         "document the export",
+					Validation:     v,
+					IdempotencyKey: "key-1",
+				}
+			}
+			first, err := client.StartJob(context.Background(), req(acceptance()))
+			Expect(err).NotTo(HaveOccurred())
+
+			again, err := client.StartJob(context.Background(), req(acceptance()))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(again.SessionId).To(Equal(first.SessionId))
+
+			_, err = client.StartJob(context.Background(), req(nil))
+			Expect(err).To(HaveOccurred())
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodeAlreadyExists))
+		})
+
+		It("carries the steps through a retry", func() {
+			kvarnYML = `
+validation:
+  required:
+    - name: Tests
+      run: "false"
+`
+			startService()
+			first, err := client.StartJob(context.Background(), &v1.StartJobRequest{
+				Project:    "test-project",
+				Prompt:     "document the export",
+				Validation: acceptance(),
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(stateOf(first.SessionId)).Should(Equal("failed"))
+
+			retried, err := client.RetryJob(context.Background(), &v1.RetryJobRequest{SessionId: first.SessionId})
+			Expect(err).NotTo(HaveOccurred())
+
+			orig, err := sessionMgr.Get(context.Background(), first.SessionId)
+			Expect(err).NotTo(HaveOccurred())
+			again, err := sessionMgr.Get(context.Background(), retried.SessionId)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(again.ValidationJSON).To(Equal(orig.ValidationJSON))
 		})
 	})
 })

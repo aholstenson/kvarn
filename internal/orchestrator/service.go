@@ -358,8 +358,10 @@ type Sandbox interface {
 	GetShellSessionID() string
 	GetWorkingDir() string
 	RunSetup(ctx context.Context, cfg *projconfig.Config, onDone sandbox.OnStepDone, onOutput sandbox.OnOutput) (*sandbox.SetupResult, error)
-	RunValidation(ctx context.Context, cfg *projconfig.Config, changedFiles []string, onDone sandbox.OnStepDone, onOutput sandbox.OnOutput) (*sandbox.ValidationResult, error)
+	RunValidation(ctx context.Context, cfg *projconfig.Config, changedFiles []string, judge sandbox.PromptJudge, onDone sandbox.OnStepDone, onOutput sandbox.OnOutput) (*sandbox.ValidationResult, error)
 	ChangedFiles(ctx context.Context) ([]string, error)
+	// GetBaseCommit returns the revision change detection measures against.
+	GetBaseCommit() string
 	ExtractChanges(ctx context.Context, destDir string) error
 	// SetBaseCommit moves the revision change detection measures against, which
 	// is what a checkpoint does once the work so far has become a commit.
@@ -780,6 +782,12 @@ type startJobParams struct {
 	// metadata is the caller's own annotations on the submission, stored with
 	// the session and never interpreted here. Nil when none were sent.
 	metadata map[string]string
+	// validation is the validation steps the submission adds to the project's
+	// own. Nil when it adds none.
+	validation *projconfig.Validation
+	// validationJSON is validation as it is stored on the session. startJob
+	// sets it from validation, so both arms store and compare the same text.
+	validationJSON string
 	// procedure names the RPC on whose behalf the submission is authorized, for
 	// the audit log that records a denial.
 	procedure string
@@ -849,6 +857,10 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err.Error()).WithCause(err)
 	}
+	p.validationJSON, err = encodeValidation(p.validation)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
+	}
 
 	log := reqid.LoggerFrom(ctx).With("project", p.project, "mode", choice.name)
 	if len(p.metadata) > 0 {
@@ -873,7 +885,7 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 			if err != nil {
 				return nil, err
 			}
-			if claimed != nil && sameSubmission(claimed, p.prompt, choice.name, specJSON, p.prRef, claimed.PRRef) == nil {
+			if claimed != nil && sameSubmission(claimed, p, choice.name, specJSON, p.prRef, claimed.PRRef) == nil {
 				log.Info("idempotent replay", "session_id", claimed.ID)
 				return &submissionResult{session: claimed, duplicate: true}, nil
 			}
@@ -917,7 +929,7 @@ func (s *Service) startFresh(
 	// limit. The branch compared here is the resolved one: a caller that omitted
 	// it and one that named the project default sent the same job.
 	replay := func(claimed *session.Session) (*submissionResult, error) {
-		if err := sameSubmission(claimed, p.prompt, choice.name, specJSON, branch, claimed.BaseBranch); err != nil {
+		if err := sameSubmission(claimed, p, choice.name, specJSON, branch, claimed.BaseBranch); err != nil {
 			return nil, err
 		}
 		log.Info("idempotent replay", "session_id", claimed.ID)
@@ -945,6 +957,7 @@ func (s *Service) startFresh(
 		Prompt:         p.prompt,
 		Mode:           choice.name,
 		ModeSpecJSON:   specJSON,
+		ValidationJSON: p.validationJSON,
 		BaseBranch:     branch,
 		KeyID:          callerKeyID(ctx),
 		Priority:       jobPriority(proj, choice.name),
@@ -997,16 +1010,18 @@ func (s *Service) findClaimedSession(ctx context.Context, project, key string) (
 // modeSpecJSON is compared alongside the mode name because an inline definition
 // is part of what was submitted: two requests naming the same inline mode but
 // defining it differently are two different jobs, and collapsing them into one
-// would silently drop the second.
+// would silently drop the second. The validation steps a submission added are
+// compared for the same reason: they decide when the run is done.
 //
 // Metadata is deliberately not compared. It annotates the work rather than
 // describing it, and a caller that regenerates a trace id between two sends of
 // one retried request has still sent that request once. The first submission's
 // annotations are the ones kept, and the duplicate flag on the response is what
 // tells the caller its second send changed nothing.
-func sameSubmission(claimed *session.Session, prompt, mode, modeSpecJSON, startFrom, claimedStartFrom string) error {
-	if claimed.Prompt == prompt && claimed.Mode == mode &&
-		claimed.ModeSpecJSON == modeSpecJSON && claimedStartFrom == startFrom {
+func sameSubmission(claimed *session.Session, p startJobParams, mode, modeSpecJSON, startFrom, claimedStartFrom string) error {
+	if claimed.Prompt == p.prompt && claimed.Mode == mode &&
+		claimed.ModeSpecJSON == modeSpecJSON && claimed.ValidationJSON == p.validationJSON &&
+		claimedStartFrom == startFrom {
 		return nil
 	}
 	return connect.Errorf(connect.CodeAlreadyExists,
@@ -1014,6 +1029,10 @@ func sameSubmission(claimed *session.Session, prompt, mode, modeSpecJSON, startF
 }
 
 func (s *Service) StartJob(ctx context.Context, msg *v1.StartJobRequest) (*v1.StartJobResponse, error) {
+	validation, err := validationFromProto(msg.GetValidation())
+	if err != nil {
+		return nil, invalidArgument(err)
+	}
 	p := startJobParams{
 		project:        msg.Project,
 		prompt:         msg.Prompt,
@@ -1021,6 +1040,7 @@ func (s *Service) StartJob(ctx context.Context, msg *v1.StartJobRequest) (*v1.St
 		modeSpec:       modeSpecFromProto(msg.GetModeSpec()),
 		idempotencyKey: msg.IdempotencyKey,
 		metadata:       msg.GetMetadata(),
+		validation:     validation,
 		procedure:      kvarnv1connect.OrchestratorServiceStartJobProcedure,
 	}
 	// An unset start_from is the project's default branch. A set-but-empty one
@@ -1077,6 +1097,9 @@ type jobSpec struct {
 	modeName   string
 	modeSpec   *coding.Spec
 	baseBranch string
+	// validation is the validation steps the submission added, run after the
+	// ones the project's kvarn.yml declares. Nil when it added none.
+	validation *projconfig.Validation
 	// userPrompt is what the requester actually asked for, used for the PR
 	// comment and as the last section of the agent's task message.
 	userPrompt string
@@ -1647,6 +1670,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	// steps, fold their pass/fail back into a single conversation so the
 	// agent can fix what its own change broke. Each retry is gated by both
 	// MaxValidationRetries and the shared cost budget.
+	runBase := sess.GetBaseCommit()
 	var conv agent.Conversation
 	if s.agent != nil {
 		conv, err = s.agent.Start(ctx, agentCtx)
@@ -1666,8 +1690,14 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	// Whether the project's checks run is the mode's decision, not a
 	// consequence of it writing files: a read-only mode may exist precisely to
 	// run them against someone else's branch and report an honest verdict.
-	validates := mode.Validation != coding.ValidationSkip && cfg != nil &&
-		(len(cfg.Validation.Required) > 0 || len(cfg.Validation.Advisory) > 0)
+	// The steps the submission added run with them, under the same decision.
+	valCfg := withRequestValidation(cfg, spec.validation)
+	validates := mode.Validation != coding.ValidationSkip && valCfg != nil &&
+		(len(valCfg.Validation.Required) > 0 || len(valCfg.Validation.Advisory) > 0)
+	// Prompt steps check the change from where the run started. A merge
+	// checkpoint moves the session's base later on, and a check measured from
+	// there would see only what came after the merge.
+	judge := agent.PromptJudge(conv, runBase)
 
 	var valResult *sandbox.ValidationResult
 	var agentText string
@@ -1729,7 +1759,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 
 		onStepDone := s.makeStepCallback(ctx, sessionID)
 		onOutput := s.makeOutputCallback(ctx, sessionID)
-		valResult, err = sess.RunValidation(ctx, cfg, changedFiles, onStepDone, onOutput)
+		valResult, err = sess.RunValidation(ctx, valCfg, changedFiles, judge, onStepDone, onOutput)
 		if err != nil {
 			log.Error("validation failed", "error", err)
 			s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("validation: %w", err))

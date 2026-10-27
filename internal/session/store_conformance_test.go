@@ -109,6 +109,24 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 			Expect(reread.ModeSpecJSON).To(Equal(s.ModeSpecJSON))
 		})
 
+		It("round-trips the validation steps a submission added and keeps them across updates", func() {
+			s := makeSession("s1", "proj", session.StatePending, base)
+			s.ValidationJSON = `{"required":[{"name":"Acceptance","prompt":"Check the export works."}]}`
+			Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+			got, err := store.GetSession(ctx, "s1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.ValidationJSON).To(Equal(s.ValidationJSON))
+
+			got.ValidationJSON = ""
+			got.State = session.StateCompleted
+			Expect(store.UpdateSession(ctx, got)).To(Succeed())
+
+			reread, err := store.GetSession(ctx, "s1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reread.ValidationJSON).To(Equal(s.ValidationJSON))
+		})
+
 		It("leaves the mode definition empty for a session that named a mode", func() {
 			s := makeSession("s1", "proj", session.StatePending, base)
 			Expect(store.CreateSession(ctx, s)).To(Succeed())

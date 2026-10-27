@@ -171,12 +171,14 @@ func (r *Resolver) Resolve(ctx context.Context) (Models, error) {
 	return models, nil
 }
 
-// DefaultAgentClasses maps each sub-agent to the class it runs on unless an
-// [agents.<name>] block repoints it.
+// DefaultAgentClasses maps each named agent — the sub-agents and the
+// validator — to the class it runs on unless an [agents.<name>] block repoints
+// it.
 func DefaultAgentClasses() map[string]string {
-	out := make(map[string]string, len(BuiltinSubAgents()))
+	out := make(map[string]string, len(BuiltinSubAgents())+1)
 	for name, sub := range BuiltinSubAgents() {
 		out[name] = string(sub.Class)
 	}
+	out[ValidatorAgentName] = string(validatorClass)
 	return out
 }

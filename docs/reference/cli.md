@@ -63,6 +63,7 @@ land on, so passing both is an error. See
 | `--pr-ref` | — | Continue this pull request instead of opening one, in the forge's own format — for GitHub, the PR number. |
 | `--mode` | `feedback` with `--pr-ref`, else `auto` | A built-in mode or one the project's `kvarn.yml` defines. See `kvarn modes list`. |
 | `--mode-spec` | — | Path to a YAML or JSON mode definition to run with, or `-` for stdin. |
+| `--validation` | — | Path to a YAML or JSON file of validation steps to add to the project's own, or `-` for stdin. |
 | `--watch` | off | Stream the session until it reaches a terminal state. Without it the session ID is printed and the command returns. |
 | `--idempotency-key` | — | Makes the submission safe to retry; see below. |
 | `--api-key` | — | API key. Env: `KVARN_API_KEY`. |
@@ -98,6 +99,25 @@ collapsed into the first job.
 Omit `deliver` or `context` to inherit the extended mode's; write `[none]` to
 clear one. An empty list is refused, because a repeated field on the wire cannot
 tell an empty list from an absent one and an absent one inherits.
+
+`--validation` adds checks for this one job. The file has the shape of the
+[`validation:` block](kvarn-yml.md#validation) in `kvarn.yml`, so a step can
+include a [`prompt`](kvarn-yml.md#prompt-steps):
+
+```yaml
+required:
+  - name: Acceptance
+    prompt: Check that the export button downloads a CSV with a header row.
+advisory:
+  - name: Docs
+    prompt: Check that the README documents the export.
+```
+
+The steps run after the project's own and follow the same rules. They can only
+add checks; the project's steps always run too. A job can add at most 16 steps.
+They run only when the mode runs validation. They are stored on the session, so
+a `retry` runs them again, and an idempotency key reused with different steps is
+refused.
 
 `--pr-ref` with a mode that delivers `new-pull-request` — `auto`, `implement`
 and `fix` among them — commits onto the named pull request rather than opening a
@@ -222,7 +242,8 @@ project is registered.
 ### `kvarn local test`
 
 Runs dependencies, setup, health checks and validation **without invoking the
-agent** — the fastest way to check a `kvarn.yml`.
+agent** — the fastest way to check a `kvarn.yml`. Prompt validation steps need
+an agent, so they are skipped.
 
 ### `kvarn local job <prompt>`
 

@@ -12,6 +12,12 @@ import (
 // the step itself; the orchestrator/CLI only needs to point at what broke.
 const MaxRetryPromptStepBytes = 4 * 1024
 
+// MaxRetryPromptFindingsBytes caps how much of a failed prompt step's findings
+// are sent back. It is larger than the cap on command output because the
+// findings are already a summary written for the agent, and there is no
+// command the agent can run again to read the rest.
+const MaxRetryPromptFindingsBytes = 8 * 1024
+
 // BuildRetryPrompt renders a user message describing the failing validation
 // steps. It is appended to the agent's existing conversation between attempts
 // so the agent sees its prior turn plus the new failure signal.
@@ -46,6 +52,10 @@ func BuildRetryPrompt(val *sandbox.ValidationResult, attempt, maxAttempts int) s
 		any = true
 		sb.WriteString("- Step ")
 		sb.WriteString(step.Name)
+		if step.Prompt && step.Err == nil {
+			writePromptFailure(&sb, step)
+			continue
+		}
 		if step.Err != nil {
 			sb.WriteString(" failed to run: ")
 			sb.WriteString(step.Err.Error())
@@ -81,4 +91,24 @@ func BuildRetryPrompt(val *sandbox.ValidationResult, attempt, maxAttempts int) s
 		sb.WriteString("(no failing steps reported; this likely means a transient runner error)")
 	}
 	return sb.String()
+}
+
+// writePromptFailure renders a failed prompt step. Its findings are a list
+// written to be acted on, so a long one keeps its start rather than its tail.
+func writePromptFailure(sb *strings.Builder, step sandbox.StepResult) {
+	sb.WriteString(" was checked by a separate review agent and did not pass.")
+	findings := strings.TrimSpace(step.Stdout)
+	if findings == "" {
+		sb.WriteString(" It gave no findings.\n")
+		return
+	}
+	if len(findings) > MaxRetryPromptFindingsBytes {
+		findings = strings.ToValidUTF8(findings[:MaxRetryPromptFindingsBytes], "") + "\n…(truncated)…"
+	}
+	sb.WriteString(" Findings:\n")
+	for _, line := range strings.Split(findings, "\n") {
+		sb.WriteString("  | ")
+		sb.WriteString(line)
+		sb.WriteString("\n")
+	}
 }

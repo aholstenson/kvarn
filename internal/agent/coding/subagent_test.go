@@ -270,11 +270,16 @@ var _ = Describe("Model classes", func() {
 		}
 	})
 
-	It("reports the class each built-in sub-agent runs on", func() {
+	It("reports the class each built-in sub-agent and the validator runs on", func() {
 		Expect(coding.DefaultAgentClasses()).To(Equal(map[string]string{
-			coding.Explore.Name: string(coding.ClassFast),
-			coding.Plan.Name:    string(coding.ClassReasoning),
+			coding.Explore.Name:       string(coding.ClassFast),
+			coding.Plan.Name:          string(coding.ClassReasoning),
+			coding.ValidatorAgentName: string(coding.ClassReasoning),
 		}))
+	})
+
+	It("does not let the coding agent spawn the validator", func() {
+		Expect(coding.BuiltinSubAgents()).NotTo(HaveKey(coding.ValidatorAgentName))
 	})
 
 	It("gives every class a model so an unconfigured tier cannot resolve to nothing", func() {

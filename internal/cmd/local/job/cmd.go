@@ -313,6 +313,10 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 			cfg.PullRequest.Resolve(mode.Name)).PullRequest,
 	}
 
+	// Prompt steps check the change from where the run started. The base is
+	// read now, before the agent can move it.
+	baseCommit := sess.GetBaseCommit()
+
 	// Drive the agent through one Conversation so a validation-failure retry
 	// can append a remediation message instead of starting from scratch.
 	conv, agentErr := deps.Agent.Start(ctx, agentCtx)
@@ -325,6 +329,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		return summary.finish(deps.Stdout, agentErr, "", 0, 0)
 	}
 	defer conv.Close()
+	judge := agent.PromptJudge(conv, baseCommit)
 
 	maxRetries := c.MaxValidationRetries
 	if maxRetries < 0 {
@@ -366,7 +371,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		stepDone, outputCb := makeCallbacks(reqItem, cfg.Validation.Required)
 		valResult, err := sess.RunValidation(ctx, &project.Config{
 			Validation: project.Validation{Required: cfg.Validation.Required},
-		}, changedFiles, stepDone, outputCb)
+		}, changedFiles, judge, stepDone, outputCb)
 		if err != nil {
 			renderer.Stop()
 			return summary.finish(deps.Stdout, err, "", 0, 0)
@@ -399,7 +404,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		stepDone, outputCb := makeCallbacks(advItem, cfg.Validation.Advisory)
 		if _, err := sess.RunValidation(ctx, &project.Config{
 			Validation: project.Validation{Advisory: cfg.Validation.Advisory},
-		}, changedFiles, stepDone, outputCb); err != nil {
+		}, changedFiles, judge, stepDone, outputCb); err != nil {
 			renderer.Stop()
 			return summary.finish(deps.Stdout, err, "", 0, 0)
 		}

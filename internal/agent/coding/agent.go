@@ -210,6 +210,9 @@ type codingConversation struct {
 	streamMu sync.Mutex
 	textBufs map[string]*strings.Builder
 	turns    map[string]*turnState
+
+	// validator carries what prompt checks remember between attempts.
+	validator validatorState
 }
 
 // turnState is what the conversation remembers about the model call currently

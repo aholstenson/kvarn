@@ -7,6 +7,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
+	"github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 )
 
@@ -239,6 +240,36 @@ type Conversation interface {
 	// Close releases any resources held by the conversation. Safe to call
 	// after Summarize. Callers should use `defer conv.Close()`.
 	Close() error
+}
+
+// PromptCheck is one prompt validation step to check a run's work against.
+type PromptCheck struct {
+	Step project.Step
+	// BaseCommit is the commit the run started from, so the change under
+	// check is everything in the workspace since it.
+	BaseCommit string
+}
+
+// PromptValidator is implemented by a Conversation that can check prompt
+// validation steps. The check runs in its own agent, with none of the
+// conversation's history: an agent does not judge its own work. It shares
+// the conversation's models, cost tracker and progress reporting, so the
+// check is configured, paid for and watched like the rest of the run.
+type PromptValidator interface {
+	ValidatePrompt(ctx context.Context, check PromptCheck) (sandbox.PromptVerdict, error)
+}
+
+// PromptJudge returns the judge for prompt validation steps in a run driven
+// by conv, or nil when conv cannot check them. A nil judge makes validation
+// skip prompt steps rather than pass them.
+func PromptJudge(conv Conversation, baseCommit string) sandbox.PromptJudge {
+	v, ok := conv.(PromptValidator)
+	if !ok {
+		return nil
+	}
+	return func(ctx context.Context, step project.Step) (sandbox.PromptVerdict, error) {
+		return v.ValidatePrompt(ctx, PromptCheck{Step: step, BaseCommit: baseCommit})
+	}
 }
 
 // RunOnce is the convenience wrapper that preserves the old "single

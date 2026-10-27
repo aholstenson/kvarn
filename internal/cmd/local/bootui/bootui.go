@@ -185,6 +185,8 @@ func StepCallbacks(
 		}
 
 		switch {
+		case result.Skipped && result.SkipReason != "":
+			r.SetStatus(item, taskui.StatusSkipped, "("+result.SkipReason+")")
 		case result.Skipped:
 			r.SetStatus(item, taskui.StatusSkipped, "(no matching files)")
 		case result.ExitCode != 0 || result.Err != nil:

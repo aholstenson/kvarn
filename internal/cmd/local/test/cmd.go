@@ -251,7 +251,7 @@ func (c *Cmd) Run() error {
 		stepDone, outputCb := makeCallbacks(reqItem, cfg.Validation.Required)
 		valResult, err := sess.RunValidation(ctx, &project.Config{
 			Validation: project.Validation{Required: cfg.Validation.Required},
-		}, nil, stepDone, outputCb)
+		}, nil, nil, stepDone, outputCb)
 		if err != nil {
 			renderer.Stop()
 			return summary.finish(err)
@@ -269,7 +269,7 @@ func (c *Cmd) Run() error {
 		stepDone, outputCb := makeCallbacks(advItem, cfg.Validation.Advisory)
 		_, err := sess.RunValidation(ctx, &project.Config{
 			Validation: project.Validation{Advisory: cfg.Validation.Advisory},
-		}, nil, stepDone, outputCb)
+		}, nil, nil, stepDone, outputCb)
 		if err != nil {
 			renderer.Stop()
 			return summary.finish(err)

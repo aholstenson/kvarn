@@ -78,14 +78,21 @@ func (s *Service) RetryJob(ctx context.Context, req *v1.RetryJobRequest) (*v1.Re
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
+	// The added validation steps travel too: they are part of what the job
+	// was asked to be, not of the attempt that failed.
+	validation, err := decodeValidation(sess.ValidationJSON)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
+	}
 
 	p := startJobParams{
-		project:   sess.ProjectName,
-		prompt:    prompt,
-		mode:      sess.Mode,
-		modeSpec:  modeSpec,
-		metadata:  sess.Metadata,
-		procedure: kvarnv1connect.OrchestratorServiceRetryJobProcedure,
+		project:    sess.ProjectName,
+		prompt:     prompt,
+		mode:       sess.Mode,
+		modeSpec:   modeSpec,
+		metadata:   sess.Metadata,
+		validation: validation,
+		procedure:  kvarnv1connect.OrchestratorServiceRetryJobProcedure,
 	}
 	if sess.Continuation {
 		p.prRef = sess.PRRef

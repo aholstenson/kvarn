@@ -97,14 +97,15 @@ func (s *Store) CreateSession(ctx context.Context, sess *session.Session) error 
 		   (id, project_name, prompt, mode, mode_spec_json, result_text, state, message, error,
 		    pull_request_url, pr_ref, head_branch, base_branch, parent_session_id, cost_json,
 		    created_at, updated_at,
-		    key_id, priority, attempts, queued_at, idempotency_key, continuation, metadata_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    key_id, priority, attempts, queued_at, idempotency_key, continuation, metadata_json,
+		    validation_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.ID, row.ProjectName, row.Prompt, row.Mode, row.ModeSpecJSON, row.Result,
 		row.State, row.Message,
 		row.Error, row.PullRequestURL, row.PRRef, row.HeadBranch, row.BaseBranch,
 		row.ParentSessionID, row.CostJSON, row.CreatedAt, row.UpdatedAt,
 		row.KeyID, row.Priority, row.Attempts, row.QueuedAt, row.IdempotencyKey,
-		row.Continuation, row.MetadataJSON,
+		row.Continuation, row.MetadataJSON, row.ValidationJSON,
 	)
 	if isUniqueViolation(err) {
 		return session.ErrIdempotencyConflict
@@ -136,7 +137,8 @@ func (s *Store) FindByIdempotencyKey(ctx context.Context, project, key string) (
 const sessionColumns = `id, project_name, prompt, mode, mode_spec_json, result_text, state, ` +
 	`message, error, pull_request_url, ` +
 	`pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at, ` +
-	`key_id, priority, attempts, queued_at, idempotency_key, continuation, metadata_json`
+	`key_id, priority, attempts, queued_at, idempotency_key, continuation, metadata_json, ` +
+	`validation_json`
 
 func scanSession(scan func(dest ...any) error) (*session.Session, error) {
 	var r session.Row
@@ -145,7 +147,7 @@ func scanSession(scan func(dest ...any) error) (*session.Session, error) {
 		&r.Error, &r.PullRequestURL, &r.PRRef, &r.HeadBranch, &r.BaseBranch,
 		&r.ParentSessionID, &r.CostJSON, &r.CreatedAt, &r.UpdatedAt,
 		&r.KeyID, &r.Priority, &r.Attempts, &r.QueuedAt, &r.IdempotencyKey,
-		&r.Continuation, &r.MetadataJSON); err != nil {
+		&r.Continuation, &r.MetadataJSON, &r.ValidationJSON); err != nil {
 		return nil, err
 	}
 	return session.RowToSession(r)

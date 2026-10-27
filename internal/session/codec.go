@@ -54,6 +54,7 @@ type Row struct {
 	Prompt          string
 	Mode            string
 	ModeSpecJSON    string
+	ValidationJSON  string
 	Result          string
 	State           string
 	Message         string
@@ -102,6 +103,7 @@ func SessionToRow(s *Session) (Row, error) {
 		Prompt:          s.Prompt,
 		Mode:            s.Mode,
 		ModeSpecJSON:    s.ModeSpecJSON,
+		ValidationJSON:  s.ValidationJSON,
 		Result:          s.Result,
 		State:           string(s.State),
 		Message:         s.Message,
@@ -145,6 +147,7 @@ func RowToSession(r Row) (*Session, error) {
 		Prompt:          r.Prompt,
 		Mode:            r.Mode,
 		ModeSpecJSON:    r.ModeSpecJSON,
+		ValidationJSON:  r.ValidationJSON,
 		Result:          r.Result,
 		State:           State(r.State),
 		Message:         r.Message,

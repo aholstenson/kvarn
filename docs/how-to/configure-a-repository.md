@@ -47,6 +47,20 @@ package mirror, say — and only applies to setup.
 reported but never fails a run. Every validation step runs even if an earlier
 one failed, so one bad step doesn't hide the rest.
 
+A check that a command cannot express can be a prompt instead. A separate agent
+checks the change against it after the commands pass, and its findings go back
+to the coding agent like a failing test's output:
+
+```yaml
+validation:
+  required:
+    - name: Acceptance
+      prompt: Check that the export button downloads a CSV with a header row.
+```
+
+See [prompt steps](../reference/kvarn-yml.md#prompt-steps) for how the check
+runs and what it can do.
+
 ## Share the workspace with containers your steps start
 
 Some projects bring up their own containers — a `docker-compose.yml` started by

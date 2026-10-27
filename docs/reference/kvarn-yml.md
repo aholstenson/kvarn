@@ -305,6 +305,71 @@ failures. A failing `required` step fails the job (and may trigger a retry
 pass — see [Control job costs](../how-to/control-job-costs.md)); a failing
 `advisory` step is reported but does not affect the outcome.
 
+| Key | Notes |
+| --- | --- |
+| `name` | Required. Shown in the job's output and in the retry message the agent gets. |
+| `run` | Shell command. Exit code 0 passes. |
+| `prompt` | A criterion for an agent to check the change against, in place of `run`. See below. |
+| `paths` | Doublestar patterns. The step runs only when the change touches a matching file. |
+| `timeout` | Seconds or a duration such as `10m`. |
+| `working_dir` | Directory for `run`, relative to the repository root. Not allowed with `prompt`. |
+
+### Prompt steps
+
+A step with `prompt` instead of `run` is checked by an agent:
+
+```yaml
+validation:
+  required:
+    - name: Tests
+      run: npm test
+    - name: Acceptance
+      prompt: |
+        Check that the export button on the reports page downloads a CSV
+        with a header row.
+      timeout: 15m
+```
+
+- **A separate agent checks it.** The validator gets the task and the
+  criterion. It does not get the conversation that made the change.
+- **It can look and try, not change.** It has read-only file tools and a
+  shell, so it can read code and run builds, tests and scripts. When it
+  finishes, every process it started is stopped and the workspace is put back
+  the way it was. If that cannot be done, the job fails and nothing is
+  delivered.
+- **Commands go first.** Prompt steps run only after every required `run` step
+  has passed. If a required command fails, its prompt steps are skipped for
+  that attempt: the change must change anyway, and the check would cost tokens
+  for nothing.
+- **The verdict is structured.** The validator returns pass or fail and a list
+  of findings. A required step that fails sends the findings to the coding agent
+  as its next message, the same way a failing test's output is sent. On the
+  next attempt the validator checks its earlier findings first, so the loop
+  settles instead of finding something new each time.
+- **A check that cannot run stops the job.** If the validator model stays
+  unavailable through its retries, or its configuration is wrong, the job
+  fails at once. The coding agent is not sent round again, because it cannot
+  fix that. A check that runs past the step's `timeout` fails the step, the
+  same way a command that times out does.
+- **The model is configured on the host.** The validator runs as the
+  `validator` agent in [`agents.toml`](agents-toml.md#per-agent-overrides),
+  on `coding-agent-reasoning` unless that block moves it. Its spend counts
+  against the job's budget.
+
+Only the workspace is put back. Databases, running containers and files
+outside the repository are not reset after a check, so a check that changes
+them leaves those changes for the coding agent and the next steps. None of it
+reaches the delivered change, which is made from the workspace alone. The
+validator is told to leave that state as it found it; write the prompt so the
+check can read what it needs, or have it clean up the data it creates.
+
+`prompt` is allowed only in `validation`. A step has `run` or `prompt`, never
+both. `kvarn local test` has no agent, so it skips prompt steps;
+`kvarn local job` checks them.
+
+A job submitted through the API can add steps of the same shape for that one
+run; see `--validation` on [`kvarn jobs start`](cli.md).
+
 ## `modes`
 
 ```yaml

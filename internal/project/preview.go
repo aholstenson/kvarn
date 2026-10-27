@@ -480,6 +480,9 @@ func validatePreviewSteps(label string, steps []Step) error {
 		if strings.TrimSpace(step.Name) == "" {
 			return fmt.Errorf("%s has empty name", label)
 		}
+		if step.IsPrompt() {
+			return fmt.Errorf("%s %q has a prompt; only validation steps can have one", label, step.Name)
+		}
 		if strings.TrimSpace(step.Run) == "" {
 			return fmt.Errorf("%s %q has empty run command", label, step.Name)
 		}

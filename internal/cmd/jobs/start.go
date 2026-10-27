@@ -25,7 +25,10 @@ type StartCmd struct {
 	// defines: the definition travels with the request instead of coming out
 	// of a kvarn.yml.
 	ModeSpec string `name:"mode-spec" help:"Path to a YAML or JSON mode definition to run with, or - for stdin. Use instead of, or together with, --mode." default:""`
-	Watch    bool   `help:"Stream the session until it reaches a terminal state." negatable:""`
+	// Validation adds checks to the ones the project's kvarn.yml declares,
+	// for a caller that knows what "done" means for this one job.
+	Validation string `help:"Path to a YAML or JSON file of validation steps to add to the project's own, or - for stdin. Same shape as the validation block in kvarn.yml (required/advisory lists of steps with run or prompt)." default:""`
+	Watch      bool   `help:"Stream the session until it reaches a terminal state." negatable:""`
 
 	IdempotencyKey string `help:"Key that makes this submission replayable: resending it returns the session the first request created instead of starting a second job." default:""`
 
@@ -50,6 +53,13 @@ func (c *StartCmd) Run() error {
 			return err
 		}
 		req.ModeSpec = spec
+	}
+	if c.Validation != "" {
+		v, err := loadValidation(c.Validation)
+		if err != nil {
+			return err
+		}
+		req.Validation = v
 	}
 	// Only one starting point reaches the wire. Leaving both unset is the
 	// project's default branch, which is what a caller who named neither meant.

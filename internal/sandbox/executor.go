@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,10 +21,47 @@ type StepResult struct {
 	ExitCode int32
 	Stdout   string
 	Stderr   string
-	Skipped  bool  // true if skipped due to path filtering
+	Skipped  bool  // true if the step did not run; SkipReason says why
 	TimedOut bool  // true if the step ran past its timeout and was killed
 	Err      error // non-nil if the RPC itself failed
+	// SkipReason says why a skipped step did not run. Empty means the
+	// step's paths matched none of the changed files.
+	SkipReason string
+	// Prompt marks the result of a prompt step. Its verdict is reported as
+	// exit code 0 (pass) or 1 (fail), so everything that grades a step by its
+	// exit code grades a prompt step the same way, and Stdout holds the
+	// findings behind the verdict.
+	Prompt bool
 }
+
+// SkipReasonRequiredFailed is the SkipReason of a prompt step that did not run
+// because a required command step failed. A prompt step costs model tokens, and
+// a change that does not pass its own commands has to change again before
+// anything an agent says about it is still true.
+const SkipReasonRequiredFailed = "a required step failed"
+
+// SkipReasonNoJudge is the SkipReason of a prompt step that did not run because
+// the caller has no agent to judge it, such as `kvarn local test`.
+const SkipReasonNoJudge = "no agent to check prompt steps"
+
+// PromptVerdict is what a judge decides about one prompt step.
+type PromptVerdict struct {
+	Passed bool
+	// Findings is the evidence behind the verdict, written for the agent that
+	// has to act on it.
+	Findings string
+}
+
+// PromptJudge checks the workspace against one prompt step. An error means no
+// verdict was reached. An error that wraps ErrPromptTimeout fails the step;
+// any other error stops validation. See RunValidation.
+type PromptJudge func(ctx context.Context, step project.Step) (PromptVerdict, error)
+
+// ErrPromptTimeout marks a prompt check that ran past its step's timeout. It
+// fails the step the same way a command that runs past its timeout does,
+// because the change can be the cause: a page that never loads keeps the
+// check waiting as surely as it keeps a test waiting.
+var ErrPromptTimeout = errors.New("the check ran past its timeout before it reached a verdict")
 
 // failure describes why a step did not pass, for a message naming it. It is
 // empty for a step that succeeded.
@@ -109,11 +147,24 @@ func RunSetup(ctx context.Context, runner RunnerProxy, cfg *project.Config, sess
 // RunValidation executes required and advisory validation steps.
 // Required steps all run even if one fails. Advisory steps always run.
 //
+// Command steps run before prompt steps, and prompt steps run only when every
+// required command step passed: a prompt step is an agent's judgement and costs
+// model tokens, so it waits until the cheap checks agree the change is worth
+// judging. A nil judge skips every prompt step. Results keep the order the
+// steps were declared in, whatever order they ran in.
+//
+// A judge error other than a timeout stops validation and is returned. It
+// means the check did not run — the model could not be reached, or the
+// workspace could not be put back after it — and the coding agent cannot fix
+// either, so another agent pass would only spend money. Returning the error
+// also keeps the run from being delivered, which matters when the workspace
+// may still hold what the check wrote.
+//
 // changedFiles gates the steps that declare paths. A nil list means the caller
 // has no diff to gate on — a read-only run that was never going to write one,
 // or `kvarn test` running the suite outright — and every step runs. An empty
 // non-nil list is a real "nothing changed", which skips them.
-func RunValidation(ctx context.Context, runner RunnerProxy, cfg *project.Config, sessionID string, changedFiles []string, onDone OnStepDone, onOutput OnOutput) (*ValidationResult, error) {
+func RunValidation(ctx context.Context, runner RunnerProxy, cfg *project.Config, sessionID string, changedFiles []string, judge PromptJudge, onDone OnStepDone, onOutput OnOutput) (*ValidationResult, error) {
 	result := &ValidationResult{
 		RequiredPassed: true,
 	}
@@ -122,46 +173,119 @@ func RunValidation(ctx context.Context, runner RunnerProxy, cfg *project.Config,
 		return result, nil
 	}
 
-	for _, step := range cfg.Validation.Required {
-		if !shouldRun(step, changedFiles) {
-			sr := StepResult{Name: step.Name, Skipped: true}
-			result.Required = append(result.Required, sr)
-			if onDone != nil {
-				onDone(sr, "validation_required")
-			}
-			continue
-		}
-
-		sr := execStep(ctx, runner, step, sessionID, makeOutputCallback(onOutput, step.Name, "validation_required"))
-		result.Required = append(result.Required, sr)
+	const (
+		phaseRequired = "validation_required"
+		phaseAdvisory = "validation_advisory"
+	)
+	report := func(sr StepResult, phase string) StepResult {
 		if onDone != nil {
-			onDone(sr, "validation_required")
+			onDone(sr, phase)
 		}
-		if sr.Err != nil {
-			result.RequiredPassed = false
-		} else if sr.ExitCode != 0 {
-			result.RequiredPassed = false
+		return sr
+	}
+	runCommands := func(steps []project.Step, phase string) []StepResult {
+		results := make([]StepResult, len(steps))
+		for i, step := range steps {
+			if step.IsPrompt() {
+				continue
+			}
+			if !shouldRun(step, changedFiles) {
+				results[i] = report(StepResult{Name: step.Name, Skipped: true}, phase)
+				continue
+			}
+			results[i] = report(execStep(ctx, runner, step, sessionID, makeOutputCallback(onOutput, step.Name, phase)), phase)
 		}
+		return results
+	}
+	runPrompts := func(steps []project.Step, results []StepResult, phase string) error {
+		for i, step := range steps {
+			if !step.IsPrompt() {
+				continue
+			}
+			sr := StepResult{Name: step.Name, Prompt: true}
+			switch {
+			case !shouldRun(step, changedFiles):
+				sr.Skipped = true
+			case judge == nil:
+				sr.Skipped, sr.SkipReason = true, SkipReasonNoJudge
+			case !result.RequiredPassed:
+				sr.Skipped, sr.SkipReason = true, SkipReasonRequiredFailed
+			default:
+				var err error
+				sr, err = judgeStep(ctx, judge, step, makeOutputCallback(onOutput, step.Name, phase))
+				results[i] = report(sr, phase)
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			results[i] = report(sr, phase)
+		}
+		return nil
 	}
 
-	for _, step := range cfg.Validation.Advisory {
-		if !shouldRun(step, changedFiles) {
-			sr := StepResult{Name: step.Name, Skipped: true}
-			result.Advisory = append(result.Advisory, sr)
-			if onDone != nil {
-				onDone(sr, "validation_advisory")
-			}
-			continue
-		}
+	result.Required = runCommands(cfg.Validation.Required, phaseRequired)
+	result.RequiredPassed = allPassed(result.Required)
+	err := runPrompts(cfg.Validation.Required, result.Required, phaseRequired)
+	result.RequiredPassed = allPassed(result.Required)
+	if err != nil {
+		return result, err
+	}
 
-		sr := execStep(ctx, runner, step, sessionID, makeOutputCallback(onOutput, step.Name, "validation_advisory"))
-		result.Advisory = append(result.Advisory, sr)
-		if onDone != nil {
-			onDone(sr, "validation_advisory")
-		}
+	result.Advisory = runCommands(cfg.Validation.Advisory, phaseAdvisory)
+	if err := runPrompts(cfg.Validation.Advisory, result.Advisory, phaseAdvisory); err != nil {
+		return result, err
 	}
 
 	return result, nil
+}
+
+// allPassed reports whether no step in results failed. A step that has not run
+// yet, or was skipped, has not failed.
+func allPassed(results []StepResult) bool {
+	for _, sr := range results {
+		if sr.Err != nil || sr.ExitCode != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// judgeStep runs one prompt step through judge and turns the verdict into a
+// step result. The findings are also sent as output, so a watcher sees them
+// the same way it sees what a command printed. A judge error is sent as
+// stderr for the same reason: it is the only reason the step failed.
+//
+// The returned error is non-nil when the judge failed for a reason other than
+// a timeout; RunValidation stops on it.
+func judgeStep(ctx context.Context, judge PromptJudge, step project.Step, onOutput OutputCallback) (StepResult, error) {
+	sr := StepResult{Name: step.Name, Prompt: true}
+	verdict, err := judge(ctx, step)
+	if errors.Is(err, ErrPromptTimeout) {
+		sr.TimedOut = true
+		sr.ExitCode = 1
+		sr.Stdout = err.Error()
+		if onOutput != nil {
+			onOutput(sr.Stdout+"\n", "")
+		}
+		return sr, nil
+	}
+	if err != nil {
+		sr.Err = err
+		sr.Stderr = err.Error()
+		if onOutput != nil {
+			onOutput("", sr.Stderr+"\n")
+		}
+		return sr, fmt.Errorf("prompt step %q: %w", step.Name, err)
+	}
+	if !verdict.Passed {
+		sr.ExitCode = 1
+	}
+	sr.Stdout = verdict.Findings
+	if onOutput != nil && verdict.Findings != "" {
+		onOutput(verdict.Findings+"\n", "")
+	}
+	return sr, nil
 }
 
 // ChangedFiles runs `git diff --name-only <base>` on the VM and returns the

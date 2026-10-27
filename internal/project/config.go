@@ -511,10 +511,33 @@ type Validation struct {
 	Advisory []Step `yaml:"advisory"`
 }
 
-// Step represents a single command to execute.
+// Validate checks every validation step. It is exported because a job
+// submission can carry validation steps of its own, and those must follow the
+// same rules as the ones a kvarn.yml declares.
+func (v Validation) Validate() error {
+	for _, s := range slices.Concat(v.Required, v.Advisory) {
+		if err := s.validate(true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MaxPromptBytes caps the instructions of one prompt step. A prompt is a
+// criterion for a reviewer to check, not a document, and it is sent to a model
+// on every attempt of every run.
+const MaxPromptBytes = 16 * 1024
+
+// Step represents a single unit of work: a command to run or, in validation, a
+// prompt an agent checks the change against.
 type Step struct {
-	Name       string   `yaml:"name"`
-	Run        string   `yaml:"run"`
+	Name string `yaml:"name"`
+	Run  string `yaml:"run"`
+	// Prompt makes the step an agent check instead of a command: a separate
+	// agent inspects the workspace and decides if the change meets the prompt.
+	// Only validation steps can have one, and a step has a prompt or a run
+	// command, never both.
+	Prompt     string   `yaml:"prompt,omitempty"`
 	WorkingDir string   `yaml:"working_dir,omitempty"`
 	Paths      []string `yaml:"paths,omitempty"`
 	Timeout    Duration `yaml:"timeout,omitempty"`
@@ -1076,27 +1099,58 @@ func (c *Config) validate() error {
 		return fmt.Errorf("preview: %w", err)
 	}
 
-	allSteps := make([]Step, 0)
-	allSteps = append(allSteps, c.Setup.Steps...)
-	allSteps = append(allSteps, c.Setup.HealthChecks...)
-	allSteps = append(allSteps, c.Validation.Required...)
-	allSteps = append(allSteps, c.Validation.Advisory...)
-
-	for _, s := range allSteps {
-		if strings.TrimSpace(s.Name) == "" {
-			return errors.New("step has empty name")
-		}
-		if strings.TrimSpace(s.Run) == "" {
-			return fmt.Errorf("step %q has empty run command", s.Name)
-		}
-		if s.WorkingDir != "" && filepath.IsAbs(s.WorkingDir) {
-			return fmt.Errorf("step %q has absolute working_dir %q (must be relative)", s.Name, s.WorkingDir)
-		}
-		const maxRetry = 10
-		if s.Retry > maxRetry {
-			return fmt.Errorf("step %q has retry count %d which exceeds maximum of %d", s.Name, s.Retry, maxRetry)
+	for _, s := range slices.Concat(c.Setup.Steps, c.Setup.HealthChecks) {
+		if err := s.validate(false); err != nil {
+			return err
 		}
 	}
+	return c.Validation.Validate()
+}
 
+// validate checks one step. allowPrompt is true only for validation steps:
+// setup and health checks prepare the VM, and an agent has nothing to judge
+// before the change exists.
+func (s Step) validate(allowPrompt bool) error {
+	if strings.TrimSpace(s.Name) == "" {
+		return errors.New("step has empty name")
+	}
+	hasRun := strings.TrimSpace(s.Run) != ""
+	hasPrompt := strings.TrimSpace(s.Prompt) != ""
+	switch {
+	case hasPrompt && !allowPrompt:
+		return fmt.Errorf("step %q has a prompt; only validation steps can have one", s.Name)
+	case hasPrompt && hasRun:
+		return fmt.Errorf("step %q has both run and prompt; give it one of them", s.Name)
+	case hasPrompt:
+		return s.validatePrompt()
+	case !hasRun:
+		return fmt.Errorf("step %q has empty run command", s.Name)
+	}
+	if s.WorkingDir != "" && filepath.IsAbs(s.WorkingDir) {
+		return fmt.Errorf("step %q has absolute working_dir %q (must be relative)", s.Name, s.WorkingDir)
+	}
+	const maxRetry = 10
+	if s.Retry > maxRetry {
+		return fmt.Errorf("step %q has retry count %d which exceeds maximum of %d", s.Name, s.Retry, maxRetry)
+	}
 	return nil
 }
+
+// validatePrompt checks the fields of a prompt step. The keys that only make
+// sense for a command are refused rather than ignored, so a step does not read
+// as doing something it does not.
+func (s Step) validatePrompt() error {
+	if len(s.Prompt) > MaxPromptBytes {
+		return fmt.Errorf("step %q has a prompt of %d bytes; the limit is %d", s.Name, len(s.Prompt), MaxPromptBytes)
+	}
+	if s.WorkingDir != "" {
+		return fmt.Errorf("step %q has a prompt and working_dir; working_dir applies only to run commands", s.Name)
+	}
+	if s.Retry != 0 {
+		return fmt.Errorf("step %q has a prompt and retry; retry applies only to setup steps", s.Name)
+	}
+	return nil
+}
+
+// IsPrompt reports whether the step is an agent check rather than a command.
+func (s Step) IsPrompt() bool { return strings.TrimSpace(s.Prompt) != "" }

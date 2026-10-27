@@ -81,8 +81,20 @@ max_steps = 80
 
 `class` picks the tier; the model keys from the table above are then applied on
 top of whichever class was selected. Setting `model` bypasses the class's model
-without bypassing the rest of its settings. Agent names are `explore` and
-`plan`; any other name is an error.
+without bypassing the rest of its settings. Agent names are `explore`, `plan`
+and `validator`; any other name is an error.
+
+`validator` is the agent that checks
+[prompt validation steps](kvarn-yml.md#prompt-steps). It runs on
+`coding-agent-reasoning` by default. The coding agent cannot start it; only a
+prompt step does.
+
+```toml
+# Check prompt steps with a cheaper model.
+[agents.validator]
+class = "coding-agent"
+max_steps = 40
+```
 
 Provider API keys are never read from this file. They live in the `[llm]`
 block of [`credentials.toml`](credentials-toml.md), falling back to the

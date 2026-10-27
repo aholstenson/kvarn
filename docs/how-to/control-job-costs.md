@@ -79,6 +79,11 @@ max_validation_retries = 0
 
 `0` disables retries. The built-in default is `3`.
 
+A [prompt step](../reference/kvarn-yml.md#prompt-steps) is an agent run on every
+attempt, so it adds to what each retry costs. Its spend counts against the same
+budget. To make it cheaper, move the `validator` agent to a cheaper class in
+[`agents.toml`](../reference/agents-toml.md#per-agent-overrides).
+
 For local jobs, `kvarn local job --max-validation-retries N` does the same; it
 defaults to `0` there, since you are watching.
 
