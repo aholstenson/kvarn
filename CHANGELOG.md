@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/aholstenson/kvarn/compare/v0.8.0...v0.9.0) (2026-10-27)
+
+
+### Features
+
+* Support validation prompts via kvarn.yml and API ([972855f](https://github.com/aholstenson/kvarn/commit/972855f64f6042fcafd2e9c83804c961938e94d8))
+
 ## [0.8.0](https://github.com/aholstenson/kvarn/compare/v0.7.0...v0.8.0) (2026-10-13)
 
 
