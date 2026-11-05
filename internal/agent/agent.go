@@ -98,6 +98,42 @@ type ProgressRetry struct {
 
 func (ProgressRetry) isProgressEvent() {}
 
+// SubAgentPhase marks where one sub-agent run stands in its lifecycle.
+type SubAgentPhase int
+
+const (
+	// SubAgentStarted is the sub-agent run starting its own loop.
+	SubAgentStarted SubAgentPhase = iota + 1
+	// SubAgentFinished is the sub-agent run returning to the parent, with an
+	// answer or with an error.
+	SubAgentFinished
+)
+
+// ProgressSubAgent brackets one sub-agent run. The parent's tool call stays
+// open for as long as the sub-agent works, so without these two events a
+// watcher cannot tell which of several parallel runs the parent still waits
+// on.
+type ProgressSubAgent struct {
+	// AgentID is the identifier every event of this run carries, such as
+	// "explore#1".
+	AgentID string
+	// Name is the sub-agent type, such as "explore".
+	Name string
+	// Description is why the parent started the run, in the parent's words.
+	Description string
+	Phase       SubAgentPhase
+	// Model is the model the run calls, as configured.
+	Model string
+	// Steps is how many model calls the run made. Set on SubAgentFinished.
+	Steps int
+	// Duration is how long the run took. Set on SubAgentFinished.
+	Duration time.Duration
+	// Error is why the run failed. Empty when it returned an answer.
+	Error string
+}
+
+func (ProgressSubAgent) isProgressEvent() {}
+
 // ProgressCostUpdate carries a cost update for the running job. Kind reports
 // what the update represents: a soft warning (the WarnFraction was just
 // crossed), an over-budget signal (the hard limit was hit), or a final

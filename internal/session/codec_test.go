@@ -114,6 +114,49 @@ var _ = Describe("agent_retry payload codec", func() {
 	})
 })
 
+var _ = Describe("sub_agent payload codec", func() {
+	It("round-trips a finished run including its duration in milliseconds", func() {
+		in := SubAgentEvent{
+			SessionID:   "s1",
+			AgentID:     "explore#2",
+			Name:        "explore",
+			Description: "Audit the change",
+			Phase:       SubAgentFinished,
+			Model:       "anthropic/claude-haiku-4-5",
+			Steps:       41,
+			Duration:    7*time.Minute + 37*time.Second,
+			Error:       "max steps reached",
+		}
+		kind, payload, durable, err := encodeEvent(in)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(kind).To(Equal(kindSubAgent))
+		Expect(durable).To(BeTrue())
+
+		var raw map[string]any
+		Expect(json.Unmarshal(payload, &raw)).To(Succeed())
+		Expect(raw).To(HaveKeyWithValue("duration_ms", float64(457000)))
+
+		ev, err := decodeEvent(kind, payload)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ev).To(Equal(in))
+	})
+
+	It("trims an error too large for the payload cap", func() {
+		_, payload, _, err := encodeEvent(SubAgentEvent{
+			SessionID: "s1",
+			AgentID:   "explore#1",
+			Phase:     SubAgentFinished,
+			Error:     strings.Repeat("x", payloadCap*2),
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(len(payload)).To(BeNumerically("<=", payloadCap))
+
+		ev, err := decodeEvent(kindSubAgent, payload)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ev.(SubAgentEvent).Error).To(HaveSuffix(truncationMarker))
+	})
+})
+
 var _ = Describe("pull_request payload codec", func() {
 	It("encodes the ref as a string and never writes a number", func() {
 		kind, payload, durable, err := encodeEvent(PullRequestEvent{

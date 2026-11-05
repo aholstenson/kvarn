@@ -27,9 +27,10 @@ var _ = Describe("conversation progress", func() {
 			agentCtx: &agent.Context{
 				OnProgress: func(e agent.ProgressEvent) { events = append(events, e) },
 			},
-			mainCfg:  modelcfg.Entry{ModelID: "test/medium", MaxAttempts: 4},
-			textBufs: make(map[string]*strings.Builder),
-			turns:    make(map[string]*turnState),
+			mainCfg:   modelcfg.Entry{ModelID: "test/medium", MaxAttempts: 4},
+			textBufs:  make(map[string]*strings.Builder),
+			turns:     make(map[string]*turnState),
+			subModels: make(map[string]string),
 		}
 	})
 
@@ -70,7 +71,30 @@ var _ = Describe("conversation progress", func() {
 		}))
 	})
 
-	It("counts steps per agent, and reports no model for a sub-agent", func() {
+	It("names a sub-agent's own model on its turns while the run is alive", func() {
+		sub := llms.WithStreamScope(context.Background(), llms.StreamScope{AgentID: "explore#1"})
+
+		conv.handleSubAgent(agent.ProgressSubAgent{
+			AgentID: "explore#1", Name: "explore", Phase: agent.SubAgentStarted, Model: "test/fast",
+		})
+		feed(sub, llms.StreamingEventMessageStart{}, llms.StreamingEventTextChunk{Text: "hi"})
+		conv.handleSubAgent(agent.ProgressSubAgent{
+			AgentID: "explore#1", Name: "explore", Phase: agent.SubAgentFinished, Steps: 1,
+		})
+
+		Expect(events).To(Equal([]agent.ProgressEvent{
+			agent.ProgressSubAgent{AgentID: "explore#1", Name: "explore", Phase: agent.SubAgentStarted, Model: "test/fast"},
+			agent.ProgressTurn{AgentID: "explore#1", Phase: agent.TurnStarted, Step: 1, Model: "test/fast"},
+			agent.ProgressTurn{AgentID: "explore#1", Phase: agent.TurnResponding, Step: 1, Model: "test/fast"},
+			agent.ProgressSubAgent{AgentID: "explore#1", Name: "explore", Phase: agent.SubAgentFinished, Steps: 1},
+		}))
+		// A finished run leaves nothing behind for a long job to accumulate.
+		Expect(conv.turns).NotTo(HaveKey("explore#1"))
+		Expect(conv.textBufs).NotTo(HaveKey("explore#1"))
+		Expect(conv.subModels).NotTo(HaveKey("explore#1"))
+	})
+
+	It("counts steps per agent, and reports no model for an unknown agent", func() {
 		sub := llms.WithStreamScope(context.Background(), llms.StreamScope{AgentID: "plan/ab12"})
 
 		feed(context.Background(), llms.StreamingEventMessageStart{}, llms.StreamingEventMessageEnd{})

@@ -121,14 +121,15 @@ transcript with an invisible hole in it.
 
 ### Reading the stream
 
-Each model call is bracketed, so it is always clear whether the run is waiting
-on the model or on a tool:
+Each line starts with the time the event happened, in local time. Each model
+call is bracketed, so it is always clear whether the run is waiting on the
+model or on a tool:
 
 ```
-[llm] step 12: calling anthropic/claude-sonnet-4-6
-[llm] step 12: responding after 6.3s
-[llm] step 12: done after 21.4s
-=> read_file {"path":"internal/egress/proxy/proxy.go"}
+14:02:03 [llm] step 12: calling anthropic/claude-sonnet-4-6
+14:02:09 [llm] step 12: responding after 6.3s
+14:02:24 [llm] step 12: done after 21.4s
+14:02:24 => read_file {"path":"internal/egress/proxy/proxy.go"}
 ```
 
 The time between `calling` and `done` belongs to the model. Everything after
@@ -136,8 +137,26 @@ The time between `calling` and `done` belongs to the model. Everything after
 reported while the run waits for the next one:
 
 ```
-[llm] step 12: attempt 2/10 failed (anthropic 529), retrying in 1.2s
+14:02:05 [llm] step 12: attempt 2/10 failed (anthropic 529), retrying in 1.2s
 ```
+
+When the agent starts sub-agents, their lines are indented under the parent's.
+Each run has a number, so you can tell parallel runs apart. The `finished` line
+tells you which run the parent no longer waits on:
+
+```
+14:02:24 => spawn_agent explore "Audit commands and blast radius"
+14:02:24 => spawn_agent explore "Audit rollout counters"
+14:02:24   [explore#1] started: Audit commands and blast radius
+14:02:24   [explore#2] started: Audit rollout counters
+14:02:25   [llm:explore#1] step 1: calling anthropic/claude-haiku-4-5
+14:02:28   explore#1 => read_file {"path":"internal/egress/proxy/proxy.go"}
+14:06:36   [explore#1] finished after 4m12s, 23 steps
+14:10:01   [explore#2] finished after 7m37s, 41 steps
+```
+
+The parent's next step starts only when every tool call of its step is done,
+so a step that starts sub-agents waits for the slowest of them.
 
 Retries are configured per model class in `agents.toml`; see
 [agents.toml](../reference/agents-toml.md).

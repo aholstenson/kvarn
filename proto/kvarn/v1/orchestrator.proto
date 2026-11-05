@@ -335,6 +335,7 @@ message SessionUpdate {
     CostUpdate cost_update = 21;
     AgentTurn agent_turn = 22;
     AgentRetry agent_retry = 23;
+    SubAgent sub_agent = 24;
   }
 }
 
@@ -413,6 +414,36 @@ message AgentRetry {
   string model = 8;
   // What the failed attempt returned.
   string error = 9;
+}
+
+enum SubAgentPhase {
+  SUB_AGENT_PHASE_UNSPECIFIED = 0;
+  // The run started its own model loop.
+  SUB_AGENT_PHASE_STARTED = 1;
+  // The run returned to the parent agent, with an answer or an error.
+  SUB_AGENT_PHASE_FINISHED = 2;
+}
+
+// SubAgent brackets one sub-agent run. The parent's tool call stays open for
+// the whole run, so these events tell a watcher which of several parallel runs
+// the parent still waits on. Every turn, tool and retry event of the run
+// carries the same agent_id.
+message SubAgent {
+  // Identifier of the run, such as "explore#1".
+  string agent_id = 1;
+  // The sub-agent type, such as "explore".
+  string name = 2;
+  // Why the parent started the run, in the parent's words.
+  string description = 3;
+  SubAgentPhase phase = 4;
+  // The model the run calls.
+  string model = 5;
+  // How many model calls the run made. Set on FINISHED.
+  int32 steps = 6;
+  // How long the run took. Set on FINISHED.
+  int64 duration_ms = 7;
+  // Why the run failed. Empty when it returned an answer.
+  string error = 8;
 }
 
 enum StepPhase {

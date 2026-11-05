@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect/v2"
@@ -42,6 +44,13 @@ type CodingToolkit struct {
 	mergeTarget  *agent.MergeTarget
 	checkpointer agent.Checkpointer
 	merge        *mergeState
+
+	// progress receives what each sub-agent run does. Nil when nobody watches.
+	progress *SubAgentProgress
+	// runsMu guards runs, which counts the runs started per sub-agent name so
+	// each run gets a short identifier of its own.
+	runsMu sync.Mutex
+	runs   map[string]int
 }
 
 // CodingToolkitOpts configures a CodingToolkit. AgentModels, SubAgents, and
@@ -71,6 +80,23 @@ type CodingToolkitOpts struct {
 	// produce a merge that never reaches the pull request.
 	MergeTarget  *agent.MergeTarget
 	Checkpointer agent.Checkpointer
+	// Progress receives the events of every sub-agent run. Nil keeps the runs
+	// silent.
+	Progress *SubAgentProgress
+}
+
+// SubAgentProgress is where a sub-agent run reports what it does. A sub-agent
+// runs its own model loop, and that loop does not inherit the parent's
+// streaming function, so the toolkit hands these on to every run it starts.
+// All three are required.
+type SubAgentProgress struct {
+	// Stream receives the run's streaming events. The context carries the
+	// run's llms.StreamScope.
+	Stream llms.StreamingFunc
+	// Retry receives each failed attempt at one of the run's model calls.
+	Retry llms.RetryNotifyFunc
+	// Lifecycle receives the start and the end of each run.
+	Lifecycle func(agent.ProgressSubAgent)
 }
 
 func NewCodingToolkit(runner sandbox.RunnerProxy, workingDir string, sessionID string, skills []repocontext.Skill) *CodingToolkit {
@@ -102,7 +128,20 @@ func NewCodingToolkitWithOpts(opts CodingToolkitOpts) *CodingToolkit {
 		mergeTarget:  opts.MergeTarget,
 		checkpointer: opts.Checkpointer,
 		merge:        &mergeState{},
+		progress:     opts.Progress,
+		runs:         make(map[string]int),
 	}
+}
+
+// nextAgentID names a new run of the sub-agent called name: "explore#1" for
+// the first, "explore#2" for the next. The number is what tells parallel runs
+// apart in a watched stream, and a person reads it more easily than a random
+// identifier.
+func (t *CodingToolkit) nextAgentID(name string) string {
+	t.runsMu.Lock()
+	defer t.runsMu.Unlock()
+	t.runs[name]++
+	return fmt.Sprintf("%s#%d", name, t.runs[name])
 }
 
 // guard wraps each ToolDef so that every result passes the same two checks on
@@ -1313,8 +1352,9 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 	if err != nil {
 		return nil, fmt.Errorf("generate run id: %w", err)
 	}
+	agentID := t.toolkit.nextAgentID(sub.Name)
 	subCtx := llms.WithStreamScope(ctx, llms.StreamScope{
-		AgentID: sub.Name + "/" + runID,
+		AgentID: agentID,
 		RunID:   runID,
 	})
 
@@ -1346,15 +1386,53 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 	if cfg.ReasoningEffort != "" {
 		opts = append(opts, llms.WithReasoningEffort(cfg.ReasoningEffort))
 	}
-	// The sub-agent gets the same attempt budget as any other call. Nothing is
-	// watching it — the toolkit has no progress channel — so it retries
-	// quietly, and the parent sees only the tool call taking longer.
-	opts = append(opts, retryOptions(cfg, nil)...)
+	// The sub-agent gets the same attempt budget as any other call.
+	var notify llms.RetryNotifyFunc
+	if t.toolkit.progress != nil {
+		notify = t.toolkit.progress.Retry
+	}
+	opts = append(opts, retryOptions(cfg, notify)...)
 	if parent := llms.GetExecutionContext(ctx); parent != nil {
 		opts = append(opts, llms.WithParentExecution(parent))
 	}
 
+	var steps atomic.Int32
+	if progress := t.toolkit.progress; progress != nil {
+		// Each model call opens with a message start, so counting them here
+		// gives the finished event its step count without asking the
+		// receiver to keep one.
+		opts = append(opts, llms.WithStreamingFunc(func(ctx context.Context, event llms.StreamingEvent) error {
+			if _, ok := event.(llms.StreamingEventMessageStart); ok {
+				steps.Add(1)
+			}
+			return progress.Stream(ctx, event)
+		}))
+		progress.Lifecycle(agent.ProgressSubAgent{
+			AgentID:     agentID,
+			Name:        sub.Name,
+			Description: input.Description,
+			Phase:       agent.SubAgentStarted,
+			Model:       cfg.ModelID,
+		})
+	}
+
+	started := time.Now()
 	result, err := model.GenerateContent(subCtx, opts...)
+	if progress := t.toolkit.progress; progress != nil {
+		finished := agent.ProgressSubAgent{
+			AgentID:     agentID,
+			Name:        sub.Name,
+			Description: input.Description,
+			Phase:       agent.SubAgentFinished,
+			Model:       cfg.ModelID,
+			Steps:       int(steps.Load()),
+			Duration:    time.Since(started),
+		}
+		if err != nil {
+			finished.Error = err.Error()
+		}
+		progress.Lifecycle(finished)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("sub-agent %q: %w", sub.Name, err)
 	}

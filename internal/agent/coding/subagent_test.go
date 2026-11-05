@@ -3,6 +3,7 @@ package coding_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -11,9 +12,30 @@ import (
 	llms "github.com/aholstenson/llms-go"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/internal/agent"
 	"github.com/aholstenson/kvarn/internal/agent/coding"
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
+	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 )
+
+// optionField applies opts to a fresh options value and returns the field
+// called name. llms-go keeps its options struct private, so a test double that
+// plays the provider has no other way to reach the callbacks it must call.
+func optionField[T any](opts []llms.GenerateOption, name string) T {
+	var zero T
+	if len(opts) == 0 {
+		return zero
+	}
+	target := reflect.New(reflect.TypeOf(opts[0]).In(0).Elem())
+	for _, opt := range opts {
+		out := reflect.ValueOf(opt).Call([]reflect.Value{target})
+		if !out[0].IsNil() {
+			panic(out[0].Interface())
+		}
+	}
+	v, _ := target.Elem().FieldByName(name).Interface().(T)
+	return v
+}
 
 // fakeModel is a minimal llms.Model implementation for testing spawn_agent.
 type fakeModel struct {
@@ -139,11 +161,131 @@ var _ = Describe("spawn_agent", func() {
 		Expect(runner.closeCalls[0].SessionId).To(Equal("fresh-sub"))
 
 		Expect(capturedHasScope).To(BeTrue())
-		Expect(capturedScope.AgentID).To(HavePrefix(coding.Explore.Name + "/"))
+		Expect(capturedScope.AgentID).To(Equal(coding.Explore.Name + "#1"))
 		Expect(capturedScope.RunID).NotTo(BeEmpty())
 
 		out := result.(*coding.SpawnAgentOutput)
 		Expect(out.Text).To(Equal("explored"))
+	})
+
+	It("numbers the runs of each sub-agent separately", func() {
+		var ids []string
+		model := &fakeModel{
+			generate: func(ctx context.Context, _ ...llms.GenerateOption) (llms.Result, error) {
+				scope, _ := llms.GetStreamScope(ctx)
+				ids = append(ids, scope.AgentID)
+				return llms.TextResult{Text: "ok"}, nil
+			},
+		}
+		tk := buildToolkit(model, coding.SubAgents{
+			coding.Explore.Name: coding.Explore,
+			coding.Plan.Name:    coding.Plan,
+		})
+		tool := findSpawnTool(tk)
+
+		for _, name := range []string{coding.Explore.Name, coding.Explore.Name, coding.Plan.Name} {
+			_, err := tool.Execute(ctx, &coding.SpawnAgentInput{Name: name, Prompt: "go"})
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(ids).To(Equal([]string{"explore#1", "explore#2", "plan#1"}))
+	})
+
+	Describe("progress", func() {
+		var (
+			lifecycle []agent.ProgressSubAgent
+			streamed  []llms.StreamingEvent
+			scopes    []string
+			retries   []llms.RetryNotice
+			progress  *coding.SubAgentProgress
+		)
+
+		BeforeEach(func() {
+			lifecycle, streamed, scopes, retries = nil, nil, nil, nil
+			progress = &coding.SubAgentProgress{
+				Stream: func(ctx context.Context, e llms.StreamingEvent) error {
+					scope, _ := llms.GetStreamScope(ctx)
+					scopes = append(scopes, scope.AgentID)
+					streamed = append(streamed, e)
+					return nil
+				},
+				Retry: func(_ context.Context, n llms.RetryNotice) {
+					retries = append(retries, n)
+				},
+				Lifecycle: func(e agent.ProgressSubAgent) {
+					lifecycle = append(lifecycle, e)
+				},
+			}
+		})
+
+		withProgress := func(model llms.Model) llms.ToolDef {
+			return findSpawnTool(coding.NewCodingToolkitWithOpts(coding.CodingToolkitOpts{
+				Runner:       runner,
+				WorkingDir:   "/home/kvarn/workspace",
+				SessionID:    "parent-session",
+				AgentModels:  map[string]llms.Model{coding.Explore.Name: model},
+				AgentConfigs: map[string]modelcfg.Entry{coding.Explore.Name: {ModelID: "test/fast"}},
+				SubAgents:    coding.SubAgents{coding.Explore.Name: coding.Explore},
+				Progress:     progress,
+			}))
+		}
+
+		It("reports the start, every event and the end of a run", func() {
+			model := &fakeModel{
+				generate: func(ctx context.Context, opts ...llms.GenerateOption) (llms.Result, error) {
+					// Plays the part of the provider: two model calls, with
+					// one failed attempt before the second.
+					stream := optionField[llms.StreamingFunc](opts, "StreamingFunc")
+					notify := optionField[llms.RetryNotifyFunc](opts, "RetryNotify")
+					Expect(stream).NotTo(BeNil())
+					Expect(notify).NotTo(BeNil())
+					Expect(stream(ctx, llms.StreamingEventMessageStart{})).To(Succeed())
+					Expect(stream(ctx, llms.StreamingEventMessageEnd{})).To(Succeed())
+					notify(ctx, llms.RetryNotice{Attempt: 1, MaxAttempts: 10})
+					Expect(stream(ctx, llms.StreamingEventMessageStart{})).To(Succeed())
+					Expect(stream(ctx, llms.StreamingEventMessageEnd{Final: true})).To(Succeed())
+					return llms.TextResult{Text: "found it"}, nil
+				},
+			}
+
+			_, err := withProgress(model).Execute(ctx, &coding.SpawnAgentInput{
+				Name:        coding.Explore.Name,
+				Description: "Find the entry point",
+				Prompt:      "find the entry point",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(lifecycle).To(HaveLen(2))
+			Expect(lifecycle[0]).To(Equal(agent.ProgressSubAgent{
+				AgentID:     "explore#1",
+				Name:        coding.Explore.Name,
+				Description: "Find the entry point",
+				Phase:       agent.SubAgentStarted,
+				Model:       "test/fast",
+			}))
+			Expect(lifecycle[1].Phase).To(Equal(agent.SubAgentFinished))
+			Expect(lifecycle[1].AgentID).To(Equal("explore#1"))
+			Expect(lifecycle[1].Steps).To(Equal(2))
+			Expect(lifecycle[1].Error).To(BeEmpty())
+
+			Expect(streamed).To(HaveLen(4))
+			Expect(scopes).To(HaveEach("explore#1"))
+			Expect(retries).To(HaveLen(1))
+		})
+
+		It("reports a run that fails with its error", func() {
+			model := &fakeModel{
+				generate: func(_ context.Context, _ ...llms.GenerateOption) (llms.Result, error) {
+					return nil, errors.New("provider unavailable")
+				},
+			}
+
+			_, err := withProgress(model).Execute(ctx, &coding.SpawnAgentInput{Name: coding.Explore.Name, Prompt: "go"})
+			Expect(err).To(HaveOccurred())
+
+			Expect(lifecycle).To(HaveLen(2))
+			Expect(lifecycle[1].Phase).To(Equal(agent.SubAgentFinished))
+			Expect(lifecycle[1].Error).To(Equal("provider unavailable"))
+		})
 	})
 
 	It("routes each sub-agent to the model resolved for it", func() {

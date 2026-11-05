@@ -1628,10 +1628,13 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 					Error:       e.Error,
 				})
 			case agent.ProgressToolUse:
+				// The worklog and the session message describe the parent's
+				// work. A sub-agent's reads are how the parent did that work,
+				// and they reach watchers through the event below.
 				if e.AgentID == "" {
 					s.sessionMgr.UpdateState(ctx, sessionID, session.StateRunning, e.ToolID)
+					worklog.appendToolUse(e.ToolID, shortArgs(e.ArgumentsJSON))
 				}
-				worklog.appendToolUse(e.ToolID, shortArgs(e.ArgumentsJSON))
 				s.sessionMgr.EmitEvent(ctx, sessionID, session.AgentToolUseEvent{
 					SessionID:     sessionID,
 					AgentID:       e.AgentID,
@@ -1639,7 +1642,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 					ArgumentsJSON: e.ArgumentsJSON,
 				})
 			case agent.ProgressToolResult:
-				if e.IsError {
+				if e.IsError && e.AgentID == "" {
 					worklog.appendToolError(e.ToolID, firstLine(e.Result))
 				}
 				s.sessionMgr.EmitEvent(ctx, sessionID, session.AgentToolResultEvent{
@@ -1650,12 +1653,26 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 					IsError:   e.IsError,
 				})
 			case agent.ProgressTextMessage:
-				worklog.appendText(e.Text)
+				if e.AgentID == "" {
+					worklog.appendText(e.Text)
+				}
 				s.sessionMgr.EmitEvent(ctx, sessionID, session.AgentMessageEvent{
 					SessionID: sessionID,
 					AgentID:   e.AgentID,
 					Text:      e.Text,
 					Final:     e.Final,
+				})
+			case agent.ProgressSubAgent:
+				s.sessionMgr.EmitEvent(ctx, sessionID, session.SubAgentEvent{
+					SessionID:   sessionID,
+					AgentID:     e.AgentID,
+					Name:        e.Name,
+					Description: e.Description,
+					Phase:       subAgentPhaseToSession(e.Phase),
+					Model:       e.Model,
+					Steps:       e.Steps,
+					Duration:    e.Duration,
+					Error:       e.Error,
 				})
 			}
 		},
@@ -2817,6 +2834,22 @@ func sessionEventToUpdate(we session.WatchEvent) *v1.SessionUpdate {
 				},
 			},
 		}
+	case session.SubAgentEvent:
+		update = &v1.SessionUpdate{
+			SessionId: e.SessionID,
+			Event: &v1.SessionUpdate_SubAgent{
+				SubAgent: &v1.SubAgent{
+					AgentId:     e.AgentID,
+					Name:        e.Name,
+					Description: e.Description,
+					Phase:       subAgentPhaseToProto(e.Phase),
+					Model:       e.Model,
+					Steps:       int32(e.Steps),
+					DurationMs:  e.Duration.Milliseconds(),
+					Error:       e.Error,
+				},
+			},
+		}
 	case session.AgentRetryEvent:
 		update = &v1.SessionUpdate{
 			SessionId: e.SessionID,
@@ -2997,6 +3030,28 @@ func turnPhaseToProto(p session.AgentTurnPhase) v1.AgentTurnPhase {
 		return v1.AgentTurnPhase_AGENT_TURN_PHASE_ENDED
 	default:
 		return v1.AgentTurnPhase_AGENT_TURN_PHASE_UNSPECIFIED
+	}
+}
+
+func subAgentPhaseToSession(p agent.SubAgentPhase) session.SubAgentPhase {
+	switch p {
+	case agent.SubAgentStarted:
+		return session.SubAgentStarted
+	case agent.SubAgentFinished:
+		return session.SubAgentFinished
+	default:
+		return 0
+	}
+}
+
+func subAgentPhaseToProto(p session.SubAgentPhase) v1.SubAgentPhase {
+	switch p {
+	case session.SubAgentStarted:
+		return v1.SubAgentPhase_SUB_AGENT_PHASE_STARTED
+	case session.SubAgentFinished:
+		return v1.SubAgentPhase_SUB_AGENT_PHASE_FINISHED
+	default:
+		return v1.SubAgentPhase_SUB_AGENT_PHASE_UNSPECIFIED
 	}
 }
 

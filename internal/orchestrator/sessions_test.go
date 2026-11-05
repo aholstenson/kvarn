@@ -184,6 +184,55 @@ var _ = Describe("OrchestratorService persistent sessions", func() {
 			Expect(ended.Final).To(BeTrue())
 		})
 
+		It("carries the start and the end of a sub-agent run", func() {
+			mgr := session.NewManager(session.NewMemStore())
+			sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(mgr.EmitEvent(ctx, sess.ID, session.SubAgentEvent{
+				SessionID:   sess.ID,
+				AgentID:     "explore#1",
+				Name:        "explore",
+				Description: "Audit the change",
+				Phase:       session.SubAgentStarted,
+				Model:       "anthropic/claude-haiku-4-5",
+			})).To(Succeed())
+			Expect(mgr.EmitEvent(ctx, sess.ID, session.SubAgentEvent{
+				SessionID: sess.ID,
+				AgentID:   "explore#1",
+				Name:      "explore",
+				Phase:     session.SubAgentFinished,
+				Steps:     23,
+				Duration:  4*time.Minute + 12*time.Second,
+				Error:     "max steps reached",
+			})).To(Succeed())
+
+			addr := serveOrchestrator(orchestrator.NewServiceWithOpts(orchestrator.ServiceOpts{
+				SessionMgr:  mgr,
+				AuthEnabled: false,
+			}))
+			resp, err := client.NewOrchestrator(addr, "").ListSessionEvents(ctx,
+				&v1.ListSessionEventsRequest{SessionId: sess.ID})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Events).To(HaveLen(2))
+
+			started := resp.Events[0].GetSubAgent()
+			Expect(started).NotTo(BeNil())
+			Expect(started.Phase).To(Equal(v1.SubAgentPhase_SUB_AGENT_PHASE_STARTED))
+			Expect(started.AgentId).To(Equal("explore#1"))
+			Expect(started.Name).To(Equal("explore"))
+			Expect(started.Description).To(Equal("Audit the change"))
+			Expect(started.Model).To(Equal("anthropic/claude-haiku-4-5"))
+			Expect(resp.Events[0].Timestamp).NotTo(BeNil())
+
+			finished := resp.Events[1].GetSubAgent()
+			Expect(finished).NotTo(BeNil())
+			Expect(finished.Phase).To(Equal(v1.SubAgentPhase_SUB_AGENT_PHASE_FINISHED))
+			Expect(finished.Steps).To(Equal(int32(23)))
+			Expect(finished.DurationMs).To(Equal(int64(252000)))
+			Expect(finished.Error).To(Equal("max steps reached"))
+		})
+
 		It("streams the responding phase live without recording it", func() {
 			mgr := session.NewManager(session.NewMemStore())
 			sess, err := mgr.Create(ctx, session.CreateParams{ProjectName: "proj", Prompt: "prompt", Mode: "auto"})

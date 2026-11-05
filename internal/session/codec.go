@@ -28,6 +28,7 @@ const (
 	kindVMInfo          = "vm_info"
 	kindAgentTurn       = "agent_turn"
 	kindAgentRetry      = "agent_retry"
+	kindSubAgent        = "sub_agent"
 )
 
 // payloadCap bounds the serialized size of a single persisted event payload.
@@ -233,6 +234,18 @@ type agentRetryPayload struct {
 	Error       string `json:"error,omitempty"`
 }
 
+type subAgentPayload struct {
+	SessionID   string `json:"session_id"`
+	AgentID     string `json:"agent_id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Phase       int    `json:"phase"`
+	Model       string `json:"model,omitempty"`
+	Steps       int    `json:"steps,omitempty"`
+	DurationMs  int64  `json:"duration_ms,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
 type stepResultPayload struct {
 	SessionID string `json:"session_id"`
 	Name      string `json:"name"`
@@ -371,6 +384,24 @@ func encodeEvent(e Event) (kind string, payload []byte, durable bool, err error)
 			p.Error = trimField(p.Error, remaining)
 		})
 		return kindAgentRetry, b, true, err
+	case SubAgentEvent:
+		p := subAgentPayload{
+			SessionID:   ev.SessionID,
+			AgentID:     ev.AgentID,
+			Name:        ev.Name,
+			Description: ev.Description,
+			Phase:       int(ev.Phase),
+			Model:       ev.Model,
+			Steps:       ev.Steps,
+			DurationMs:  ev.Duration.Milliseconds(),
+			Error:       ev.Error,
+		}
+		b, err := marshalCapped(&p, func(remaining int) {
+			// The description is the parent's own words and short; the error
+			// is what can grow without bound.
+			p.Error = trimField(p.Error, remaining)
+		})
+		return kindSubAgent, b, true, err
 	case StepResultEvent:
 		p := stepResultPayload{
 			SessionID: ev.SessionID,
@@ -490,6 +521,22 @@ func decodeEvent(kind string, payload []byte) (Event, error) {
 			Model:       p.Model,
 			Error:       p.Error,
 		}, nil
+	case kindSubAgent:
+		var p subAgentPayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return nil, err
+		}
+		return SubAgentEvent{
+			SessionID:   p.SessionID,
+			AgentID:     p.AgentID,
+			Name:        p.Name,
+			Description: p.Description,
+			Phase:       SubAgentPhase(p.Phase),
+			Model:       p.Model,
+			Steps:       p.Steps,
+			Duration:    time.Duration(p.DurationMs) * time.Millisecond,
+			Error:       p.Error,
+		}, nil
 	case kindStepResult:
 		var p stepResultPayload
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -574,6 +621,8 @@ func trimmableLen(v any) int {
 	case *agentToolResultPayload:
 		return len(p.Result)
 	case *agentRetryPayload:
+		return len(p.Error)
+	case *subAgentPayload:
 		return len(p.Error)
 	case *stepResultPayload:
 		return len(p.Stdout) + len(p.Stderr)

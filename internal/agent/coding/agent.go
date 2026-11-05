@@ -108,6 +108,28 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 		mergeTarget, checkpointer = nil, nil
 	}
 
+	mainCfg := models.ClassConfigs[ModelMain]
+	c := &codingConversation{
+		models:    models,
+		agentCtx:  agentCtx,
+		mode:      mode,
+		mainCfg:   mainCfg,
+		textBufs:  make(map[string]*strings.Builder),
+		turns:     make(map[string]*turnState),
+		subModels: make(map[string]string),
+	}
+
+	// Sub-agent runs report through the same handlers as the parent loop, so
+	// their turns, tool calls and retries reach the watcher in the same shape.
+	var progress *SubAgentProgress
+	if agentCtx.OnProgress != nil {
+		progress = &SubAgentProgress{
+			Stream:    c.handleStreamingEvent,
+			Retry:     c.handleRetry,
+			Lifecycle: c.handleSubAgent,
+		}
+	}
+
 	toolkit := NewCodingToolkitWithOpts(CodingToolkitOpts{
 		Runner:       agentCtx.Runner,
 		WorkingDir:   agentCtx.WorkingDir,
@@ -121,13 +143,13 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 		HeadBranch:   agentCtx.Branch,
 		MergeTarget:  mergeTarget,
 		Checkpointer: checkpointer,
+		Progress:     progress,
 	})
 	systemPrompt := mode.SystemPrompt(agentCtx.ProjectName, agentCtx.RepoURL, agentCtx.Branch, agentCtx.RepoContext, subAgents, agentCtx.PullRequest)
 	if mergeTarget != nil {
 		systemPrompt += MergeInstructions(mergeTarget.Branch)
 	}
 
-	mainCfg := models.ClassConfigs[ModelMain]
 	maxOut := mainCfg.MaxOutputTokens
 	if maxOut == 0 {
 		maxOut = 16384
@@ -135,15 +157,6 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 	maxSteps := mainCfg.MaxSteps
 	if maxSteps == 0 {
 		maxSteps = 50
-	}
-
-	c := &codingConversation{
-		models:   models,
-		agentCtx: agentCtx,
-		mode:     mode,
-		mainCfg:  mainCfg,
-		textBufs: make(map[string]*strings.Builder),
-		turns:    make(map[string]*turnState),
 	}
 
 	opts := []llms.GenerateOption{
@@ -210,6 +223,9 @@ type codingConversation struct {
 	streamMu sync.Mutex
 	textBufs map[string]*strings.Builder
 	turns    map[string]*turnState
+	// subModels maps a running sub-agent to the model it calls, so its turn
+	// events can name that model and not the parent's.
+	subModels map[string]string
 
 	// validator carries what prompt checks remember between attempts.
 	validator validatorState
@@ -311,14 +327,31 @@ func (c *codingConversation) markResponding(agentID string) {
 	})
 }
 
-// modelID names the model an agent scope runs on. Only the parent loop's model
-// is known here; a sub-agent reports the model on its own events, and naming
-// the parent's would be worse than naming none.
+// modelID names the model an agent scope runs on. A scope this conversation
+// does not know, such as a validator run, names none, because naming the
+// parent's model would be worse. Callers must hold streamMu.
 func (c *codingConversation) modelID(agentID string) string {
-	if agentID != "" {
-		return ""
+	if agentID == "" {
+		return c.mainCfg.ModelID
 	}
-	return c.mainCfg.ModelID
+	return c.subModels[agentID]
+}
+
+// handleSubAgent reports the start or the end of a sub-agent run, and keeps
+// the per-run state only while the run is alive. Without the cleanup every run
+// of a long job would leave its turn state and text buffer behind.
+func (c *codingConversation) handleSubAgent(event agent.ProgressSubAgent) {
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	switch event.Phase {
+	case agent.SubAgentStarted:
+		c.subModels[event.AgentID] = event.Model
+	case agent.SubAgentFinished:
+		delete(c.subModels, event.AgentID)
+		delete(c.turns, event.AgentID)
+		delete(c.textBufs, event.AgentID)
+	}
+	c.agentCtx.OnProgress(event)
 }
 
 // streamAgentID names the agent a streaming or retry callback belongs to:

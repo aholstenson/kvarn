@@ -310,6 +310,39 @@ type AgentRetryEvent struct {
 
 func (AgentRetryEvent) isSessionEvent() {}
 
+// SubAgentPhase marks where one sub-agent run stands in its lifecycle.
+type SubAgentPhase int
+
+const (
+	// SubAgentStarted is the run starting its own model loop.
+	SubAgentStarted SubAgentPhase = 1
+	// SubAgentFinished is the run returning to the parent agent.
+	SubAgentFinished SubAgentPhase = 2
+)
+
+// SubAgentEvent brackets one sub-agent run. The parent's tool call stays open
+// for the whole run, so these two events are what tell a watcher which of
+// several parallel runs the parent still waits on.
+type SubAgentEvent struct {
+	SessionID string
+	// AgentID is the identifier every event of this run carries.
+	AgentID string
+	// Name is the sub-agent type, such as "explore".
+	Name string
+	// Description is why the parent started the run.
+	Description string
+	Phase       SubAgentPhase
+	Model       string
+	// Steps is how many model calls the run made. Set on SubAgentFinished.
+	Steps int
+	// Duration is how long the run took. Set on SubAgentFinished.
+	Duration time.Duration
+	// Error is why the run failed. Empty when it returned an answer.
+	Error string
+}
+
+func (SubAgentEvent) isSessionEvent() {}
+
 // StepPhase indicates which phase a step belongs to.
 type StepPhase int
 
