@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	llms "github.com/aholstenson/llms-go"
 
@@ -252,16 +253,30 @@ func (c *codingConversation) turn(agentID string) *turnState {
 	return t
 }
 
+// modelStallTimeout is how long a model response that has started may stay
+// silent before the attempt fails and is retried. Without it, a connection
+// that dies mid-response blocks the job until the OS gives up on the TCP
+// connection, and nothing reports the hang.
+//
+// The budget counts bytes from the provider, and provider keepalives are
+// bytes, so a model that reasons for minutes without tokens does not reach it.
+// The value is well above the keepalive interval of every supported provider.
+//
+// There is no request timeout next to it on purpose: for a provider that does
+// not stream, that budget covers the whole generation, and a slow answer is
+// not a failed one.
+const modelStallTimeout = 120 * time.Second
+
 // retryOptions builds the retry half of a generate call: how many attempts the
-// model gets, and where a failed one is reported. notify may be nil for a call
-// nobody is watching.
+// model gets, when a silent response counts as a failed attempt, and where a
+// failed one is reported. notify may be nil for a call nobody is watching.
 //
 // Retries are configured per model entry rather than left at the llms-go
 // default because a job is long-running and unattended: a provider that is
 // briefly unavailable should cost the run a pause, not the whole conversation
 // that has been built up to that point.
 func retryOptions(cfg modelcfg.Entry, notify llms.RetryNotifyFunc) []llms.GenerateOption {
-	var opts []llms.GenerateOption
+	opts := []llms.GenerateOption{llms.WithStallTimeout(modelStallTimeout)}
 	if cfg.MaxAttempts > 0 {
 		opts = append(opts, llms.WithMaxRetries(cfg.MaxAttempts-1))
 	}

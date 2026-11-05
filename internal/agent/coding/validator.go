@@ -290,6 +290,7 @@ func (c *codingConversation) requestVerdict(
 		llms.WithMessages(messages...),
 		llms.WithResponseSchema[PromptVerdict](),
 		llms.WithMaxOutputTokens(verdictMaxOutputTokens),
+		llms.WithStallTimeout(modelStallTimeout),
 	}
 	if maxAttempts > 0 {
 		opts = append(opts, llms.WithMaxRetries(maxAttempts-1))

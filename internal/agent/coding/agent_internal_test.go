@@ -238,15 +238,15 @@ var _ = Describe("conversation followup", func() {
 
 var _ = Describe("retryOptions", func() {
 	It("turns an attempt budget into the retries that follow the first try", func() {
-		Expect(retryOptions(modelcfg.Entry{MaxAttempts: 4}, nil)).To(HaveLen(1))
+		Expect(retryOptions(modelcfg.Entry{MaxAttempts: 4}, nil)).To(HaveLen(2))
 	})
 
-	It("leaves the library default alone when no budget is configured", func() {
-		Expect(retryOptions(modelcfg.Entry{}, nil)).To(BeEmpty())
+	It("leaves the retry count at the library default when no budget is configured", func() {
+		Expect(retryOptions(modelcfg.Entry{}, nil)).To(HaveLen(1))
 	})
 
 	It("registers the notify callback when one is given", func() {
 		notify := func(context.Context, llms.RetryNotice) {}
-		Expect(retryOptions(modelcfg.Entry{MaxAttempts: 4}, notify)).To(HaveLen(2))
+		Expect(retryOptions(modelcfg.Entry{MaxAttempts: 4}, notify)).To(HaveLen(3))
 	})
 })
