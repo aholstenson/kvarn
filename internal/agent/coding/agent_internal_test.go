@@ -249,4 +249,29 @@ var _ = Describe("retryOptions", func() {
 		notify := func(context.Context, llms.RetryNotice) {}
 		Expect(retryOptions(modelcfg.Entry{MaxAttempts: 4}, notify)).To(HaveLen(3))
 	})
+
+	It("limits the wait for the response to start for a provider that always streams", func() {
+		Expect(retryOptions(modelcfg.Entry{ModelID: "openai/gpt-6-luna"}, nil)).To(HaveLen(2))
+		Expect(retryOptions(modelcfg.Entry{ModelID: "anthropic/claude-sonnet-4-6"}, nil)).To(HaveLen(2))
+	})
+
+	It("leaves the wait for the response unlimited where it would limit the whole generation", func() {
+		Expect(retryOptions(modelcfg.Entry{ModelID: "google/gemini-3-pro"}, nil)).To(HaveLen(1))
+		Expect(retryOptions(modelcfg.Entry{ModelID: "openrouter/openai/gpt-6-luna"}, nil)).To(HaveLen(1))
+		Expect(retryOptions(modelcfg.Entry{ModelID: "main"}, nil)).To(HaveLen(1))
+	})
+})
+
+var _ = Describe("alwaysStreams", func() {
+	It("reads the provider from the prefix of the model ID", func() {
+		Expect(alwaysStreams("openai/gpt-6-luna")).To(BeTrue())
+		Expect(alwaysStreams("anthropic/claude-haiku-4-5")).To(BeTrue())
+		Expect(alwaysStreams("google/gemini-3-pro")).To(BeFalse())
+		Expect(alwaysStreams("openrouter/anthropic/claude-sonnet-4-6")).To(BeFalse())
+	})
+
+	It("gives false for an alias, whose provider is not known", func() {
+		Expect(alwaysStreams("main")).To(BeFalse())
+		Expect(alwaysStreams("")).To(BeFalse())
+	})
 })

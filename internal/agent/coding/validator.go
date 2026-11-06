@@ -14,6 +14,7 @@ import (
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/agent"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
+	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 	"github.com/aholstenson/kvarn/internal/sandbox"
 )
 
@@ -220,10 +221,10 @@ func (c *codingConversation) ValidatePrompt(ctx context.Context, check agent.Pro
 	}
 	c.checkBudget()
 
-	verdict, err := c.requestVerdict(ctx, model, cfg.ReasoningEffort, cfg.MaxAttempts, sess.Messages())
+	verdict, err := c.requestVerdict(ctx, model, cfg, sess.Messages())
 	if err != nil && llms.IsRetryable(err) && ctx.Err() == nil {
 		slog.Warn("the validator model is unavailable; asking for the verdict once more", "step", check.Step.Name, "error", err)
-		verdict, err = c.requestVerdict(ctx, model, cfg.ReasoningEffort, cfg.MaxAttempts, sess.Messages())
+		verdict, err = c.requestVerdict(ctx, model, cfg, sess.Messages())
 	}
 	if err != nil {
 		return sandbox.PromptVerdict{}, timedOut(err)
@@ -282,7 +283,7 @@ func (c *codingConversation) cleanUpAfterCheck(ctx context.Context, step, shellI
 // has finished looking. It is a separate call because a verdict has to be
 // read by code: free text that says the change "looks fine" is not one.
 func (c *codingConversation) requestVerdict(
-	ctx context.Context, model llms.Model, effort llms.Effort, maxAttempts int, history []*llms.Message,
+	ctx context.Context, model llms.Model, cfg modelcfg.Entry, history []*llms.Message,
 ) (*PromptVerdict, error) {
 	messages := append(history, llms.NewMessage(llms.RoleUser, llms.NewTextPart(verdictPrompt)))
 	opts := []llms.GenerateOption{
@@ -290,13 +291,10 @@ func (c *codingConversation) requestVerdict(
 		llms.WithMessages(messages...),
 		llms.WithResponseSchema[PromptVerdict](),
 		llms.WithMaxOutputTokens(verdictMaxOutputTokens),
-		llms.WithStallTimeout(modelStallTimeout),
 	}
-	if maxAttempts > 0 {
-		opts = append(opts, llms.WithMaxRetries(maxAttempts-1))
-	}
-	if effort != "" {
-		opts = append(opts, llms.WithReasoningEffort(effort))
+	opts = append(opts, retryOptions(cfg, nil)...)
+	if cfg.ReasoningEffort != "" {
+		opts = append(opts, llms.WithReasoningEffort(cfg.ReasoningEffort))
 	}
 	result, err := model.GenerateContent(ctx, opts...)
 	c.checkBudget()

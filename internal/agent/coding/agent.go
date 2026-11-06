@@ -261,15 +261,44 @@ func (c *codingConversation) turn(agentID string) *turnState {
 // The budget counts bytes from the provider, and provider keepalives are
 // bytes, so a model that reasons for minutes without tokens does not reach it.
 // The value is well above the keepalive interval of every supported provider.
-//
-// There is no request timeout next to it on purpose: for a provider that does
-// not stream, that budget covers the whole generation, and a slow answer is
-// not a failed one.
 const modelStallTimeout = 120 * time.Second
 
+// modelResponseTimeout is how long an attempt may wait for the provider to
+// start its response. The stall timeout only starts to count when the response
+// has started, so without this budget a request that the provider accepts but
+// never answers waits forever.
+//
+// HTTP/2 health pings do not find that case. The nearest HTTP/2 server answers
+// the pings, and for a hosted provider that is a CDN or a load balancer, which
+// can stay healthy while the model backend behind it is stuck.
+//
+// A streaming provider sends its response headers when the stream opens,
+// normally within a few seconds, so this value only stops a request that is
+// really stuck.
+const modelResponseTimeout = 90 * time.Second
+
+// streamingProviders are the providers that always stream a response. For
+// these, the response timeout covers only the time to open the stream. Other
+// providers do not stream when no streaming callback is set, and then send
+// nothing until the answer is complete, so the same budget would limit the
+// whole generation and fail a slow but healthy answer.
+var streamingProviders = map[string]bool{
+	string(llms.GenAISystemOpenAI):    true,
+	string(llms.GenAISystemAnthropic): true,
+}
+
+// alwaysStreams reports whether the model ID names a provider in
+// streamingProviders. An ID without a provider prefix (an alias) gives false,
+// because the provider behind it is not known here.
+func alwaysStreams(modelID string) bool {
+	provider, _, ok := strings.Cut(modelID, "/")
+	return ok && streamingProviders[provider]
+}
+
 // retryOptions builds the retry half of a generate call: how many attempts the
-// model gets, when a silent response counts as a failed attempt, and where a
-// failed one is reported. notify may be nil for a call nobody is watching.
+// model gets, when a silent or unanswered request counts as a failed attempt,
+// and where a failed one is reported. notify may be nil for a call nobody is
+// watching.
 //
 // Retries are configured per model entry rather than left at the llms-go
 // default because a job is long-running and unattended: a provider that is
@@ -277,6 +306,9 @@ const modelStallTimeout = 120 * time.Second
 // that has been built up to that point.
 func retryOptions(cfg modelcfg.Entry, notify llms.RetryNotifyFunc) []llms.GenerateOption {
 	opts := []llms.GenerateOption{llms.WithStallTimeout(modelStallTimeout)}
+	if alwaysStreams(cfg.ModelID) {
+		opts = append(opts, llms.WithRequestTimeout(modelResponseTimeout))
+	}
 	if cfg.MaxAttempts > 0 {
 		opts = append(opts, llms.WithMaxRetries(cfg.MaxAttempts-1))
 	}
