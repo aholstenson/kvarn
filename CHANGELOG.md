@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.0](https://github.com/aholstenson/kvarn/compare/v0.8.0...v0.9.0) (2026-11-07)
+
+
+### Features
+
+* Enable stall timeout for agents ([958ed40](https://github.com/aholstenson/kvarn/commit/958ed406e8d062e3df09c04a8a7ed2b982cdd8a1))
+* Keep PR title and description current after follow-ups ([17f0460](https://github.com/aholstenson/kvarn/commit/17f046066c8fc2f7b255016c1bd70fa89bbf1a43))
+* Let the coding agent hand off tasks to a general-purpose sub-agent ([b01283f](https://github.com/aholstenson/kvarn/commit/b01283ff94efca062611a15934d4c08b39f7916c))
+* Set request timeout on LLM calls ([eea81f6](https://github.com/aholstenson/kvarn/commit/eea81f6c30ebc8bacc549fbbd1e0279db0d1e32c))
+* Show sub-agent progress and event times in jobs watch ([4ea91fe](https://github.com/aholstenson/kvarn/commit/4ea91feb1d1baa33ff3ae43ce7775446548b9d67))
+* Support attachments for jobs ([6018081](https://github.com/aholstenson/kvarn/commit/6018081514feb0bc305ce40549135d88c5d93a69))
+* Support validation prompts via kvarn.yml and API ([972855f](https://github.com/aholstenson/kvarn/commit/972855f64f6042fcafd2e9c83804c961938e94d8))
+* Update llms-go to 0.12.0 ([912ded6](https://github.com/aholstenson/kvarn/commit/912ded63921a4264074d3bf4f625461415087bb4))
+* Write PR descriptions that explain the change ([1c40538](https://github.com/aholstenson/kvarn/commit/1c405383225e4a8b4ddc6a84a76be785161271d8))
+
 ## [0.8.0](https://github.com/aholstenson/kvarn/compare/v0.7.0...v0.8.0) (2026-10-13)
 
 
