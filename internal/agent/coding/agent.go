@@ -15,8 +15,11 @@ import (
 	"github.com/aholstenson/kvarn/internal/agent"
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
+	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 	modelcfg "github.com/aholstenson/kvarn/internal/config/model"
 )
+
+var _ agent.PullRequestReviser = (*codingConversation)(nil)
 
 // summaryMaxOutputTokens bounds the summary call. It is well above what a
 // title and a few paragraphs need because a repository can request sections,
@@ -503,32 +506,10 @@ func (c *codingConversation) Summarize(ctx context.Context) (*agent.Result, erro
 		}
 	}
 
-	summary, raw, err := c.requestSummary(ctx, system, messages)
+	summary, err := c.writeSummary(ctx, system, messages, content)
 	if err != nil {
 		slog.Warn("failed to generate summary, using default", "error", err)
 		return fallback(), nil
-	}
-
-	// A title that does not name the change, a title over budget, or a missing
-	// required section cannot be fixed on the host without inventing text, so
-	// the model gets one more chance with the problems named. One retry, not a
-	// loop: the second answer is either better or the configuration is asking
-	// for something the run cannot supply, and both the title and the
-	// placeholder below degrade honestly.
-	if problems := summaryProblems(*summary, content); len(problems) > 0 {
-		slog.Info("summary did not meet the configured requirements; asking again", "problems", problems)
-		retryMessages := append(messages,
-			llms.NewMessage(llms.RoleAssistant, llms.NewTextPart(raw)),
-			llms.NewMessage(llms.RoleUser, llms.NewTextPart(retryPrompt(problems))))
-		retried, _, retryErr := c.requestSummary(ctx, system, retryMessages)
-		if retryErr != nil {
-			slog.Warn("failed to regenerate summary; using the first one", "error", retryErr)
-		} else {
-			if remaining := summaryProblems(*retried, content); len(remaining) > 0 {
-				slog.Warn("summary still does not meet the configured requirements", "problems", remaining)
-			}
-			summary = retried
-		}
 	}
 
 	// A title that survives the retry as filler is worse than no title at all:
@@ -546,6 +527,87 @@ func (c *codingConversation) Summarize(ctx context.Context) (*agent.Result, erro
 		Description: renderBody(summary.Description, content.BodySections, summary.Sections),
 		Cost:        finalCost(),
 	}, nil
+}
+
+// RevisePullRequest asks the model to revise the title and description of the
+// pull request the run committed onto, so they describe the pull request as a
+// whole after the run's commit.
+//
+// Unlike Summarize it has no generic fallback. A revision replaces text that a
+// person may already have read, and a placeholder is worse than the text it
+// would replace, so a failed call returns its error and the caller keeps the
+// current text.
+func (c *codingConversation) RevisePullRequest(ctx context.Context, in agent.PullRequestRevision) (*agent.Result, error) {
+	if c.agentCtx.Cost != nil {
+		ctx = llms.WithMetrics(ctx, c.agentCtx.Cost.Recorder())
+	}
+
+	content := c.agentCtx.PullRequest
+	var repoInstructions string
+	if rc := c.agentCtx.RepoContext; rc != nil {
+		repoInstructions = rc.Instructions
+	}
+
+	system := summarySystemPrompt(content, repoInstructions)
+	messages := append(c.sess.Messages(),
+		llms.NewMessage(llms.RoleUser, llms.NewTextPart(revisionPrompt(content, in))))
+
+	summary, err := c.writeSummary(ctx, system, messages, content)
+	if err != nil {
+		return nil, fmt.Errorf("revise pull request: %w", err)
+	}
+
+	// A title that is still filler after the retry would replace one somebody
+	// chose. The current title is at worst out of date, so it stays.
+	title := strings.TrimSpace(summary.Title)
+	if title == "" || stubTitle(title) {
+		slog.Warn("revised title is a placeholder; keeping the current title", "title", title)
+		title = strings.TrimSpace(in.Title)
+	}
+
+	var report cost.Report
+	if c.agentCtx.Cost != nil {
+		report = c.agentCtx.Cost.Snapshot()
+	}
+	return &agent.Result{
+		Title:       title,
+		Description: renderBody(summary.Description, content.BodySections, summary.Sections),
+		Cost:        report,
+	}, nil
+}
+
+// writeSummary requests a structured summary and asks once more when the
+// answer does not meet the configured requirements.
+//
+// A title that does not name the change, a title over budget, or a missing
+// required section cannot be fixed on the host without inventing text, so the
+// model gets one more chance with the problems named. One retry, not a loop:
+// the second answer is either better or the configuration is asking for
+// something the run cannot supply, and the caller's title check and the
+// not-provided placeholder degrade honestly.
+func (c *codingConversation) writeSummary(
+	ctx context.Context, system string, messages []*llms.Message, content forgeconfig.Content,
+) (*AgentSummary, error) {
+	summary, raw, err := c.requestSummary(ctx, system, messages)
+	if err != nil {
+		return nil, err
+	}
+	if problems := summaryProblems(*summary, content); len(problems) > 0 {
+		slog.Info("summary did not meet the configured requirements; asking again", "problems", problems)
+		retryMessages := append(messages,
+			llms.NewMessage(llms.RoleAssistant, llms.NewTextPart(raw)),
+			llms.NewMessage(llms.RoleUser, llms.NewTextPart(retryPrompt(problems))))
+		retried, _, retryErr := c.requestSummary(ctx, system, retryMessages)
+		if retryErr != nil {
+			slog.Warn("failed to regenerate summary; using the first one", "error", retryErr)
+		} else {
+			if remaining := summaryProblems(*retried, content); len(remaining) > 0 {
+				slog.Warn("summary still does not meet the configured requirements", "problems", remaining)
+			}
+			summary = retried
+		}
+	}
+	return summary, nil
 }
 
 // requestSummary makes one structured-output call and returns the parsed

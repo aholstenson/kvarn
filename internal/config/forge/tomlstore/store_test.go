@@ -263,6 +263,27 @@ quote_task = "collapsed"
 			Expect(fc.PullRequest.QuoteTask).To(Equal(forgeconfig.QuoteOff))
 		})
 
+		It("reads and round-trips the follow-up update toggle", func() {
+			path := filepath.Join(tmpDir, "forges.toml")
+			Expect(os.WriteFile(path, []byte(`[defaults.pull_request]
+update_on_follow_up = false
+`), 0644)).To(Succeed())
+
+			d, err := store.Defaults(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(d.PullRequest.UpdateOnFollowUp).To(HaveValue(BeFalse()))
+
+			on := true
+			Expect(store.Put(ctx, &forgeconfig.ForgeConfig{
+				Name: "gh", Type: "github",
+				PullRequest: forgeconfig.PRContent{UpdateOnFollowUp: &on},
+			})).To(Succeed())
+
+			fc, err := store.Get(ctx, "gh")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fc.PullRequest.UpdateOnFollowUp).To(HaveValue(BeTrue()))
+		})
+
 		It("fails the load on an unknown quote mode rather than ignoring it", func() {
 			path := filepath.Join(tmpDir, "forges.toml")
 			Expect(os.WriteFile(path, []byte(`[defaults.pull_request]

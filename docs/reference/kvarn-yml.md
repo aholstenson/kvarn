@@ -553,12 +553,14 @@ position, and a name the mode introduces is appended.
 ### What this block cannot set
 
 Body footers, the comment headers, commit trailers, whether a comment carries the
-work log or the cost, and how much of the request that started the run it quotes
-back (`quote_task`) are configured by the operator in
+work log or the cost, how much of the request that started the run it quotes
+back (`quote_task`), and whether a follow-up revises the pull request text
+(`update_on_follow_up`) are configured by the operator in
 [`forges.toml`](forges-toml.md) and [`projects.toml`](projects-toml.md). This
 file is read from the branch a job runs on, the same trust boundary `modes` and
 `setup.steps` sit on, so a run that could set them would be able to rewrite its
-own attribution — or suppress the record of what it was asked to do.
+own attribution, suppress the record of what it was asked to do, or decide for
+itself what it may overwrite.
 
 Operator instructions are not replaced by anything here. Both sets reach the
 summary, labelled by origin, and the repository's read last.

@@ -84,6 +84,9 @@ type Row struct {
 	// content is stored apart, keyed by digest, so reading a session never
 	// reads the bytes.
 	AttachmentsJSON string
+	// PRWrittenJSON is the pull request text the session last wrote, as a JSON
+	// object, or "" when it wrote none.
+	PRWrittenJSON string
 }
 
 // SessionToRow converts a Session into its persisted Row form, marshalling the
@@ -110,6 +113,14 @@ func SessionToRow(s *Session) (Row, error) {
 			return Row{}, fmt.Errorf("marshal attachments: %w", err)
 		}
 		attachmentsJSON = string(b)
+	}
+	prWrittenJSON := ""
+	if s.PullRequestWritten != nil {
+		b, err := json.Marshal(s.PullRequestWritten)
+		if err != nil {
+			return Row{}, fmt.Errorf("marshal pull request text: %w", err)
+		}
+		prWrittenJSON = string(b)
 	}
 	return Row{
 		ID:              s.ID,
@@ -138,6 +149,7 @@ func SessionToRow(s *Session) (Row, error) {
 		Continuation:    s.Continuation,
 		MetadataJSON:    metadataJSON,
 		AttachmentsJSON: attachmentsJSON,
+		PRWrittenJSON:   prWrittenJSON,
 	}, nil
 }
 
@@ -160,6 +172,13 @@ func RowToSession(r Row) (*Session, error) {
 	if r.AttachmentsJSON != "" && r.AttachmentsJSON != "[]" {
 		if err := json.Unmarshal([]byte(r.AttachmentsJSON), &attachments); err != nil {
 			return nil, fmt.Errorf("unmarshal attachments: %w", err)
+		}
+	}
+	var prWritten *PullRequestText
+	if r.PRWrittenJSON != "" {
+		prWritten = &PullRequestText{}
+		if err := json.Unmarshal([]byte(r.PRWrittenJSON), prWritten); err != nil {
+			return nil, fmt.Errorf("unmarshal pull request text: %w", err)
 		}
 	}
 	return &Session{
@@ -189,6 +208,8 @@ func RowToSession(r Row) (*Session, error) {
 		Continuation:    r.Continuation,
 		Metadata:        metadata,
 		Attachments:     attachments,
+
+		PullRequestWritten: prWritten,
 	}, nil
 }
 

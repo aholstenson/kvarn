@@ -213,6 +213,32 @@ type Session struct {
 	// written at creation and never updated. Reads return them without their
 	// content; AttachmentData returns the bytes.
 	Attachments []Attachment
+	// PullRequestWritten is the pull request title and body as this session
+	// left them, or nil when it wrote neither. A session that opened its pull
+	// request sets it, and so does a follow-up that revised one.
+	//
+	// It is the record that a pull request is kvarn's to revise. A pull
+	// request that no session holds this for was opened by somebody else, or
+	// by a run whose session has since been pruned, and is left alone.
+	PullRequestWritten *PullRequestText
+}
+
+// PullRequestText is the text kvarn last wrote to a pull request, one field at
+// a time.
+//
+// Each field records kvarn's own last write, not what the forge holds now.
+// When a person edits the title, a follow-up that revises only the body
+// carries the old title forward unchanged, so the title never again matches
+// what the forge holds and stays the person's.
+type PullRequestText struct {
+	Title string `json:"title"`
+	// Body is the body exactly as it was sent, footer included, so it can be
+	// compared with what the forge returns.
+	Body string `json:"body"`
+	// Description is Body without the operator's footer. A revision starts
+	// from it, because the footer is applied again afterwards and a model
+	// shown it would be tempted to copy it.
+	Description string `json:"description"`
 }
 
 // Attachment is one file a submission carried.
@@ -556,6 +582,8 @@ type Manager interface {
 	// copy of an answer that a mode delivering nowhere would otherwise leave
 	// only in the event log.
 	SetResult(ctx context.Context, id, result string) error
+	// SetPullRequestWritten records the pull request text the session wrote.
+	SetPullRequestWritten(ctx context.Context, id string, text PullRequestText) error
 	Fail(ctx context.Context, id string, err error) error
 	// EmitEvent persists the event when its kind is durable and broadcasts it to
 	// watchers; ephemeral kinds are broadcast live-only with Seq 0.

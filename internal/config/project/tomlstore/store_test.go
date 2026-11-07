@@ -213,6 +213,26 @@ report_cost_on_pr = false
 			Expect(proj.PullRequest.CommentHeaders.NewPullRequest).To(Equal("**Issue:** {{ .Metadata.issue_id }}"))
 		})
 
+		It("reads and round-trips the follow-up update toggle", func() {
+			path := filepath.Join(tmpDir, "projects.toml")
+			Expect(os.WriteFile(path, []byte(`[projects.app]
+repo = "org/app"
+
+[projects.app.pull_request]
+update_on_follow_up = false
+`), 0644)).To(Succeed())
+
+			proj, err := store.Get(ctx, "app")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(proj.PullRequest.UpdateOnFollowUp).To(HaveValue(BeFalse()))
+
+			Expect(store.Put(ctx, proj)).To(Succeed())
+			proj, err = store.Get(ctx, "app")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(proj.PullRequest.UpdateOnFollowUp).To(HaveValue(BeFalse()),
+				"a block that sets only this key must not be dropped as empty")
+		})
+
 		It("keeps a project that only sets a comment header", func() {
 			path := filepath.Join(tmpDir, "projects.toml")
 			Expect(store.Put(ctx, &project.Project{

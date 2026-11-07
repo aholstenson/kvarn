@@ -567,4 +567,72 @@ var _ = Describe("GitHub Forge", func() {
 			Expect(err.Error()).To(ContainSubstring("HTTP 401"))
 		})
 	})
+
+	Describe("UpdatePullRequest", func() {
+		var (
+			server       *httptest.Server
+			gh           *forgegithub.GitHub
+			requests     int
+			capturedBody map[string]any
+			status       int
+		)
+
+		BeforeEach(func() {
+			requests = 0
+			capturedBody = nil
+			status = http.StatusOK
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				Expect(r.URL.Path).To(Equal("/repos/owner/repo/pulls/42"))
+				Expect(r.Method).To(Equal(http.MethodPatch))
+				Expect(r.Header.Get("Authorization")).To(Equal("Bearer test-token"))
+				Expect(json.NewDecoder(r.Body).Decode(&capturedBody)).To(Succeed())
+				w.WriteHeader(status)
+				w.Write([]byte(`{}`))
+			}))
+			DeferCleanup(server.Close)
+			gh = forgegithub.New(
+				forgegithub.WithAPIBase(server.URL),
+				forgegithub.WithHTTPClient(server.Client()),
+			)
+		})
+
+		update := func(title, body *string) error {
+			return gh.UpdatePullRequest(context.Background(), forge.UpdatePROpts{
+				RepoURL:     "https://github.com/owner/repo.git",
+				PRRef:       "42",
+				Title:       title,
+				Body:        body,
+				Credentials: scm.StaticCredentials(&scm.Credentials{Token: "test-token"}),
+			})
+		}
+		ptr := func(s string) *string { return &s }
+
+		It("sends both fields when both are set", func() {
+			Expect(update(ptr("New title"), ptr("New body"))).To(Succeed())
+			Expect(capturedBody).To(Equal(map[string]any{"title": "New title", "body": "New body"}))
+		})
+
+		It("leaves out a field that is not set", func() {
+			Expect(update(nil, ptr("New body"))).To(Succeed())
+			Expect(capturedBody).To(Equal(map[string]any{"body": "New body"}))
+		})
+
+		It("makes no request when nothing is set", func() {
+			Expect(update(nil, nil)).To(Succeed())
+			Expect(requests).To(BeZero())
+		})
+
+		It("truncates a title the API would reject", func() {
+			Expect(update(ptr(strings.Repeat("a", 300)), nil)).To(Succeed())
+			Expect([]rune(capturedBody["title"].(string))).To(HaveLen(256))
+		})
+
+		It("returns an error on a non-200 response", func() {
+			status = http.StatusUnprocessableEntity
+			err := update(ptr("t"), nil)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("HTTP 422"))
+		})
+	})
 })

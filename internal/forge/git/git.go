@@ -68,3 +68,7 @@ func (g *Git) GetPullRequestDiff(_ context.Context, _ forge.GetPROpts) (string, 
 func (g *Git) PostComment(_ context.Context, _ forge.PostCommentOpts) error {
 	return errors.New("posting comments is not supported by the git forge")
 }
+
+func (g *Git) UpdatePullRequest(_ context.Context, _ forge.UpdatePROpts) error {
+	return errors.New("updating pull requests is not supported by the git forge")
+}

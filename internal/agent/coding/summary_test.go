@@ -7,6 +7,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/aholstenson/kvarn/internal/agent"
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 )
 
@@ -71,6 +72,57 @@ var _ = Describe("summaryPrompt", func() {
 
 	It("asks for the description before the title, as the schema orders them", func() {
 		out := summaryPrompt(forgeconfig.Content{TitleMaxLength: 72}, nil)
+		Expect(strings.Index(out, "- description:")).To(
+			BeNumerically("<", strings.Index(out, "- title:")))
+	})
+})
+
+var _ = Describe("revisionPrompt", func() {
+	in := agent.PullRequestRevision{
+		Title:       "Add a helper",
+		Description: "Adds a small helper.",
+		Diff:        "diff --git a/helper.go b/helper.go\n+func helper() {}",
+	}
+
+	It("carries the current title, description and diff", func() {
+		out := revisionPrompt(forgeconfig.Content{TitleMaxLength: 72}, in)
+		Expect(out).To(ContainSubstring("Current title:\n\nAdd a helper"))
+		Expect(out).To(ContainSubstring("<description>\nAdds a small helper.\n</description>"))
+		Expect(out).To(ContainSubstring("+func helper() {}"))
+		Expect(out).To(ContainSubstring("max 72 chars"))
+	})
+
+	It("asks to keep text that is still correct and not to narrate the review", func() {
+		out := revisionPrompt(forgeconfig.Content{TitleMaxLength: 72}, in)
+		Expect(out).To(ContainSubstring("Keep all text that is still correct"))
+		Expect(out).To(ContainSubstring("Describe the result, not the review"))
+	})
+
+	It("leaves the diff out when there is none", func() {
+		noDiff := in
+		noDiff.Diff = ""
+		Expect(revisionPrompt(forgeconfig.Content{TitleMaxLength: 72}, noDiff)).NotTo(ContainSubstring("```diff"))
+	})
+
+	It("cuts a long diff and says so", func() {
+		long := in
+		long.Diff = strings.Repeat("+x\n", revisionDiffCap)
+		out := revisionPrompt(forgeconfig.Content{TitleMaxLength: 72}, long)
+		Expect(len(out)).To(BeNumerically("<", revisionDiffCap+4096))
+		Expect(out).To(ContainSubstring("The diff is truncated."))
+	})
+
+	It("asks for the requested sections apart from the description", func() {
+		out := revisionPrompt(forgeconfig.Content{
+			TitleMaxLength: 72,
+			BodySections:   []forgeconfig.Section{{Name: "Testing", Required: true}},
+		}, in)
+		Expect(out).To(ContainSubstring("above its first requested section"))
+		Expect(out).To(ContainSubstring("- Testing (required)"))
+	})
+
+	It("asks for the description before the title, as the schema orders them", func() {
+		out := revisionPrompt(forgeconfig.Content{TitleMaxLength: 72}, in)
 		Expect(strings.Index(out, "- description:")).To(
 			BeNumerically("<", strings.Index(out, "- title:")))
 	})

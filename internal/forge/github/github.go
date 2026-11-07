@@ -488,6 +488,65 @@ func (g *GitHub) PostComment(ctx context.Context, opts forge.PostCommentOpts) er
 	return nil
 }
 
+func (g *GitHub) UpdatePullRequest(ctx context.Context, opts forge.UpdatePROpts) error {
+	if opts.Title == nil && opts.Body == nil {
+		return nil
+	}
+	owner, repo, err := ParseRepoURL(opts.RepoURL)
+	if err != nil {
+		return err
+	}
+	number, err := prNumber(opts.PRRef)
+	if err != nil {
+		return err
+	}
+
+	creds, err := scm.Resolve(ctx, opts.Credentials)
+	if err != nil {
+		return err
+	}
+	token := creds.APIToken()
+
+	// Only the fields the caller set go in the request. GitHub keeps every
+	// field a PATCH leaves out, which is what lets a run that owns only the
+	// body leave a title somebody else wrote alone.
+	body := map[string]any{}
+	if opts.Title != nil {
+		body["title"] = clampTitle(*opts.Title)
+	}
+	if opts.Body != nil {
+		body["body"] = *opts.Body
+	}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal PR update: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", g.apiBase, owner, repo, number)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, bytes.NewReader(bodyJSON))
+	if err != nil {
+		return fmt.Errorf("create PR update request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send PR update request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("update PR: HTTP %d (read response: %v)", resp.StatusCode, err)
+		}
+		return fmt.Errorf("update PR: HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
 func (g *GitHub) addLabels(ctx context.Context, owner, repo string, number int, labels []string, token string) error {
 	body := map[string]any{"labels": labels}
 	bodyJSON, err := json.Marshal(body)

@@ -102,6 +102,7 @@ pr_comment = "{{ with .Metadata.issue_id }}Automated review for **{{ . }}**{{ en
 | `report_worklog_on_pr` | bool | Include the collapsible work log in the comment a delivery posts. |
 | `report_cost_on_pr` | bool | Include a cost section in that comment. |
 | `quote_task` | string | How much of the request that started the run that comment quotes back: `auto` (default), `collapsed`, `full` or `off`. |
+| `update_on_follow_up` | bool | After a follow-up commit, revise the title and description of a pull request kvarn opened. Defaults to `true`. A field a person edited is never changed. See [Keeping the title and description current](../how-to/follow-up-on-a-pull-request.md#keeping-the-title-and-description-current). |
 
 Section structure — the headings a body must carry — is declared by the
 repository in [`kvarn.yml`](kvarn-yml.md#pull_request), not here.

@@ -312,6 +312,27 @@ type PromptValidator interface {
 	ValidatePrompt(ctx context.Context, check PromptCheck) (sandbox.PromptVerdict, error)
 }
 
+// PullRequestRevision is what a revision of a pull request's title and
+// description starts from.
+type PullRequestRevision struct {
+	// Title and Description are the pull request's text as it stands now.
+	// Description has no operator footer, which is applied again afterwards.
+	Title       string
+	Description string
+	// Diff is the whole pull request's diff, including the commit the run just
+	// pushed. It can be truncated, or empty when the forge could not supply it.
+	Diff string
+}
+
+// PullRequestReviser is implemented by a Conversation that can revise the
+// title and description of the pull request its run committed onto, so they
+// describe the pull request as a whole after the run's commit. The revision
+// runs in the conversation itself, because the run's own history is the best
+// record of what changed and why.
+type PullRequestReviser interface {
+	RevisePullRequest(ctx context.Context, in PullRequestRevision) (*Result, error)
+}
+
 // PromptJudge returns the judge for prompt validation steps in a run driven
 // by conv, or nil when conv cannot check them. A nil judge makes validation
 // skip prompt steps rather than pass them.

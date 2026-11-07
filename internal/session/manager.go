@@ -297,6 +297,19 @@ func (m *manager) SetResult(ctx context.Context, id, result string) error {
 	return m.store.UpdateSession(ctx, s)
 }
 
+// SetPullRequestWritten records what the session wrote to its pull request. No
+// event accompanies it: the record is read by the next run on the same pull
+// request, not by anybody watching this one.
+func (m *manager) SetPullRequestWritten(ctx context.Context, id string, text PullRequestText) error {
+	s, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return err
+	}
+	s.PullRequestWritten = &text
+	s.UpdatedAt = time.Now()
+	return m.store.UpdateSession(ctx, s)
+}
+
 // EmitEvent carries no existence check of its own. The high-volume kinds —
 // console output, step stdout/stderr, transfer/cache/dependency progress — are
 // live-only, and a pre-read would put a Store round trip on the one path that

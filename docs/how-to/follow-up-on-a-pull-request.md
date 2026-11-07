@@ -3,8 +3,10 @@
 A job that opened a pull request is finished, but the review that follows is
 not. `kvarn jobs start --pr-ref` continues work on an **existing** PR: it clones
 that PR's head branch, runs the agent with your prompt as the task, pushes a
-follow-up commit to the same branch, and posts a comment. No second PR is opened
-and the title and body are left alone.
+follow-up commit to the same branch, and posts a comment. No second PR is
+opened. If kvarn opened the PR, the title and description are revised to match
+the new code; see
+[Keeping the title and description current](#keeping-the-title-and-description-current).
 
 ```sh
 kvarn jobs start my-project --pr-ref 1234 "Handle the empty-input case and add a test for it"
@@ -37,6 +39,37 @@ and validation retries come from whichever mode ends up running — see
 [projects.my-project.jobs.feedback]
 max_cost_usd = 3.0
 ```
+
+## Keeping the title and description current
+
+A squash merge uses the pull request title and description as its commit
+message. If they still describe the first attempt, the changes that review asked
+for are missing from history. Thus, after a follow-up commit, kvarn revises the
+title and description of a pull request it opened, so they describe the whole
+pull request as it is now.
+
+The revision keeps all text that is still correct and changes only what the
+commit made wrong. The follow-up commit message and the comment still describe
+only the follow-up.
+
+kvarn does not overwrite text that a person wrote:
+
+| Case | What kvarn does |
+| --- | --- |
+| A person opened the PR | It does not change the title or the description. |
+| A person edited the title or the description | It does not change the edited field. It can still revise the other field. The comment tells which field it did not change. |
+| A person edits the text while the revision runs | It reads the PR again before it writes, and does not change an edited field. |
+| The commit only merged the base branch | It does not change the text, because the merge adds nothing that the text describes. |
+| The revision or the forge update fails | It keeps the current text. The run still completes, because the commit is already pushed. |
+
+The session store is the record of which text kvarn wrote. Each follow-up moves
+this record to its own session, so a PR that stays active keeps it. When
+[retention](#session-history) has pruned every session of a PR, kvarn no
+longer knows that it opened the PR, so it does not change the text.
+
+To turn this off, set `update_on_follow_up = false` in a `pull_request` table of
+[`forges.toml`](../reference/forges-toml.md#pull-request-content) or
+[`projects.toml`](../reference/projects-toml.md#pull-request-content).
 
 ## Merging the base branch and resolving the conflicts
 

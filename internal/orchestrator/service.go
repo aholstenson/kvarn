@@ -175,10 +175,15 @@ func formatWorklogComment(prompt string, entries []worklogEntry, sections commen
 // formatFollowupComment renders the comment posted after a feedback run: the
 // agent's own account of what it changed, the feedback that prompted it, and
 // the same work log / cost sections a fresh run posts.
-func formatFollowupComment(feedback, summary string, entries []worklogEntry, sections commentSections, report cost.Report) string {
+func formatFollowupComment(
+	feedback, summary, prNote string, entries []worklogEntry, sections commentSections, report cost.Report,
+) string {
 	var sb strings.Builder
 	writeHeader(&sb, sections.header)
 	writeSection(&sb, "Changes", summary)
+	if prNote = strings.TrimSpace(prNote); prNote != "" {
+		writeVerbatim(&sb, "_"+prNote+"_")
+	}
 	writeQuotedRequest(&sb, "Feedback addressed", feedback, sections.quote)
 	writeWorklog(&sb, sections.worklog, entries)
 	writeCostSection(&sb, sections.cost, report)
@@ -1924,6 +1929,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	}
 
 	// Deliver the run's output wherever the mode says it goes.
+	reviser, _ := conv.(agent.PullRequestReviser)
 	userPrompt := spec.userPrompt
 	if userPrompt == "" {
 		userPrompt = agentPrompt
@@ -1945,6 +1951,8 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		metadata:    spec.metadata,
 		worklog:     worklog.snapshot(),
 		checkpoints: checkpointer.Count(),
+
+		reviser: reviser,
 
 		valResult:        valResult,
 		validationFailed: requiredFailed,
@@ -2165,6 +2173,16 @@ func (s *Service) submitChanges(
 	// runs uncancellable: losing the ref to a shutdown would leave the run
 	// with no record of what it opened.
 	s.sessionMgr.SetPullRequest(context.WithoutCancel(ctx), sessionID, pr.URL, pr.Ref, prBranch)
+	// The text kvarn wrote is what makes the pull request its own to revise on
+	// a later follow-up. Losing it would only make that follow-up leave the
+	// text alone, so a failure is a warning rather than a failed run.
+	if err := s.sessionMgr.SetPullRequestWritten(context.WithoutCancel(ctx), sessionID, session.PullRequestText{
+		Title:       title,
+		Body:        prBody,
+		Description: body,
+	}); err != nil {
+		log.Warn("failed to record the pull request text", "error", err)
+	}
 
 	// Post task + work log as a PR comment so it stays out of any
 	// squash-merge commit message. Configuration that turns off every section
@@ -2207,6 +2225,7 @@ func (s *Service) submitFollowup(
 	behavior forgeconfig.Behavior,
 	modeName string,
 	pr *prTarget,
+	reviser agent.PullRequestReviser,
 	cloneURL string,
 	cloneDir string,
 	creds scm.CredentialSource,
@@ -2288,7 +2307,30 @@ func (s *Service) submitFollowup(
 
 	log.Info("follow-up commit pushed", "branch", pr.headBranch, "url", pr.url)
 
-	commentBody := formatFollowupComment(feedback, agentResult.Description, worklog,
+	// Only a commit that changed files can make the pull request's text out of
+	// date. A run that only merged its base branch adds nothing the text
+	// describes.
+	var prNote string
+	if behavior.PullRequest.UpdateOnFollowUp && reviser != nil && len(changedFiles) > 0 {
+		prNote = s.revisePullRequestText(ctx, prRevision{
+			sessionID: sessionID,
+			project:   proj.Name,
+			pr:        pr,
+			forgeImpl: forgeImpl,
+			cloneURL:  cloneURL,
+			creds:     creds,
+			reviser:   reviser,
+			footer: func(title, description string) string {
+				data := tmplData
+				data.Title = title
+				data.Description = description
+				return renderPRTemplate(behavior.PullRequest.BodyFooter, data, missingKeyZero, log)
+			},
+			log: log,
+		})
+	}
+
+	commentBody := formatFollowupComment(feedback, agentResult.Description, prNote, worklog,
 		sectionsFrom(behavior.PullRequest, forgeconfig.CommentFollowUpCommit, tmplData, log), costReport)
 	if commentBody == "" {
 		log.Info("skipping follow-up comment: every section is turned off")

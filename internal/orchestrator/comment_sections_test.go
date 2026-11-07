@@ -113,14 +113,14 @@ var _ = Describe("comment sections", func() {
 
 	Describe("formatFollowupComment", func() {
 		It("leads with the changes and trails the feedback that prompted them", func() {
-			body := formatFollowupComment("please fix the lint", "fixed it", entries, both, report)
+			body := formatFollowupComment("please fix the lint", "fixed it", "", entries, both, report)
 			Expect(body).To(HavePrefix("## Changes\n\nfixed it"))
 			Expect(strings.Index(body, "## Feedback addressed")).To(BeNumerically(">",
 				strings.Index(body, "## Changes")))
 		})
 
 		It("drops the work log when the section is off", func() {
-			body := formatFollowupComment("please fix the lint", "fixed it", entries,
+			body := formatFollowupComment("please fix the lint", "fixed it", "", entries,
 				commentSections{worklog: false, cost: true, quote: forgeconfig.QuoteAuto}, report)
 			Expect(body).NotTo(ContainSubstring("Work log"))
 			Expect(body).To(ContainSubstring("please fix the lint"))
@@ -161,7 +161,7 @@ var _ = Describe("comment sections", func() {
 		It("leads every comment a delivery posts", func() {
 			Expect(formatWorklogComment("do the thing", entries, withHeader, report)).To(
 				HavePrefix("**Issue:** ENG-42\n\n"))
-			Expect(formatFollowupComment("fix the lint", "fixed it", entries, withHeader, report)).To(
+			Expect(formatFollowupComment("fix the lint", "fixed it", "", entries, withHeader, report)).To(
 				HavePrefix("**Issue:** ENG-42\n\n## Changes"))
 			Expect(formatResultComment("review this", "looks good", nil, entries, withHeader, report)).To(
 				HavePrefix("**Issue:** ENG-42\n\nlooks good"))

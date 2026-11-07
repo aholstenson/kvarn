@@ -37,6 +37,9 @@ type deliveryRequest struct {
 	// pr is the pull request the run was started against, or nil for a fresh
 	// run.
 	pr *prTarget
+	// reviser revises the pull request's title and description after a
+	// follow-up commit. Nil when the run's agent cannot.
+	reviser agent.PullRequestReviser
 	// userPrompt is what the requester asked for, quoted back in the comment a
 	// delivery posts.
 	userPrompt string
@@ -151,7 +154,7 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 				return fmt.Errorf("mode %q delivers a follow-up commit but the run has no pull request to commit onto", req.mode.Name)
 			}
 			if err := s.submitFollowup(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
-				req.proj, req.cfg, req.behavior, req.mode.Name, req.pr, req.cloneURL, req.cloneDir, req.creds,
+				req.proj, req.cfg, req.behavior, req.mode.Name, req.pr, req.reviser, req.cloneURL, req.cloneDir, req.creds,
 				req.userPrompt, req.metadata, req.worklog, req.checkpoints, req.cost, req.log); err != nil {
 				return err
 			}

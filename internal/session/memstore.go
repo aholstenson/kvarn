@@ -120,6 +120,7 @@ func (m *memStore) UpdateSession(_ context.Context, s *Session) error {
 	stored.BaseBranch = row.BaseBranch
 	stored.CostJSON = row.CostJSON
 	stored.Result = row.Result
+	stored.PRWrittenJSON = row.PRWrittenJSON
 	stored.UpdatedAt = row.UpdatedAt
 	m.sessions[s.ID] = stored
 	return nil

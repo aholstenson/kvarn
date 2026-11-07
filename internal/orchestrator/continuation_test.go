@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
@@ -34,6 +35,17 @@ import (
 type capturingAgent struct {
 	mu     sync.Mutex
 	prompt string
+	// revise answers a request to revise the pull request text. Nil fails
+	// the request, which a delivery treats as "keep the current text".
+	revise func(agent.PullRequestRevision) (*agent.Result, error)
+	// revisions records every revision request, in order.
+	revisions []agent.PullRequestRevision
+}
+
+func (a *capturingAgent) revisionRequests() []agent.PullRequestRevision {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]agent.PullRequestRevision(nil), a.revisions...)
 }
 
 func (a *capturingAgent) lastPrompt() string {
@@ -46,11 +58,25 @@ func (a *capturingAgent) Start(_ context.Context, agentCtx *agent.Context) (agen
 	a.mu.Lock()
 	a.prompt = agentCtx.Prompt
 	a.mu.Unlock()
-	return &capturingConversation{agentCtx: agentCtx}, nil
+	return &capturingConversation{agent: a, agentCtx: agentCtx}, nil
 }
 
 type capturingConversation struct {
+	agent    *capturingAgent
 	agentCtx *agent.Context
+}
+
+func (c *capturingConversation) RevisePullRequest(
+	_ context.Context, in agent.PullRequestRevision,
+) (*agent.Result, error) {
+	c.agent.mu.Lock()
+	c.agent.revisions = append(c.agent.revisions, in)
+	revise := c.agent.revise
+	c.agent.mu.Unlock()
+	if revise == nil {
+		return nil, fmt.Errorf("no revision scripted")
+	}
+	return revise(in)
 }
 
 func (c *capturingConversation) Run(_ context.Context, _ string) (string, error) {
@@ -450,6 +476,210 @@ var _ = Describe("StartJob continuing a pull request", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(sess.Continuation).To(BeTrue())
 		Expect(sess.PRRef).To(Equal("42"))
+	})
+
+	Describe("revising the pull request text", func() {
+		const footer = "Run {{ .SessionID }}"
+
+		// opened is the text kvarn wrote when it opened pull request 42. It
+		// matches openPR(), so the forge still holds exactly what kvarn wrote.
+		opened := session.PullRequestText{
+			Title:       "Add a helper",
+			Body:        "Adds a small helper.",
+			Description: "Adds a small helper.",
+		}
+
+		// seedOpener records a finished session that opened pull request 42
+		// and wrote text to it.
+		seedOpener := func(text session.PullRequestText) {
+			ctx := context.Background()
+			parent, err := sessionMgr.Create(ctx, session.CreateParams{
+				ProjectName: "test-project",
+				Prompt:      "add a trivial helper",
+				Mode:        "auto",
+				PRRef:       "42",
+				HeadBranch:  "kvarn/add-a-helper",
+				BaseBranch:  "master",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sessionMgr.UpdateState(ctx, parent.ID, session.StateCompleted, "done")).To(Succeed())
+			Expect(sessionMgr.SetPullRequestWritten(ctx, parent.ID, text)).To(Succeed())
+		}
+
+		storedPR := func() forge.PullRequestDetails {
+			mockForgeInst.mu.Lock()
+			defer mockForgeInst.mu.Unlock()
+			return *mockForgeInst.pullRequests["42"]
+		}
+
+		runFollowUp := func() *session.Session {
+			resp, err := submit("test-project", "42", "rename the helper")
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(stateOf(resp.SessionId)).WithTimeout(10 * time.Second).Should(Equal("completed"))
+			got, err := sessionMgr.Get(context.Background(), resp.SessionId)
+			Expect(err).NotTo(HaveOccurred())
+			return got
+		}
+
+		BeforeEach(func() {
+			projStore.projects["test-project"].PullRequest = forgeconfig.PRContent{BodyFooter: footer}
+			testAgent.revise = func(agent.PullRequestRevision) (*agent.Result, error) {
+				return &agent.Result{
+					Title:       "Add a renamed helper",
+					Description: "Adds a small renamed helper with a test.",
+				}, nil
+			}
+		})
+
+		It("rewrites the title and description of a pull request kvarn opened", func() {
+			seedOpener(opened)
+			got := runFollowUp()
+
+			requests := testAgent.revisionRequests()
+			Expect(requests).To(HaveLen(1))
+			Expect(requests[0].Title).To(Equal("Add a helper"))
+			Expect(requests[0].Description).To(Equal("Adds a small helper."))
+			Expect(requests[0].Diff).To(ContainSubstring("func helper()"))
+
+			pr := storedPR()
+			Expect(pr.Title).To(Equal("Add a renamed helper"))
+			Expect(pr.Body).To(Equal("Adds a small renamed helper with a test.\n\nRun " + got.ID))
+
+			Expect(got.PullRequestWritten).To(Equal(&session.PullRequestText{
+				Title:       "Add a renamed helper",
+				Body:        pr.Body,
+				Description: "Adds a small renamed helper with a test.",
+			}), "the newest session takes the record, so the next follow-up compares against this text")
+			Expect(mockForgeInst.lastCommentOpts.Body).To(
+				ContainSubstring("Updated the pull request title and description to match the change as it is now."))
+		})
+
+		It("leaves a pull request alone when no session on record wrote its text", func() {
+			got := runFollowUp()
+
+			Expect(testAgent.revisionRequests()).To(BeEmpty())
+			Expect(mockForgeInst.updateCalls).To(BeZero())
+			Expect(got.PullRequestWritten).To(BeNil())
+			Expect(mockForgeInst.lastCommentOpts.Body).NotTo(ContainSubstring("pull request title"))
+		})
+
+		It("keeps a description a person edited and still revises the title", func() {
+			seedOpener(opened)
+			mockForgeInst.mu.Lock()
+			mockForgeInst.pullRequests["42"].Body = "Adds a small helper.\n\nEdited by a reviewer."
+			mockForgeInst.mu.Unlock()
+
+			got := runFollowUp()
+
+			Expect(testAgent.revisionRequests()[0].Description).To(
+				Equal("Adds a small helper.\n\nEdited by a reviewer."),
+				"the person's body is context for the title")
+			Expect(mockForgeInst.lastUpdateOpts.Body).To(BeNil())
+			pr := storedPR()
+			Expect(pr.Title).To(Equal("Add a renamed helper"))
+			Expect(pr.Body).To(Equal("Adds a small helper.\n\nEdited by a reviewer."))
+
+			Expect(got.PullRequestWritten.Body).To(Equal(opened.Body),
+				"the body keeps kvarn's last write, which no longer matches, so it stays the person's")
+			Expect(mockForgeInst.lastCommentOpts.Body).To(ContainSubstring(
+				"Updated the pull request title to match the change as it is now. " +
+					"The description was edited by hand, so this run left it as it is."))
+		})
+
+		It("does not ask for a revision when a person edited both fields", func() {
+			seedOpener(opened)
+			mockForgeInst.mu.Lock()
+			mockForgeInst.pullRequests["42"].Title = "A title a person chose"
+			mockForgeInst.pullRequests["42"].Body = "A body a person wrote"
+			mockForgeInst.mu.Unlock()
+
+			got := runFollowUp()
+
+			Expect(testAgent.revisionRequests()).To(BeEmpty())
+			Expect(mockForgeInst.updateCalls).To(BeZero())
+			Expect(got.PullRequestWritten).To(Equal(&opened))
+			Expect(mockForgeInst.lastCommentOpts.Body).To(ContainSubstring(
+				"The title and description were edited by hand, so this run left them as they are."))
+		})
+
+		It("writes nothing when a person edits the text while the revision runs", func() {
+			seedOpener(opened)
+			testAgent.revise = func(agent.PullRequestRevision) (*agent.Result, error) {
+				mockForgeInst.mu.Lock()
+				mockForgeInst.pullRequests["42"].Title = "Retitled mid-run"
+				mockForgeInst.pullRequests["42"].Body = "Rewritten mid-run"
+				mockForgeInst.mu.Unlock()
+				return &agent.Result{Title: "Add a renamed helper", Description: "Revised."}, nil
+			}
+
+			runFollowUp()
+
+			Expect(mockForgeInst.updateCalls).To(BeZero())
+			pr := storedPR()
+			Expect(pr.Title).To(Equal("Retitled mid-run"))
+			Expect(pr.Body).To(Equal("Rewritten mid-run"))
+		})
+
+		It("leaves the body alone when the revised description is unchanged", func() {
+			seedOpener(opened)
+			testAgent.revise = func(in agent.PullRequestRevision) (*agent.Result, error) {
+				return &agent.Result{Title: in.Title, Description: in.Description}, nil
+			}
+
+			got := runFollowUp()
+
+			Expect(mockForgeInst.updateCalls).To(BeZero(),
+				"only the footer would differ, and that is not worth a change to the pull request")
+			Expect(got.PullRequestWritten).To(Equal(&opened))
+			Expect(mockForgeInst.lastCommentOpts.Body).NotTo(ContainSubstring("pull request title"))
+		})
+
+		It("matches text whose line endings the forge changed", func() {
+			seedOpener(session.PullRequestText{
+				Title:       "Add a helper",
+				Body:        "Adds a small helper.\nIn two lines.",
+				Description: "Adds a small helper.\nIn two lines.",
+			})
+			mockForgeInst.mu.Lock()
+			mockForgeInst.pullRequests["42"].Body = "Adds a small helper.\r\nIn two lines.\r\n"
+			mockForgeInst.mu.Unlock()
+
+			runFollowUp()
+
+			Expect(mockForgeInst.lastUpdateOpts.Body).NotTo(BeNil())
+		})
+
+		It("keeps the current text when the revision fails", func() {
+			seedOpener(opened)
+			testAgent.revise = nil
+
+			got := runFollowUp()
+
+			Expect(mockForgeInst.updateCalls).To(BeZero())
+			Expect(got.PullRequestWritten).To(Equal(&opened))
+		})
+
+		It("keeps the run completed when the forge refuses the update", func() {
+			seedOpener(opened)
+			mockForgeInst.updateErr = fmt.Errorf("HTTP 403")
+
+			got := runFollowUp()
+
+			Expect(mockForgeInst.updateCalls).To(Equal(1))
+			Expect(got.PullRequestWritten).To(Equal(&opened),
+				"the forge kept the old text, so the record must too")
+		})
+
+		It("leaves the text alone when the operator turned the update off", func() {
+			off := false
+			projStore.projects["test-project"].PullRequest.UpdateOnFollowUp = &off
+			seedOpener(opened)
+
+			runFollowUp()
+
+			Expect(testAgent.revisionRequests()).To(BeEmpty())
+			Expect(mockForgeInst.updateCalls).To(BeZero())
+		})
 	})
 
 	Describe("idempotency", func() {

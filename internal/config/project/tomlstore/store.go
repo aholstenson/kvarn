@@ -100,6 +100,7 @@ type prEntry struct {
 	ReportWorklogOnPR   *bool                 `toml:"report_worklog_on_pr,omitempty"`
 	ReportCostOnPR      *bool                 `toml:"report_cost_on_pr,omitempty"`
 	QuoteTask           forgeconfig.QuoteMode `toml:"quote_task,omitempty"`
+	UpdateOnFollowUp    *bool                 `toml:"update_on_follow_up,omitempty"`
 }
 
 // headerEntry mirrors a `comment_headers` sub-table, one key per kind of
@@ -153,6 +154,7 @@ func (e *prEntry) toContent() forgeconfig.PRContent {
 		ReportWorklog:       e.ReportWorklogOnPR,
 		ReportCost:          e.ReportCostOnPR,
 		QuoteTask:           e.QuoteTask,
+		UpdateOnFollowUp:    e.UpdateOnFollowUp,
 	}
 }
 
@@ -169,6 +171,7 @@ func prEntryFrom(c forgeconfig.PRContent) *prEntry {
 		ReportWorklogOnPR:   c.ReportWorklog,
 		ReportCostOnPR:      c.ReportCost,
 		QuoteTask:           c.QuoteTask,
+		UpdateOnFollowUp:    c.UpdateOnFollowUp,
 	}
 	if len(c.CommitTrailers) > 0 {
 		e.CommitTrailers = make([]string, len(c.CommitTrailers))
@@ -192,7 +195,8 @@ func (e *prEntry) isZero() bool {
 		len(e.CommitTrailers) == 0 &&
 		e.ReportWorklogOnPR == nil &&
 		e.ReportCostOnPR == nil &&
-		e.QuoteTask == forgeconfig.QuoteInherit
+		e.QuoteTask == forgeconfig.QuoteInherit &&
+		e.UpdateOnFollowUp == nil
 }
 
 // Store is a TOML file-backed project store.

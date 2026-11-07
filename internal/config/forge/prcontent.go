@@ -18,6 +18,10 @@ const (
 	// DefaultQuoteTask keeps short requests visible and folds long ones away,
 	// which is the behaviour that needs no thought from an operator.
 	DefaultQuoteTask = QuoteAuto
+	// DefaultUpdateOnFollowUp keeps a pull request's title and description in
+	// step with its code. A squash merge takes its message from them, so text
+	// that still describes the first attempt ends up in history.
+	DefaultUpdateOnFollowUp = true
 )
 
 // QuoteMode says how much of the request that started a run — the task, or the
@@ -157,16 +161,20 @@ type PRContent struct {
 	// QuoteTask says how the comment quotes the request that started the run.
 	// QuoteInherit takes the next layer down.
 	QuoteTask QuoteMode
+	// UpdateOnFollowUp lets a follow-up commit revise the title and description
+	// of a pull request kvarn opened. Nil inherits the next layer down.
+	UpdateOnFollowUp *bool
 }
 
 // RepoContent is the pull-request content a repository contributes from the
 // `pull_request:` block in its kvarn.yml.
 //
 // It carries wording and structure only. Footers, comment headers, commit
-// trailers, the report toggles and the quote mode have no repository layer on
-// purpose: they carry run identity and operator noise control, and kvarn.yml is
-// read from the branch under test, so a run could otherwise rewrite its own
-// attribution — or suppress the record of what it was asked to do.
+// trailers, the report toggles, the quote mode and UpdateOnFollowUp have no
+// repository layer on purpose: they carry run identity and operator noise
+// control, and kvarn.yml is read from the branch under test, so a run could
+// otherwise rewrite its own attribution, suppress the record of what it was
+// asked to do, or decide for itself what it may overwrite.
 type RepoContent struct {
 	TitleInstructions   string
 	TitleMaxLength      *int
@@ -205,6 +213,7 @@ type Content struct {
 	ReportWorklog       bool
 	ReportCost          bool
 	QuoteTask           QuoteMode
+	UpdateOnFollowUp    bool
 }
 
 // resolveContent layers pull-request content across the operator layers and the
@@ -222,6 +231,8 @@ func resolveContent(layers []PRContent, repo RepoContent) Content {
 		ReportWorklog:  DefaultReportWorklog,
 		ReportCost:     DefaultReportCost,
 		QuoteTask:      DefaultQuoteTask,
+
+		UpdateOnFollowUp: DefaultUpdateOnFollowUp,
 	}
 
 	var titleOrg, bodyOrg, commentOrg []string
@@ -259,6 +270,9 @@ func resolveContent(layers []PRContent, repo RepoContent) Content {
 		}
 		if l.QuoteTask != QuoteInherit {
 			c.QuoteTask = l.QuoteTask
+		}
+		if l.UpdateOnFollowUp != nil {
+			c.UpdateOnFollowUp = *l.UpdateOnFollowUp
 		}
 	}
 

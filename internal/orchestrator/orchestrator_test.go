@@ -351,6 +351,10 @@ type mockForge struct {
 	// pack. Moving the head after both is what puts the change inside the run.
 	movedHeadSHA      string
 	moveHeadAfterCall int
+
+	updateCalls    int
+	updateErr      error
+	lastUpdateOpts forge.UpdatePROpts
 }
 
 func (m *mockForge) SCM() scm.SCM { return m.scmImpl }
@@ -432,6 +436,27 @@ func (m *mockForge) PostComment(_ context.Context, opts forge.PostCommentOpts) e
 	m.commentCalls++
 	m.lastCommentOpts = opts
 	return m.commentErr
+}
+
+// UpdatePullRequest records the update and applies it to the stored pull
+// request, so a later read sees what a real forge would return.
+func (m *mockForge) UpdatePullRequest(_ context.Context, opts forge.UpdatePROpts) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updateCalls++
+	m.lastUpdateOpts = opts
+	if m.updateErr != nil {
+		return m.updateErr
+	}
+	if pr, ok := m.pullRequests[opts.PRRef]; ok {
+		if opts.Title != nil {
+			pr.Title = *opts.Title
+		}
+		if opts.Body != nil {
+			pr.Body = *opts.Body
+		}
+	}
+	return nil
 }
 
 // memForgeConfigStore is an in-memory forgeconfig.Store for tests.
@@ -1219,6 +1244,15 @@ var _ = Describe("StartJob submission flow", func() {
 		Expect(prOpts.Body).To(Equal(testAgent.description))
 		Expect(prOpts.Body).NotTo(ContainSubstring("Automatically generated"))
 		Expect(prOpts.Body).NotTo(ContainSubstring("Session:"))
+
+		// The text kvarn wrote is what lets a later follow-up revise it.
+		stored, err := sessionMgr.Get(context.Background(), resp.SessionId)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stored.PullRequestWritten).To(Equal(&session.PullRequestText{
+			Title:       prOpts.Title,
+			Body:        prOpts.Body,
+			Description: testAgent.description,
+		}))
 
 		Expect(mockForgeInst.commentCalls).To(Equal(1))
 		commentOpts := mockForgeInst.lastCommentOpts

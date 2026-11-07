@@ -50,7 +50,8 @@ the one choice the command asks for:
   validate, push a branch, and open a pull request where the forge supports it.
 - **From a pull request** (`--pr-ref`) — clone its head branch, run the agent
   with the prompt as the task, push a follow-up commit to that same branch, and
-  comment. No second PR is opened and the title and body are left alone.
+  comment. No second PR is opened. The title and description of a PR that
+  kvarn opened are revised to match, unless a person edited them.
 
 The two are alternatives: a pull request already fixes the branch its commits
 land on, so passing both is an error. See

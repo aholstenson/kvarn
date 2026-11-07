@@ -228,6 +228,35 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 			Expect(got.HeadBranch).To(Equal("kvarn/renamed"))
 		})
 
+		It("records the pull request text a session wrote through an update", func() {
+			s := makeSession("s1", "proj", session.StateRunning, base)
+			Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+			got, err := store.GetSession(ctx, "s1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.PullRequestWritten).To(BeNil())
+
+			written := session.PullRequestText{
+				Title:       "Add a helper",
+				Body:        "Adds a helper.\n\n---\nfooter",
+				Description: "Adds a helper.",
+			}
+			s.PullRequestWritten = &written
+			Expect(store.UpdateSession(ctx, s)).To(Succeed())
+
+			got, err = store.GetSession(ctx, "s1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.PullRequestWritten).To(Equal(&written))
+
+			// The record has to survive the state updates that follow it, or a
+			// run that finishes after writing would lose its claim on the PR.
+			got.State = session.StateCompleted
+			Expect(store.UpdateSession(ctx, got)).To(Succeed())
+			got, err = store.GetSession(ctx, "s1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.PullRequestWritten).To(Equal(&written))
+		})
+
 		It("round-trips the continuation marker", func() {
 			cont := makeSession("cont", "proj", session.StatePending, base)
 			cont.PRRef = "42"

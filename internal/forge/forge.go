@@ -34,6 +34,10 @@ type Forge interface {
 
 	// PostComment posts a comment on an existing PR or issue.
 	PostComment(ctx context.Context, opts PostCommentOpts) error
+
+	// UpdatePullRequest changes the title, the body, or both of an existing
+	// PR. A field left nil is not sent, so the forge keeps what it has.
+	UpdatePullRequest(ctx context.Context, opts UpdatePROpts) error
 }
 
 // CreatePROpts configures PR creation.
@@ -60,6 +64,19 @@ type PostCommentOpts struct {
 	RepoURL     string
 	PRRef       string
 	Body        string
+	Credentials scm.CredentialSource
+}
+
+// UpdatePROpts configures a change to an existing PR's title and body.
+//
+// The fields are pointers because "leave it alone" and "set it to this" must
+// stay apart: an update that only owns the body must not touch a title a
+// person wrote.
+type UpdatePROpts struct {
+	RepoURL     string
+	PRRef       string
+	Title       *string
+	Body        *string
 	Credentials scm.CredentialSource
 }
 

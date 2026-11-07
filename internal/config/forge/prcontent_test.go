@@ -175,6 +175,19 @@ var _ = Describe("ResolveBehavior pull-request content", func() {
 
 			Expect(c.QuoteTask).To(Equal(forgeconfig.QuoteAuto))
 		})
+
+		It("updates the pull request text on a follow-up unless a layer turns it off", func() {
+			c := (&forgeconfig.ForgeConfig{}).ResolveBehavior(
+				forgeconfig.Defaults{}, forgeconfig.Overrides{}, forgeconfig.RepoContent{}).PullRequest
+			Expect(c.UpdateOnFollowUp).To(BeTrue())
+
+			c = (&forgeconfig.ForgeConfig{}).ResolveBehavior(
+				forgeconfig.Defaults{PullRequest: forgeconfig.PRContent{UpdateOnFollowUp: ptrBool(true)}},
+				forgeconfig.Overrides{PullRequest: forgeconfig.PRContent{UpdateOnFollowUp: ptrBool(false)}},
+				forgeconfig.RepoContent{},
+			).PullRequest
+			Expect(c.UpdateOnFollowUp).To(BeFalse(), "the project layer is the most specific")
+		})
 	})
 
 	Describe("QuoteMode", func() {
