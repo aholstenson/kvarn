@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/internal/project"
 )
 
 // caCertificateDir is Debian's drop-in directory for locally added trust
@@ -22,7 +23,7 @@ const caCertificateDir = "/usr/local/share/ca-certificates"
 // Chromium prefers $HOME/.pki/nssdb when it exists and only falls back to the
 // XDG location ($XDG_DATA_HOME/pki/nssdb) otherwise, so creating this path
 // covers both the old and the new lookup.
-const nssDBDir = kvarnHome + "/.pki/nssdb"
+const nssDBDir = project.GuestHome + "/.pki/nssdb"
 
 // nssCertNickname is what the CA is called inside the NSS database, which
 // keys certificates by nickname rather than by subject.

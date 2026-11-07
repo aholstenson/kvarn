@@ -23,12 +23,12 @@ import (
 // user, with the project source mounted at GuestWorkspace.
 const (
 	GuestHome      = "/home/kvarn"
-	GuestWorkspace = "/home/kvarn/workspace"
+	GuestWorkspace = GuestHome + "/workspace"
 	// GuestPreviewState is the directory a preview environment keeps state in
 	// between boots. It sits outside GuestWorkspace on purpose: the workspace is
 	// a fresh clone on every boot, so anything kept there would be clobbered by
 	// the next one.
-	GuestPreviewState = "/home/kvarn/state"
+	GuestPreviewState = GuestHome + "/state"
 )
 
 const (

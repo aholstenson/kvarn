@@ -7,6 +7,7 @@ import (
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
 	"github.com/aholstenson/kvarn/internal/attachment"
+	"github.com/aholstenson/kvarn/internal/project"
 )
 
 // The directories a run has in the guest beside its workspace. Both are
@@ -18,10 +19,10 @@ const (
 	// AttachmentsDir holds the files the submitter sent with the job. A task
 	// that wants one in the repository copies it in, and the copy is then an
 	// ordinary change.
-	AttachmentsDir = "/home/kvarn/attachments"
+	AttachmentsDir = project.GuestHome + "/attachments"
 	// ScratchDir is for throwaway output: a converted file, a rendered image,
 	// a log to read back. Nothing written there becomes part of the change.
-	ScratchDir = "/home/kvarn/scratch"
+	ScratchDir = project.GuestHome + "/scratch"
 )
 
 // The environment variables that name the directories above, so setup and

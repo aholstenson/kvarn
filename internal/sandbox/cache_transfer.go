@@ -9,13 +9,9 @@ import (
 	"strings"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox/cache"
 )
-
-// kvarnHome is the home directory of the unprivileged user that runs jobs.
-// Cache directories under it must end up owned by kvarn so the job can write
-// into them and their parents.
-const kvarnHome = "/home/kvarn"
 
 // RestoreCache uploads cached tarballs to the guest and extracts them.
 func RestoreCache(ctx context.Context, proxy RunnerProxy, provider cache.Provider, layers []cache.Layer, onEvent func(Event)) error {
@@ -204,12 +200,12 @@ func tempName(key cache.Key) string {
 // answer: a declared state path several levels under the home directory is
 // created by the same privileged mkdir -p and needs the same chown chain.
 func OwnedDirs(guestPath string) []string {
-	if guestPath == kvarnHome || !strings.HasPrefix(guestPath, kvarnHome+"/") {
+	if guestPath == project.GuestHome || !strings.HasPrefix(guestPath, project.GuestHome+"/") {
 		return []string{guestPath}
 	}
-	rel := strings.TrimPrefix(guestPath, kvarnHome+"/")
+	rel := strings.TrimPrefix(guestPath, project.GuestHome+"/")
 	var dirs []string
-	cur := kvarnHome
+	cur := project.GuestHome
 	for _, p := range strings.Split(rel, "/") {
 		if p == "" {
 			continue
