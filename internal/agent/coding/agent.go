@@ -52,7 +52,7 @@ const summaryMaxOutputTokens = 16384
 // comma-separated option list, so a comma silently truncates the description at
 // that point and the rest never reaches the model.
 type AgentSummary struct {
-	Description string           `json:"description" jsonschema:"description=Commit body: a few short paragraphs in past tense describing what changed and why. Wrap lines at ~72 chars. No bullet-list of files. No trailing footer."`
+	Description string           `json:"description" jsonschema:"description=Commit body and pull request description: why the change was made and what the code does now. Present tense. Leave out how it was tested and the process that produced it. Wrap lines at ~72 chars. No list of files. No trailing footer."`
 	Sections    []SummarySection `json:"sections"    jsonschema:"description=One entry per section named in the request. Empty when the request names none."`
 	Title       string           `json:"title"       jsonschema:"description=Imperative-mood summary of the change just described. Stay within the character budget stated in the request."`
 }
