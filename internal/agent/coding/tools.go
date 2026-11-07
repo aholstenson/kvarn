@@ -236,7 +236,7 @@ func (t *CodingToolkit) ReadOnlyTools() []llms.ToolDef {
 		tools = append(tools, llms.NewToolDef(&activateSkillTool{skills: t.skills}))
 	}
 	if len(t.agentModels) > 0 && len(t.subAgents) > 0 {
-		tools = append(tools, llms.NewToolDef(&spawnAgentTool{toolkit: t}))
+		tools = append(tools, llms.NewToolDef(&spawnAgentTool{toolkit: t, readOnly: true}))
 	}
 	return t.guard(tools)
 }
@@ -1315,6 +1315,10 @@ type SpawnAgentOutput struct {
 
 type spawnAgentTool struct {
 	toolkit *CodingToolkit
+	// readOnly is set when the tool belongs to a read-only toolset. It is
+	// passed on to every sub-agent run, so a sub-agent that can write gets
+	// no more access than the parent that spawned it.
+	readOnly bool
 }
 
 func (t *spawnAgentTool) Name() string { return "spawn_agent" }
@@ -1363,6 +1367,7 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 		WorkingDir: t.toolkit.workingDir,
 		SessionID:  subSessionID,
 		Skills:     t.toolkit.skills,
+		ReadOnly:   t.readOnly,
 	}
 
 	maxOut := cfg.MaxOutputTokens

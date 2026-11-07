@@ -2,6 +2,8 @@ package coding
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
@@ -299,7 +301,10 @@ func appendContextBlocks(sb *strings.Builder, rc *repocontext.RepoContext, subAg
 		sb.WriteString("the same turn they run in parallel; use this to keep your own context\n")
 		sb.WriteString("focused on synthesis and edits.\n\n")
 		sb.WriteString("<available_sub_agents>\n")
-		for _, sub := range subAgents {
+		// Sorted so the prompt is the same on every run: map order is random,
+		// and a prompt that changes between runs defeats prompt caching.
+		for _, name := range slices.Sorted(maps.Keys(subAgents)) {
+			sub := subAgents[name]
 			fmt.Fprintf(sb, "  <sub_agent>\n    <name>%s</name>\n    <description>%s</description>\n  </sub_agent>\n", sub.Name, sub.Description)
 		}
 		sb.WriteString("</available_sub_agents>")

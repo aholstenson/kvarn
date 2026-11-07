@@ -489,7 +489,7 @@ secrets:
 
 ### Model classes
 
-Agents pick a capability class rather than a model, and the classes live in `~/.config/kvarn/agents.toml`. `coding-agent` is the balanced default the main loop runs on, `coding-agent-fast` serves high-volume search (the `explore` sub-agent) and `coding-agent-reasoning` serves work worth deliberating over (the `plan` sub-agent):
+Agents pick a capability class rather than a model, and the classes live in `~/.config/kvarn/agents.toml`. `coding-agent` is the balanced default the main loop and the `general-purpose` sub-agent run on, `coding-agent-fast` serves high-volume search (the `explore` sub-agent) and `coding-agent-reasoning` serves work worth deliberating over (the `plan` sub-agent):
 
 ```toml
 [models.coding-agent]

@@ -32,6 +32,7 @@ func BuiltinSubAgents() SubAgents {
 	return SubAgents{
 		Explore.Name: Explore,
 		Plan.Name:    Plan,
+		General.Name: General,
 	}
 }
 
@@ -42,6 +43,10 @@ type SubAgentDeps struct {
 	WorkingDir string
 	SessionID  string
 	Skills     map[string]*repocontext.Skill
+	// ReadOnly is set when the parent runs without edit tools. A sub-agent
+	// that can write must then leave its own edit tools out, so that spawning
+	// it cannot change files the parent itself may not change.
+	ReadOnly bool
 }
 
 // SubAgents holds the registered sub-agent types keyed by Name.

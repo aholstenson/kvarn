@@ -22,7 +22,7 @@ once and shared by everything that asks for it. Three classes exist:
 
 | Class | Used for | Built-in default |
 | --- | --- | --- |
-| `coding-agent` | The main agent loop — the balanced default. | `anthropic/claude-sonnet-4-6`, effort `medium`, 16384 output tokens, 100 steps. |
+| `coding-agent` | The main agent loop and the `general-purpose` sub-agent — the balanced default. | `anthropic/claude-sonnet-4-6`, effort `medium`, 16384 output tokens, 100 steps. |
 | `coding-agent-fast` | High-volume, shallow work where breadth of search beats depth of reasoning (the `explore` sub-agent). | `anthropic/claude-haiku-4-5`, effort `none`, 8192 output tokens, 100 steps. |
 | `coding-agent-reasoning` | Work worth thinking hard about and run rarely enough to pay for it (the `plan` sub-agent). | `anthropic/claude-sonnet-4-6`, effort `high`, 16384 output tokens, 50 steps. |
 
@@ -64,7 +64,7 @@ says so rather than looking stalled.
 ## Per-agent overrides
 
 A sub-agent runs on the class it declares — `explore` on `coding-agent-fast`,
-`plan` on `coding-agent-reasoning`. An `[agents.<name>]` block changes that for
+`plan` on `coding-agent-reasoning`, `general-purpose` on `coding-agent`. An `[agents.<name>]` block changes that for
 one agent without disturbing the class or any other agent using it:
 
 ```toml
@@ -81,8 +81,8 @@ max_steps = 80
 
 `class` picks the tier; the model keys from the table above are then applied on
 top of whichever class was selected. Setting `model` bypasses the class's model
-without bypassing the rest of its settings. Agent names are `explore`, `plan`
-and `validator`; any other name is an error.
+without bypassing the rest of its settings. Agent names are `explore`, `plan`,
+`general-purpose` and `validator`; any other name is an error.
 
 `validator` is the agent that checks
 [prompt validation steps](kvarn-yml.md#prompt-steps). It runs on

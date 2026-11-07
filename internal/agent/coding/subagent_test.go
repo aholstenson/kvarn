@@ -168,6 +168,51 @@ var _ = Describe("spawn_agent", func() {
 		Expect(out.Text).To(Equal("explored"))
 	})
 
+	Describe("the read-only state of the parent", func() {
+		// spawnGeneral runs the general-purpose sub-agent through the
+		// spawn_agent tool from the given toolset and returns the names of
+		// the tools the sub-agent was given.
+		spawnGeneral := func(readOnly bool) map[string]bool {
+			names := map[string]bool{}
+			model := &fakeModel{
+				generate: func(_ context.Context, opts ...llms.GenerateOption) (llms.Result, error) {
+					for _, t := range optionField[[]llms.ToolDef](opts, "Tools") {
+						names[t.Name()] = true
+					}
+					return llms.TextResult{Text: "done"}, nil
+				},
+			}
+			tk := buildToolkit(model, coding.SubAgents{coding.General.Name: coding.General})
+			tools := tk.Tools()
+			if readOnly {
+				tools = tk.ReadOnlyTools()
+			}
+			var spawn llms.ToolDef
+			for _, t := range tools {
+				if t.Name() == "spawn_agent" {
+					spawn = t
+				}
+			}
+			Expect(spawn).NotTo(BeNil())
+			_, err := spawn.Execute(ctx, &coding.SpawnAgentInput{Name: coding.General.Name, Prompt: "go"})
+			Expect(err).NotTo(HaveOccurred())
+			return names
+		}
+
+		It("gives a sub-agent edit tools when the parent can edit", func() {
+			names := spawnGeneral(false)
+			Expect(names).To(HaveKey("edit_file"))
+			Expect(names).To(HaveKey("write_file"))
+		})
+
+		It("keeps edit tools from a sub-agent when the parent is read-only", func() {
+			names := spawnGeneral(true)
+			Expect(names).To(HaveKey("exec_command"))
+			Expect(names).NotTo(HaveKey("edit_file"))
+			Expect(names).NotTo(HaveKey("write_file"))
+		})
+	})
+
 	It("numbers the runs of each sub-agent separately", func() {
 		var ids []string
 		model := &fakeModel{
@@ -416,6 +461,7 @@ var _ = Describe("Model classes", func() {
 		Expect(coding.DefaultAgentClasses()).To(Equal(map[string]string{
 			coding.Explore.Name:       string(coding.ClassFast),
 			coding.Plan.Name:          string(coding.ClassReasoning),
+			coding.General.Name:       string(coding.ClassBalanced),
 			coding.ValidatorAgentName: string(coding.ClassReasoning),
 		}))
 	})
@@ -465,6 +511,52 @@ var _ = Describe("SubAgent definitions", func() {
 		Expect(names).To(HaveKey("list_files"))
 		Expect(names).To(HaveKey("search_files"))
 		Expect(names).NotTo(HaveKey("write_file"))
+	})
+
+	Describe("General", func() {
+		toolNames := func(readOnly bool) map[string]bool {
+			deps := coding.SubAgentDeps{
+				Runner:     &mockRunner{},
+				WorkingDir: "/home/kvarn/workspace",
+				SessionID:  "sub-sess",
+				ReadOnly:   readOnly,
+			}
+			names := map[string]bool{}
+			for _, t := range coding.General.Tools(deps) {
+				names[t.Name()] = true
+			}
+			return names
+		}
+
+		It("exposes the shell and the edit tools", func() {
+			names := toolNames(false)
+			Expect(names).To(HaveKey("exec_command"))
+			Expect(names).To(HaveKey("read_file"))
+			Expect(names).To(HaveKey("search_files"))
+			Expect(names).To(HaveKey("edit_file"))
+			Expect(names).To(HaveKey("write_file"))
+		})
+
+		It("leaves out the edit tools in a read-only run", func() {
+			names := toolNames(true)
+			Expect(names).To(HaveKey("exec_command"))
+			Expect(names).To(HaveKey("read_file"))
+			Expect(names).NotTo(HaveKey("edit_file"))
+			Expect(names).NotTo(HaveKey("write_file"))
+		})
+
+		It("cannot spawn sub-agents or merge", func() {
+			for _, readOnly := range []bool{false, true} {
+				names := toolNames(readOnly)
+				Expect(names).NotTo(HaveKey("spawn_agent"))
+				Expect(names).NotTo(HaveKey("merge_branch"))
+				Expect(names).NotTo(HaveKey("finish_merge"))
+			}
+		})
+
+		It("is registered as a built-in sub-agent", func() {
+			Expect(coding.BuiltinSubAgents()).To(HaveKeyWithValue(coding.General.Name, coding.General))
+		})
 	})
 
 	It("bounds sub-agent tool results too", func() {
