@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/aholstenson/kvarn/internal/agent/cost"
+	"github.com/aholstenson/kvarn/internal/attachment"
 	"github.com/aholstenson/kvarn/internal/session"
 	sqlitestore "github.com/aholstenson/kvarn/internal/session/sqlite"
 )
@@ -447,6 +448,110 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 				})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(all).To(HaveLen(4))
+			})
+		})
+
+		Describe("attachments", func() {
+			withAttachment := func(s *session.Session, name string, data []byte) *session.Session {
+				s.Attachments = append(s.Attachments, session.Attachment{
+					Name:      name,
+					MediaType: "text/plain; charset=utf-8",
+					Size:      int64(len(data)),
+					SHA256:    attachment.Digest(data),
+					Delivery:  attachment.DeliveryVM,
+					Data:      data,
+				})
+				return s
+			}
+
+			It("round-trips the description and keeps the content apart", func() {
+				data := []byte("spec contents")
+				s := withAttachment(makeSession("s1", "proj", session.StatePending, base), "spec.md", data)
+				Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+				got, err := store.GetSession(ctx, "s1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got.Attachments).To(HaveLen(1))
+				Expect(got.Attachments[0].Name).To(Equal("spec.md"))
+				Expect(got.Attachments[0].MediaType).To(Equal("text/plain; charset=utf-8"))
+				Expect(got.Attachments[0].Size).To(Equal(int64(len(data))))
+				Expect(got.Attachments[0].SHA256).To(Equal(attachment.Digest(data)))
+				Expect(got.Attachments[0].Delivery).To(Equal(attachment.DeliveryVM))
+				// A read never carries the bytes.
+				Expect(got.Attachments[0].Data).To(BeNil())
+
+				listed, err := store.ListSessions(ctx, session.SessionFilter{})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(listed).To(HaveLen(1))
+				Expect(listed[0].Attachments).To(HaveLen(1))
+				Expect(listed[0].Attachments[0].Data).To(BeNil())
+
+				content, err := store.AttachmentData(ctx, attachment.Digest(data))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(content).To(Equal(data))
+			})
+
+			It("reads back as nil for a session that carried none", func() {
+				Expect(store.CreateSession(ctx, makeSession("s1", "proj", session.StatePending, base))).To(Succeed())
+
+				got, err := store.GetSession(ctx, "s1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got.Attachments).To(BeNil())
+			})
+
+			It("stores an empty file", func() {
+				s := withAttachment(makeSession("s1", "proj", session.StatePending, base), "empty.txt", nil)
+				Expect(store.CreateSession(ctx, s)).To(Succeed())
+
+				content, err := store.AttachmentData(ctx, attachment.Digest(nil))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(content).To(BeEmpty())
+			})
+
+			It("reports content no session stored as not found", func() {
+				_, err := store.AttachmentData(ctx, attachment.Digest([]byte("never stored")))
+				Expect(err).To(MatchError(session.ErrAttachmentNotFound))
+			})
+
+			It("stores nothing for a session the idempotency key refuses", func() {
+				first := makeSession("s1", "proj", session.StatePending, base)
+				first.IdempotencyKey = "k"
+				Expect(store.CreateSession(ctx, first)).To(Succeed())
+
+				data := []byte("only on the refused session")
+				second := withAttachment(makeSession("s2", "proj", session.StatePending, base), "a.txt", data)
+				second.IdempotencyKey = "k"
+				Expect(store.CreateSession(ctx, second)).To(MatchError(session.ErrIdempotencyConflict))
+
+				_, err := store.AttachmentData(ctx, attachment.Digest(data))
+				Expect(err).To(MatchError(session.ErrAttachmentNotFound))
+			})
+
+			It("prunes content with the last session that names it", func() {
+				shared := []byte("sent to both jobs")
+				own := []byte("sent to the old job only")
+				old := makeSession("old", "p", session.StateCompleted, base.Add(-48*time.Hour))
+				withAttachment(old, "shared.txt", shared)
+				withAttachment(old, "own.txt", own)
+				young := withAttachment(makeSession("young", "p", session.StateCompleted, base), "shared.txt", shared)
+				Expect(store.CreateSession(ctx, old)).To(Succeed())
+				Expect(store.CreateSession(ctx, young)).To(Succeed())
+
+				n, err := store.PruneTerminalBefore(ctx, base.Add(-24*time.Hour))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(1))
+
+				_, err = store.AttachmentData(ctx, attachment.Digest(own))
+				Expect(err).To(MatchError(session.ErrAttachmentNotFound))
+				content, err := store.AttachmentData(ctx, attachment.Digest(shared))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(content).To(Equal(shared))
+
+				n, err = store.PruneTerminalBefore(ctx, base.Add(time.Hour))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(1))
+				_, err = store.AttachmentData(ctx, attachment.Digest(shared))
+				Expect(err).To(MatchError(session.ErrAttachmentNotFound))
 			})
 		})
 

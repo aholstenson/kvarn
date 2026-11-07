@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aholstenson/kvarn/internal/agent/cost"
+	"github.com/aholstenson/kvarn/internal/attachment"
 )
 
 // State represents the current phase of a session.
@@ -208,6 +209,24 @@ type Session struct {
 	// Written at creation and never updated, so it stays a record of what was
 	// asked for. Nil when the submission carried none.
 	Metadata map[string]string
+	// Attachments are the files the submission carried. Like Metadata they are
+	// written at creation and never updated. Reads return them without their
+	// content; AttachmentData returns the bytes.
+	Attachments []Attachment
+}
+
+// Attachment is one file a submission carried.
+type Attachment struct {
+	Name      string              `json:"name"`
+	MediaType string              `json:"media_type"`
+	Size      int64               `json:"size"`
+	SHA256    string              `json:"sha256"`
+	Delivery  attachment.Delivery `json:"delivery,omitempty"`
+	// Data is the content. It is set only on the session handed to
+	// Store.CreateSession, which keeps the bytes apart from the session
+	// record, keyed by SHA256. Every read leaves it nil, so a session loaded
+	// for a listing does not carry megabytes it will not use.
+	Data []byte `json:"-"`
 }
 
 // Event represents something that happened to a session.
@@ -506,6 +525,10 @@ type CreateParams struct {
 	// Metadata is the caller's annotations on the submission; see the field of
 	// the same name on Session. Nil for a submission that carried none.
 	Metadata map[string]string
+	// Attachments are the files the submission carried, already checked with
+	// attachment.Prepare. Create computes each size and digest from the
+	// content, so the stored record always describes the stored bytes.
+	Attachments []attachment.File
 }
 
 type Manager interface {
@@ -517,6 +540,9 @@ type Manager interface {
 	// FindByIdempotencyKey returns the session holding key within project, or
 	// nil when none does.
 	FindByIdempotencyKey(ctx context.Context, project, key string) (*Session, error)
+	// AttachmentData returns the content of a stored attachment by its
+	// digest. It returns ErrAttachmentNotFound when no session holds it.
+	AttachmentData(ctx context.Context, sha256 string) ([]byte, error)
 	List(ctx context.Context, filter SessionFilter) ([]*Session, error)
 	UpdateState(ctx context.Context, id string, state State, message string) error
 	// UpdateCost persists the latest cost snapshot on the session. Watchers

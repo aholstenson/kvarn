@@ -294,9 +294,14 @@ var _ = Describe("writeProfileScripts", func() {
 		Expect(tools).NotTo(ContainSubstring("export PATH="))
 	})
 
-	It("writes nothing when there is nothing to write", func() {
+	It("always names the run directories, with the tool environment", func() {
 		Expect(writeProfileScripts(context.Background(), proxy, augmentations{}, nil, nil)).To(Succeed())
-		Expect(proxy.uploaded).To(BeNil())
+
+		Expect(proxy.uploadedNames()).To(Equal([]string{"kvarn-tools.sh"}))
+		tools, _ := proxy.uploadedFile("kvarn-tools.sh")
+		Expect(tools).To(Equal(
+			"export KVARN_ATTACHMENTS_DIR='/home/kvarn/attachments'\n" +
+				"export KVARN_SCRATCH_DIR='/home/kvarn/scratch'\n"))
 	})
 })
 

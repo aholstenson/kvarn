@@ -64,6 +64,7 @@ land on, so passing both is an error. See
 | `--mode` | `feedback` with `--pr-ref`, else `auto` | A built-in mode or one the project's `kvarn.yml` defines. See `kvarn modes list`. |
 | `--mode-spec` | — | Path to a YAML or JSON mode definition to run with, or `-` for stdin. |
 | `--validation` | — | Path to a YAML or JSON file of validation steps to add to the project's own, or `-` for stdin. |
+| `--attach` | — | File to send with the job, as `[DELIVERY=]PATH` (repeatable); see below. |
 | `--watch` | off | Stream the session until it reaches a terminal state. Without it the session ID is printed and the command returns. |
 | `--idempotency-key` | — | Makes the submission safe to retry; see below. |
 | `--api-key` | — | API key. Env: `KVARN_API_KEY`. |
@@ -118,6 +119,45 @@ add checks; the project's steps always run too. A job can add at most 16 steps.
 They run only when the mode runs validation. They are stored on the session, so
 a `retry` runs them again, and an idempotency key reused with different steps is
 refused.
+
+`--attach` sends a file the run needs: a screenshot, a specification, a log, a
+data file. A delivery before the path says where the file goes:
+
+| Delivery | Where the file goes |
+| --- | --- |
+| `auto` (the default) | The VM. An image or a PDF also goes into the agent's first message, if its model accepts it; if not, it stays in the VM only. |
+| `vm` | The VM only. |
+| `prompt` | The first message only. |
+| `both` | The VM and the first message. |
+
+For example, `--attach prompt=brief.md --attach vm=dump.sql --attach shot.png`.
+A path that contains `=` but does not start with a delivery name is read as a
+path; write `./vm=x` for a file named `vm=x`.
+
+A file in the VM is written read-only to `/home/kvarn/attachments/<file name>`
+before setup runs. The directory is outside the repository, so a file becomes
+part of the change only if the agent copies it in. Setup and validation steps
+find the directory in `$KVARN_ATTACHMENTS_DIR`. The task message lists every
+file with where it is. The agent reads a text file with `read_file` and looks
+at an image or a PDF with `view_file`, which also shows files it makes itself,
+such as a screenshot in `$KVARN_SCRATCH_DIR`.
+
+A file with `prompt` or `both` must be an image, a PDF, or text of at most
+256 KiB, and the agent's model must accept it. The orchestrator checks this
+when the job is submitted and refuses the job if a file fails. It checks again
+before the run boots its VM, in case the model configuration changed, and fails
+the run if a file fails then.
+
+A job can carry at most 20 files, 10 MiB each and 32 MiB together. The file
+name must be unique within the job. The orchestrator detects each media type
+from the content, and refuses an image or PDF that cannot be read as one.
+Attachments are stored with the session, so a `retry` sends them again and an
+idempotency key reused with different files is refused. A job with `--pr-ref`
+gets only its own attachments, not those of the job that opened the pull
+request. Do not attach secrets: anyone who can read the session sees the names,
+and the agent reads the content.
+
+`kvarn jobs show` lists the attachments of a job.
 
 `--pr-ref` with a mode that delivers `new-pull-request` — `auto`, `implement`
 and `fix` among them — commits onto the named pull request rather than opening a
@@ -257,6 +297,7 @@ exactly one of `--diff` or `--apply`.
 | `--mode` | `auto` | Built-in agent mode. Modes a repository defines are for orchestrator jobs; a local job has no forge to deliver to. |
 | `--model` | `coding-agent` | Model the `coding-agent` class resolves to for this job. |
 | `--max-validation-retries` | `0` | Additional agent passes after a required validation failure. |
+| `--attach` | — | File to give the agent, as `[DELIVERY=]PATH` (repeatable), with the same rules as [`kvarn jobs start --attach`](#kvarn-jobs-start-project-prompt). |
 | `--cache-quota` | `5G` | Per-project tool-cache limit for the LRU sweep. |
 | `--agents-file`, `--credentials-file` | `~/.config/kvarn/…` | Config overrides. |
 

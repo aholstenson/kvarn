@@ -79,6 +79,9 @@ var _ = Describe("kvarn jobs", func() {
 			State:     session.StatePending,
 			Priority:  3,
 			CreatedAt: now.Add(-30 * time.Minute), UpdatedAt: now, QueuedAt: now.Add(-30 * time.Minute),
+			Attachments: []session.Attachment{{
+				Name: "mockup.png", MediaType: "image/png", Size: 2048, SHA256: "abc",
+			}},
 		})).To(Succeed())
 		Expect(store.CreateSession(ctx, &session.Session{
 			ID: "broken", ProjectName: "beta", Mode: "feedback", PRRef: "42",
@@ -134,6 +137,7 @@ var _ = Describe("kvarn jobs", func() {
 		Expect(out).To(ContainSubstring("Session:"))
 		Expect(out).To(ContainSubstring("Priority:"))
 		Expect(out).To(ContainSubstring("make the tests pass"))
+		Expect(out).To(MatchRegexp(`Attachment:\s+mockup\.png \(image/png, 2048 bytes\)`))
 	})
 
 	It("cancels by filter and reports what it stopped", func() {

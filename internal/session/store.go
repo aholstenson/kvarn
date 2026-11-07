@@ -13,6 +13,10 @@ import (
 // up describing the single job that was created.
 var ErrIdempotencyConflict = errors.New("idempotency key already used")
 
+// ErrAttachmentNotFound is returned by AttachmentData for a digest no stored
+// session refers to.
+var ErrAttachmentNotFound = errors.New("attachment not found")
+
 // PersistedEvent is one durable entry in a session's monotonic event log.
 type PersistedEvent struct {
 	SessionID  string
@@ -145,7 +149,15 @@ type Store interface {
 	// when the session carries an idempotency key another session in the same
 	// project already holds, so two concurrent submissions of one retried
 	// request settle in the store rather than both creating a job.
+	//
+	// The content of each attachment is written in the same transaction as the
+	// session, keyed by its digest, so a session never exists without the
+	// files it names. Content another session already stored is not written
+	// again.
 	CreateSession(ctx context.Context, s *Session) error
+	// AttachmentData returns stored attachment content by its digest, or
+	// ErrAttachmentNotFound.
+	AttachmentData(ctx context.Context, sha256 string) ([]byte, error)
 	GetSession(ctx context.Context, id string) (*Session, error)
 	// FindByIdempotencyKey returns the session holding key within project, or
 	// nil when none does. An empty key matches nothing: a submission without a
@@ -205,7 +217,9 @@ type Store interface {
 	// the VMs these sessions referenced are gone either way.
 	ReconcileStartup(ctx context.Context, opts ReconcileOpts) (ReconcileResult, error)
 	// PruneTerminalBefore deletes terminal sessions whose created_at is before
-	// cutoff; their events cascade. Returns the number of sessions removed.
+	// cutoff; their events cascade. Attachment content that no remaining
+	// session refers to is deleted with them. Returns the number of sessions
+	// removed.
 	PruneTerminalBefore(ctx context.Context, cutoff time.Time) (int, error)
 
 	Close() error

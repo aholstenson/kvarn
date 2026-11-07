@@ -380,6 +380,48 @@ var _ = Describe("Mode.BuildPrompt", func() {
 			"\n## Feedback to address\n\nUse exponential backoff."))
 	})
 
+	It("lists the attachments after the task", func() {
+		got := coding.ModeReview.BuildPrompt(coding.ContextInput{
+			Task: "Match the mockup.",
+			Attachments: []coding.AttachmentRef{
+				{Name: "mockup.png", MediaType: "image/png", Size: 2048, Path: "/home/kvarn/attachments/mockup.png"},
+				{Name: "notes.md", MediaType: "text/plain; charset=utf-8", Size: 12, Path: "/home/kvarn/attachments/notes.md"},
+			},
+		})
+		Expect(got).To(HavePrefix("Match the mockup.\n\n## Attachments\n\n"))
+		Expect(got).To(HaveSuffix("\n\n- /home/kvarn/attachments/mockup.png (image/png, 2.0K)\n" +
+			"- /home/kvarn/attachments/notes.md (text/plain; charset=utf-8, 12B)\n"))
+	})
+
+	It("lists the attachments after a context pack too", func() {
+		got := coding.ModeFeedback.BuildPrompt(coding.ContextInput{
+			PRTitle:     "feat: add retries",
+			Task:        "Use exponential backoff.",
+			Attachments: []coding.AttachmentRef{{Name: "log.txt", MediaType: "text/plain", Size: 1, Path: "/home/kvarn/attachments/log.txt"}},
+		})
+		Expect(got).To(ContainSubstring("## Feedback to address\n\nUse exponential backoff.\n\n## Attachments"))
+	})
+
+	It("says which files are also in the message, and which are only there", func() {
+		got := coding.ModeReview.BuildPrompt(coding.ContextInput{
+			Task: "Match the mockup.",
+			Attachments: []coding.AttachmentRef{
+				{Name: "mockup.png", MediaType: "image/png", Size: 1, Path: "/home/kvarn/attachments/mockup.png", InPrompt: true},
+				{Name: "brief.md", MediaType: "text/plain", Size: 2, InPrompt: true},
+			},
+		})
+		Expect(got).To(HaveSuffix("- /home/kvarn/attachments/mockup.png (image/png, 1B; also included in this message)\n" +
+			"- brief.md (text/plain, 2B; included in this message only, not in the VM)\n"))
+	})
+
+	It("leaves off a file that reached neither the VM nor the message", func() {
+		got := coding.ModeReview.BuildPrompt(coding.ContextInput{
+			Task:        "Match the mockup.",
+			Attachments: []coding.AttachmentRef{{Name: "mockup.png", MediaType: "image/png", Size: 1}},
+		})
+		Expect(got).To(Equal("Match the mockup."))
+	})
+
 	It("leaves out a block whose content is unavailable", func() {
 		got := coding.ModeFeedback.BuildPrompt(coding.ContextInput{
 			PRTitle: "feat: add retries",

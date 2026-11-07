@@ -17,6 +17,9 @@ type memStore struct {
 	mu       sync.Mutex
 	sessions map[string]Row
 	events   map[string][]PersistedEvent
+	// blobs holds attachment content by digest, apart from the rows, the
+	// same way the SQLite store keeps it in its own table.
+	blobs map[string][]byte
 }
 
 // newMemStore creates an empty in-memory store.
@@ -24,6 +27,7 @@ func newMemStore() *memStore {
 	return &memStore{
 		sessions: make(map[string]Row),
 		events:   make(map[string][]PersistedEvent),
+		blobs:    make(map[string][]byte),
 	}
 }
 
@@ -49,7 +53,22 @@ func (m *memStore) CreateSession(_ context.Context, s *Session) error {
 		}
 	}
 	m.sessions[s.ID] = row
+	for _, a := range s.Attachments {
+		if _, ok := m.blobs[a.SHA256]; !ok {
+			m.blobs[a.SHA256] = slices.Clone(a.Data)
+		}
+	}
 	return nil
+}
+
+func (m *memStore) AttachmentData(_ context.Context, sha256 string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	data, ok := m.blobs[sha256]
+	if !ok {
+		return nil, ErrAttachmentNotFound
+	}
+	return slices.Clone(data), nil
 }
 
 func (m *memStore) FindByIdempotencyKey(_ context.Context, project, key string) (*Session, error) {
@@ -480,7 +499,32 @@ func (m *memStore) PruneTerminalBefore(_ context.Context, cutoff time.Time) (int
 		delete(m.events, id) // events cascade
 		n++
 	}
+	if n > 0 {
+		if err := m.pruneBlobsLocked(); err != nil {
+			return n, err
+		}
+	}
 	return n, nil
+}
+
+// pruneBlobsLocked deletes attachment content no remaining session refers to.
+func (m *memStore) pruneBlobsLocked() error {
+	used := make(map[string]bool)
+	for _, row := range m.sessions {
+		sess, err := RowToSession(row)
+		if err != nil {
+			return err
+		}
+		for _, a := range sess.Attachments {
+			used[a.SHA256] = true
+		}
+	}
+	for sha := range m.blobs {
+		if !used[sha] {
+			delete(m.blobs, sha)
+		}
+	}
+	return nil
 }
 
 func (m *memStore) Close() error { return nil }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
+	"github.com/aholstenson/kvarn/internal/sandbox"
 )
 
 // Mode is the high-level operating mode of a coding-agent run: what the agent
@@ -100,8 +101,9 @@ func (m *Mode) SystemPrompt(projectName, repoURL, branch string, rc *repocontext
 - Repository: %s
 - Branch: %s
 - Working directory: /home/kvarn/workspace (the repository is cloned here)
+- Scratch directory: %s (for throwaway files such as converted inputs, rendered images or logs; nothing in it becomes part of your changes; read_file reads text there and view_file shows images and PDFs)
 
-`, m.role, projectName, repoURL, branch)
+`, m.role, projectName, repoURL, branch, sandbox.ScratchDir)
 	sb.WriteString(m.body)
 	m.appendCommentConventions(&sb, content)
 	appendContextBlocks(&sb, rc, subAgents)

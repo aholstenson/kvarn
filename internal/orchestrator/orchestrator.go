@@ -181,7 +181,7 @@ func (s *Service) mux(authInterceptor connect.ServerInterceptor) *http.ServeMux 
 
 	server := connect.NewServer(interceptors...)
 	kvarnv1connect.RegisterOrchestratorServiceHandler(server, s)
-	connecthttp.Mount(mux, server, connecthttp.WithReadMaxBytes(0))
+	connecthttp.Mount(mux, server, connecthttp.WithReadMaxBytes(maxStartJobRequestBytes))
 
 	return mux
 }

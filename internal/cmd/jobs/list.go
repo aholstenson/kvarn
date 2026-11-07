@@ -157,6 +157,11 @@ func (c *ShowCmd) Run() error {
 	for _, k := range slices.Sorted(maps.Keys(s.Metadata)) {
 		fmt.Fprintf(tw, "Meta %s:\t%s\n", k, Dash(s.Metadata[k]))
 	}
+	// Attachments keep the order they were sent in, which is the order the
+	// agent was told about them in.
+	for _, a := range s.Attachments {
+		fmt.Fprintf(tw, "Attachment:\t%s (%s, %d bytes)\n", a.Name, a.MediaType, a.Size)
+	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}

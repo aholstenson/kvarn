@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"maps"
 	"regexp"
 	"sort"
 	"strings"
@@ -393,7 +394,7 @@ func buildProfileScript(env map[string]string, pathPrepend []string) string {
 }
 
 // writeProfileScripts uploads /etc/profile.d/kvarn-tools.sh (tool environment
-// from the registry), /etc/profile.d/kvarn-user.sh (user `environment:`
+// from the registry, and the run directories), /etc/profile.d/kvarn-user.sh (user `environment:`
 // values), /etc/profile.d/kvarn-secrets.sh (resolved secrets, possibly
 // containing bearer placeholders), and /etc/profile.d/zz-kvarn-path.sh (the
 // registry's PATH entries).
@@ -412,7 +413,11 @@ func buildProfileScript(env map[string]string, pathPrepend []string) string {
 // The secrets file is uploaded with mode 0600 since the runner shell is the
 // only consumer that needs to source it. Files with empty content are skipped.
 func writeProfileScripts(ctx context.Context, proxy RunnerProxy, aug augmentations, userEnv, secrets map[string]string) error {
-	tools := buildProfileScript(aug.Env, nil)
+	// The run directories go in with the tool environment: both are kvarn's
+	// own defaults, which a project's `environment:` may still override.
+	toolEnv := runDirEnv()
+	maps.Copy(toolEnv, aug.Env)
+	tools := buildProfileScript(toolEnv, nil)
 	user := buildProfileScript(userEnv, nil)
 	secretScript := buildProfileScript(secrets, nil)
 	pathScript := buildProfileScript(nil, aug.PathPrepend)

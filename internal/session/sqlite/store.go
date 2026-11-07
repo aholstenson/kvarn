@@ -87,25 +87,46 @@ func New(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) CreateSession(ctx context.Context, sess *session.Session) error {
+func (s *Store) CreateSession(ctx context.Context, sess *session.Session) (retErr error) {
 	row, err := session.SessionToRow(sess)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin create session: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	for _, a := range sess.Attachments {
+		data := a.Data
+		if data == nil {
+			// The column is NOT NULL, and an empty file is still a file.
+			data = []byte{}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO attachment_blobs (sha256, data) VALUES (?, ?) ON CONFLICT (sha256) DO NOTHING`,
+			a.SHA256, data); err != nil {
+			return fmt.Errorf("insert attachment %q: %w", a.Name, err)
+		}
+	}
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO sessions
 		   (id, project_name, prompt, mode, mode_spec_json, result_text, state, message, error,
 		    pull_request_url, pr_ref, head_branch, base_branch, parent_session_id, cost_json,
 		    created_at, updated_at,
 		    key_id, priority, attempts, queued_at, idempotency_key, continuation, metadata_json,
-		    validation_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    validation_json, attachments_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.ID, row.ProjectName, row.Prompt, row.Mode, row.ModeSpecJSON, row.Result,
 		row.State, row.Message,
 		row.Error, row.PullRequestURL, row.PRRef, row.HeadBranch, row.BaseBranch,
 		row.ParentSessionID, row.CostJSON, row.CreatedAt, row.UpdatedAt,
 		row.KeyID, row.Priority, row.Attempts, row.QueuedAt, row.IdempotencyKey,
-		row.Continuation, row.MetadataJSON, row.ValidationJSON,
+		row.Continuation, row.MetadataJSON, row.ValidationJSON, row.AttachmentsJSON,
 	)
 	if isUniqueViolation(err) {
 		return session.ErrIdempotencyConflict
@@ -113,7 +134,24 @@ func (s *Store) CreateSession(ctx context.Context, sess *session.Session) error 
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit create session: %w", err)
+	}
 	return nil
+}
+
+// AttachmentData returns stored attachment content by its digest.
+func (s *Store) AttachmentData(ctx context.Context, sha256 string) ([]byte, error) {
+	var data []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT data FROM attachment_blobs WHERE sha256 = ?`, sha256).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, session.ErrAttachmentNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read attachment: %w", err)
+	}
+	return data, nil
 }
 
 // FindByIdempotencyKey resolves the session that claimed key within project.
@@ -138,7 +176,7 @@ const sessionColumns = `id, project_name, prompt, mode, mode_spec_json, result_t
 	`message, error, pull_request_url, ` +
 	`pr_ref, head_branch, base_branch, parent_session_id, cost_json, created_at, updated_at, ` +
 	`key_id, priority, attempts, queued_at, idempotency_key, continuation, metadata_json, ` +
-	`validation_json`
+	`validation_json, attachments_json`
 
 func scanSession(scan func(dest ...any) error) (*session.Session, error) {
 	var r session.Row
@@ -147,7 +185,7 @@ func scanSession(scan func(dest ...any) error) (*session.Session, error) {
 		&r.Error, &r.PullRequestURL, &r.PRRef, &r.HeadBranch, &r.BaseBranch,
 		&r.ParentSessionID, &r.CostJSON, &r.CreatedAt, &r.UpdatedAt,
 		&r.KeyID, &r.Priority, &r.Attempts, &r.QueuedAt, &r.IdempotencyKey,
-		&r.Continuation, &r.MetadataJSON, &r.ValidationJSON); err != nil {
+		&r.Continuation, &r.MetadataJSON, &r.ValidationJSON, &r.AttachmentsJSON); err != nil {
 		return nil, err
 	}
 	return session.RowToSession(r)
@@ -702,14 +740,31 @@ func (s *Store) PruneTerminalBefore(ctx context.Context, cutoff time.Time) (int,
 	placeholders, args := terminalStates()
 	args = append(args, session.ToMicros(cutoff))
 	err := retryBusy(func() error {
-		res, err := s.db.ExecContext(ctx,
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		res, err := tx.ExecContext(ctx,
 			`DELETE FROM sessions WHERE state IN (`+placeholders+`) AND created_at < ?`,
 			args...)
 		if err != nil {
 			return err
 		}
-		n, err = res.RowsAffected()
-		return err
+		if n, err = res.RowsAffected(); err != nil {
+			return err
+		}
+		// The blobs go in the same transaction as the sessions that named
+		// them, so content is never left behind with nothing to reach it.
+		if n > 0 {
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM attachment_blobs WHERE sha256 NOT IN (
+				   SELECT json_extract(a.value, '$.sha256')
+				     FROM sessions, json_each(sessions.attachments_json) AS a)`); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
 	})
 	if err != nil {
 		return 0, fmt.Errorf("prune terminal: %w", err)

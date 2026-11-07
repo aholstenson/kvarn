@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aholstenson/kvarn/internal/agent/cost"
+	"github.com/aholstenson/kvarn/internal/attachment"
 )
 
 // liveBuffer is the per-subscriber output channel capacity.
@@ -121,6 +122,7 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*Session, er
 		IdempotencyKey:  params.IdempotencyKey,
 		Continuation:    params.Continuation,
 		Metadata:        cloneMetadata(params.Metadata),
+		Attachments:     newAttachments(params.Attachments),
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		// A new session enters the backlog at creation, so its queue age starts
@@ -138,6 +140,10 @@ func (m *manager) Create(ctx context.Context, params CreateParams) (*Session, er
 
 func (m *manager) FindByIdempotencyKey(ctx context.Context, project, key string) (*Session, error) {
 	return m.store.FindByIdempotencyKey(ctx, project, key)
+}
+
+func (m *manager) AttachmentData(ctx context.Context, sha256 string) ([]byte, error) {
+	return m.store.AttachmentData(ctx, sha256)
 }
 
 func (m *manager) Get(ctx context.Context, id string) (*Session, error) {
@@ -544,7 +550,45 @@ func copySession(s *Session) *Session {
 	// Metadata is the one reference field on a Session, and a snapshot handed to
 	// a watcher must not alias the map a later read rebuilds.
 	cp.Metadata = cloneMetadata(s.Metadata)
+	cp.Attachments = describeAttachments(s.Attachments)
 	return &cp
+}
+
+// newAttachments builds the stored records for a submission's files. The size
+// and digest come from the content here rather than from the caller, so the
+// record cannot disagree with the bytes stored under it.
+func newAttachments(files []attachment.File) []Attachment {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]Attachment, len(files))
+	for i, f := range files {
+		out[i] = Attachment{
+			Name:      f.Name,
+			MediaType: f.MediaType,
+			Size:      int64(len(f.Data)),
+			SHA256:    attachment.Digest(f.Data),
+			Delivery:  f.Delivery,
+			Data:      f.Data,
+		}
+	}
+	return out
+}
+
+// describeAttachments copies attachment records without their content. A
+// snapshot handed out of the manager is a description of the session, and
+// keeping the bytes on it would hold them in memory for as long as any
+// watcher holds the snapshot.
+func describeAttachments(in []Attachment) []Attachment {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Attachment, len(in))
+	for i, a := range in {
+		a.Data = nil
+		out[i] = a
+	}
+	return out
 }
 
 // cloneMetadata copies an annotation map, returning nil for an empty one so

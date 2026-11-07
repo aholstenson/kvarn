@@ -9,6 +9,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/aholstenson/kvarn/internal/attachment"
 	"github.com/aholstenson/kvarn/internal/session"
 )
 
@@ -77,6 +78,33 @@ var _ = Describe("Manager", func() {
 		Expect(sess.ID).NotTo(BeEmpty())
 		Expect(sess.ProjectName).To(Equal("my-project"))
 		Expect(sess.State).To(Equal(session.StatePending))
+	})
+
+	It("describes each attachment from its content and stores the bytes", func() {
+		data := []byte("the specification")
+		sess, err := mgr.Create(ctx, session.CreateParams{
+			ProjectName: "proj",
+			Prompt:      "do something",
+			Mode:        "auto",
+			Attachments: []attachment.File{{
+				Name:      "spec.md",
+				MediaType: "text/plain; charset=utf-8",
+				Delivery:  attachment.DeliveryVM,
+				Data:      data,
+			}},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sess.Attachments).To(Equal([]session.Attachment{{
+			Name:      "spec.md",
+			MediaType: "text/plain; charset=utf-8",
+			Size:      int64(len(data)),
+			SHA256:    attachment.Digest(data),
+			Delivery:  attachment.DeliveryVM,
+		}}))
+
+		content, err := mgr.AttachmentData(ctx, attachment.Digest(data))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(content).To(Equal(data))
 	})
 
 	It("gets and lists sessions", func() {

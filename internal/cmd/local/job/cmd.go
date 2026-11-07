@@ -23,6 +23,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/agent/coding"
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
+	"github.com/aholstenson/kvarn/internal/attachment"
 	"github.com/aholstenson/kvarn/internal/cmd/imageutil"
 	"github.com/aholstenson/kvarn/internal/cmd/local/bootui"
 	credtoml "github.com/aholstenson/kvarn/internal/config/credential/tomlstore"
@@ -66,6 +67,8 @@ type Cmd struct {
 	Mode            string `help:"Agent mode: auto, implement, fix, feedback, review, research." default:"auto"`
 
 	MaxValidationRetries int `help:"Number of additional agent passes after a required validation failure. 0 disables retries." name:"max-validation-retries" default:"0"`
+
+	Attach []string `help:"File to give the agent, as [DELIVERY=]PATH (repeatable). DELIVERY is auto (the default: the VM, and the prompt too for an image or PDF the model accepts), vm, prompt or both. In the VM a file is at /home/kvarn/attachments/<file name>, outside the repository. At most 20 files, 10 MiB each and 32 MiB together." placeholder:"[DELIVERY=]PATH"`
 }
 
 // Run is the kong-invoked entry point. It resolves defaults and delegates to
@@ -127,6 +130,27 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 	mode := deps.Mode
 	if mode == nil {
 		mode = coding.ModeAuto
+	}
+
+	// Attachments are read and checked before anything boots, by the same
+	// rules the orchestrator applies, so a bad file fails here at once.
+	read, err := attachment.ReadArgs(c.Attach)
+	if err != nil {
+		return err
+	}
+	attachments, err := attachment.Prepare(read)
+	if err != nil {
+		return err
+	}
+	promptAttachments, err := planPromptAttachments(ctx, deps.Agent, attachments)
+	if err != nil {
+		return err
+	}
+	var vmAttachments []attachment.File
+	for _, f := range attachments {
+		if f.Delivery.InVM() {
+			vmAttachments = append(vmAttachments, f)
+		}
 	}
 
 	// Resolve (and if needed download) the disk image before the TUI starts so
@@ -234,6 +258,7 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		CacheProvider: cacheProvider,
 		ProjectID:     projectID,
 		Secrets:       secretEnv,
+		Attachments:   vmAttachments,
 		OnEvent:       boot.OnEvent,
 	})
 	if err != nil {
@@ -298,12 +323,16 @@ func (c *Cmd) runWith(ctx context.Context, deps runDeps) error {
 		Branch:      branch,
 		WorkingDir:  sess.GetWorkingDir(),
 		SessionID:   sess.GetShellSessionID(),
-		Prompt:      c.Prompt,
-		Mode:        mode,
-		Runner:      sess.GetRunner(),
-		RepoContext: rc,
-		OnProgress:  progress,
-		Cost:        tracker,
+		Prompt: mode.BuildPrompt(coding.ContextInput{
+			Task:        c.Prompt,
+			Attachments: attachmentRefs(attachments, promptAttachments),
+		}),
+		PromptAttachments: promptAttachments,
+		Mode:              mode,
+		Runner:            sess.GetRunner(),
+		RepoContext:       rc,
+		OnProgress:        progress,
+		Cost:              tracker,
 		// A local run has no forge and no operator config, so the repository's
 		// own `pull_request:` block is the only layer there is. It still
 		// applies: `kvarn local job` produces the same summary the orchestrator would
@@ -946,4 +975,53 @@ func (s *summaryState) finish(out io.Writer, err error, mode string, diffLines i
 	}
 
 	return nil
+}
+
+// planPromptAttachments asks the agent which files go into the first message,
+// before anything boots, so a file the model refuses fails the command at
+// once. An agent that cannot plan gets the files that asked for the prompt.
+func planPromptAttachments(ctx context.Context, a agent.Agent, files []attachment.File) ([]attachment.File, error) {
+	var candidates []attachment.File
+	for _, f := range files {
+		if f.PromptCandidate() {
+			candidates = append(candidates, f)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	if planner, ok := a.(agent.PromptAttachmentPlanner); ok {
+		return planner.PlanPromptAttachments(ctx, candidates)
+	}
+	var asked []attachment.File
+	for _, f := range candidates {
+		if f.Delivery.InPrompt() {
+			asked = append(asked, f)
+		}
+	}
+	return asked, nil
+}
+
+// attachmentRefs describes the attachments for the task message.
+func attachmentRefs(files, inPrompt []attachment.File) []coding.AttachmentRef {
+	if len(files) == 0 {
+		return nil
+	}
+	prompted := make(map[string]bool, len(inPrompt))
+	for _, f := range inPrompt {
+		prompted[f.Name] = true
+	}
+	out := make([]coding.AttachmentRef, len(files))
+	for i, f := range files {
+		out[i] = coding.AttachmentRef{
+			Name:      f.Name,
+			MediaType: f.MediaType,
+			Size:      int64(len(f.Data)),
+			InPrompt:  prompted[f.Name],
+		}
+		if f.Delivery.InVM() {
+			out[i].Path = sandbox.AttachmentPath(f.Name)
+		}
+	}
+	return out
 }

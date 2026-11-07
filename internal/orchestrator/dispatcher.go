@@ -364,6 +364,7 @@ func (s *Service) resolveSpec(ctx context.Context, sess *session.Session) (jobSp
 		validation:   validation,
 		userPrompt:   sess.Prompt,
 		metadata:     sess.Metadata,
+		attachments:  sess.Attachments,
 		agentContext: coding.ContextInput{Task: sess.Prompt},
 		baseBranch:   sess.BaseBranch,
 	}

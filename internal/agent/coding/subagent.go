@@ -47,6 +47,9 @@ type SubAgentDeps struct {
 	// that can write must then leave its own edit tools out, so that spawning
 	// it cannot change files the parent itself may not change.
 	ReadOnly bool
+	// Model is the model the sub-agent runs on, which view_file checks a
+	// file against.
+	Model llms.Model
 }
 
 // SubAgents holds the registered sub-agent types keyed by Name.
@@ -60,11 +63,13 @@ func readOnlyTools(deps SubAgentDeps) []llms.ToolDef {
 		sessionID:  deps.SessionID,
 		skills:     deps.Skills,
 		tasks:      NewTaskList(),
+		viewModel:  deps.Model,
 	}
 	// Guarded like the parent's toolkit: a sub-agent has its own conversation
 	// to fill up, and an unbounded result ends its run just as surely.
 	return tk.guard([]llms.ToolDef{
 		llms.NewToolDef(&readFileTool{toolkit: tk}),
+		llms.NewToolDef(&viewFileTool{toolkit: tk}),
 		llms.NewToolDef(&listFilesTool{toolkit: tk}),
 		llms.NewToolDef(&searchFilesTool{toolkit: tk}),
 	})

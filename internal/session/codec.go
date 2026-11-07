@@ -79,6 +79,11 @@ type Row struct {
 	// below the request boundary interprets a key: the pairs are written once
 	// and read back whole.
 	MetadataJSON string
+	// AttachmentsJSON describes the submission's attachments as a JSON array,
+	// "[]" when there are none. Only the description lives on the row; the
+	// content is stored apart, keyed by digest, so reading a session never
+	// reads the bytes.
+	AttachmentsJSON string
 }
 
 // SessionToRow converts a Session into its persisted Row form, marshalling the
@@ -97,6 +102,14 @@ func SessionToRow(s *Session) (Row, error) {
 			return Row{}, fmt.Errorf("marshal metadata: %w", err)
 		}
 		metadataJSON = string(b)
+	}
+	attachmentsJSON := "[]"
+	if len(s.Attachments) > 0 {
+		b, err := json.Marshal(s.Attachments)
+		if err != nil {
+			return Row{}, fmt.Errorf("marshal attachments: %w", err)
+		}
+		attachmentsJSON = string(b)
 	}
 	return Row{
 		ID:              s.ID,
@@ -124,6 +137,7 @@ func SessionToRow(s *Session) (Row, error) {
 		IdempotencyKey:  s.IdempotencyKey,
 		Continuation:    s.Continuation,
 		MetadataJSON:    metadataJSON,
+		AttachmentsJSON: attachmentsJSON,
 	}, nil
 }
 
@@ -140,6 +154,12 @@ func RowToSession(r Row) (*Session, error) {
 	if r.MetadataJSON != "" && r.MetadataJSON != "{}" {
 		if err := json.Unmarshal([]byte(r.MetadataJSON), &metadata); err != nil {
 			return nil, fmt.Errorf("unmarshal metadata: %w", err)
+		}
+	}
+	var attachments []Attachment
+	if r.AttachmentsJSON != "" && r.AttachmentsJSON != "[]" {
+		if err := json.Unmarshal([]byte(r.AttachmentsJSON), &attachments); err != nil {
+			return nil, fmt.Errorf("unmarshal attachments: %w", err)
 		}
 	}
 	return &Session{
@@ -168,6 +188,7 @@ func RowToSession(r Row) (*Session, error) {
 		IdempotencyKey:  r.IdempotencyKey,
 		Continuation:    r.Continuation,
 		Metadata:        metadata,
+		Attachments:     attachments,
 	}, nil
 }
 

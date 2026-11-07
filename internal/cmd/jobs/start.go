@@ -8,6 +8,7 @@ import (
 	"os"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/internal/attachment"
 	"github.com/aholstenson/kvarn/internal/cmd/client"
 	"gopkg.in/yaml.v3"
 )
@@ -33,6 +34,8 @@ type StartCmd struct {
 	IdempotencyKey string `help:"Key that makes this submission replayable: resending it returns the session the first request created instead of starting a second job." default:""`
 
 	Meta map[string]string `help:"Annotation to record on the job, as key=value (repeatable). Stored with the session and filterable via 'kvarn jobs list --meta'; never seen by the agent." placeholder:"KEY=VALUE"`
+
+	Attach []string `help:"File to send with the job, as [DELIVERY=]PATH (repeatable). DELIVERY is auto (the default: the VM, and the prompt too for an image or PDF the model accepts), vm, prompt or both. In the VM a file is at /home/kvarn/attachments/<file name>, outside the repository. At most 20 files, 10 MiB each and 32 MiB together." placeholder:"[DELIVERY=]PATH"`
 }
 
 func (c *StartCmd) Run() error {
@@ -60,6 +63,19 @@ func (c *StartCmd) Run() error {
 			return err
 		}
 		req.Validation = v
+	}
+	files, err := attachment.ReadArgs(c.Attach)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		// The media type is left for the orchestrator to detect, so a file
+		// is typed the same way whichever client sent it.
+		req.Attachments = append(req.Attachments, &v1.Attachment{
+			Name:     f.Name,
+			Data:     f.Data,
+			Delivery: deliveryToProto(f.Delivery),
+		})
 	}
 	// Only one starting point reaches the wire. Leaving both unset is the
 	// project's default branch, which is what a caller who named neither meant.
@@ -150,4 +166,17 @@ func loadModeSpec(path string) (*v1.ModeSpec, error) {
 		Start:       spec.Start,
 		Context:     spec.Context,
 	}, nil
+}
+
+func deliveryToProto(d attachment.Delivery) v1.AttachmentDelivery {
+	switch d {
+	case attachment.DeliveryVM:
+		return v1.AttachmentDelivery_ATTACHMENT_DELIVERY_VM
+	case attachment.DeliveryPrompt:
+		return v1.AttachmentDelivery_ATTACHMENT_DELIVERY_PROMPT
+	case attachment.DeliveryBoth:
+		return v1.AttachmentDelivery_ATTACHMENT_DELIVERY_BOTH
+	default:
+		return v1.AttachmentDelivery_ATTACHMENT_DELIVERY_UNSPECIFIED
+	}
 }

@@ -10,6 +10,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/internal/attachment"
 	"github.com/aholstenson/kvarn/internal/config/project"
 	"github.com/aholstenson/kvarn/internal/orchestrator"
 	"github.com/aholstenson/kvarn/internal/session"
@@ -178,6 +179,31 @@ var _ = Describe("RetryJob", func() {
 		unchanged, err := mgr.Get(ctx, original.ID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(unchanged.State).To(Equal(session.StateFailed))
+	})
+
+	It("carries the attachments to the new session", func() {
+		data := []byte("the mockup")
+		sess, err := mgr.Create(ctx, session.CreateParams{
+			ProjectName: "alpha",
+			Prompt:      "match the mockup",
+			Mode:        "implement",
+			BaseBranch:  "release",
+			Attachments: []attachment.File{{
+				Name: "mockup.txt", MediaType: "text/plain; charset=utf-8", Data: data,
+			}},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(mgr.Fail(ctx, sess.ID, context.Canceled)).To(Succeed())
+
+		resp, err := svc.RetryJob(ctx, &v1.RetryJobRequest{SessionId: sess.ID})
+		Expect(err).NotTo(HaveOccurred())
+
+		retried, err := mgr.Get(ctx, resp.SessionId)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(retried.Attachments).To(Equal(sess.Attachments))
+		content, err := mgr.AttachmentData(ctx, attachment.Digest(data))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(content).To(Equal(data))
 	})
 
 	It("replaces the prompt when the caller supplies one", func() {

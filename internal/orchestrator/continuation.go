@@ -143,6 +143,7 @@ func (s *Service) startContinuation(
 		Priority:        jobPriority(proj, choice.name),
 		IdempotencyKey:  p.idempotencyKey,
 		Metadata:        p.metadata,
+		Attachments:     p.attachments,
 	})
 	// continuationMu serializes this against another request in the same process, so
 	// a conflict here means a second orchestrator sharing the store claimed the

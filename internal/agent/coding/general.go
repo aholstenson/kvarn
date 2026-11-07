@@ -46,6 +46,7 @@ Be concise; the parent will act on your report.`
 			sessionID:  deps.SessionID,
 			skills:     deps.Skills,
 			tasks:      NewTaskList(),
+			viewModel:  deps.Model,
 		}
 		// The toolkit has no sub-agents and no merge target, so neither
 		// spawn_agent nor the merge tools are in the set it returns.

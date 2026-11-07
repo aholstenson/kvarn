@@ -165,6 +165,7 @@ func (c *codingConversation) ValidatePrompt(ctx context.Context, check agent.Pro
 		Skills:     skills,
 		RepoCtx:    c.agentCtx.RepoContext,
 		Tracker:    c.agentCtx.Cost,
+		ViewModel:  model,
 	})
 
 	key := check.Step.Name + "\x00" + check.Step.Prompt

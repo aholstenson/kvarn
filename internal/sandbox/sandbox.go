@@ -13,6 +13,7 @@ import (
 	"time"
 
 	v1 "github.com/aholstenson/kvarn/gen/kvarn/v1"
+	"github.com/aholstenson/kvarn/internal/attachment"
 	"github.com/aholstenson/kvarn/internal/dispatch"
 	egressproxy "github.com/aholstenson/kvarn/internal/egress/proxy"
 	"github.com/aholstenson/kvarn/internal/project"
@@ -194,6 +195,11 @@ type Opts struct {
 	// derived from a base domain given on the command line, and the servers
 	// inside the guest still have to resolve them.
 	HostAliases map[string]string
+
+	// Attachments are written into AttachmentsDir once the workspace is in
+	// place, before any setup step runs, so setup can already use them. The
+	// caller passes only the files this run delivers to the VM.
+	Attachments []attachment.File
 
 	// NixpkgsRev turns a nixpkgs channel name into the commit to install from,
 	// so the guest is handed a commit rather than a branch Nix has to resolve
@@ -676,6 +682,10 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	// it has to be read before any step or agent can move HEAD.
 	sess.BaseCommit = ResolveBaseCommit(ctx, proxy, workingDir)
 
+	if err := prepareRunDirs(ctx, proxy, opts.Attachments); err != nil {
+		return nil, err
+	}
+
 	// Restore cache before installing dependencies so that Nix's eval and
 	// fetcher state in ~/.cache/nix is in place before `nix profile add`
 	// runs. Restoring after would overlay a stale tarball onto open sqlite
@@ -704,11 +714,14 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	}
 
 	// Write curated, user, and secret environment to /etc/profile.d so
-	// privileged `su -l` execs pick them up.
+	// privileged `su -l` execs pick them up. This happens with or without a
+	// project config, because the run directories are named there too.
+	var userEnv map[string]string
 	if opts.Config != nil {
-		if err := writeProfileScripts(ctx, proxy, aug, opts.Config.Environment, opts.Secrets); err != nil {
-			return nil, fmt.Errorf("write profile.d scripts: %w", err)
-		}
+		userEnv = opts.Config.Environment
+	}
+	if err := writeProfileScripts(ctx, proxy, aug, userEnv, opts.Secrets); err != nil {
+		return nil, fmt.Errorf("write profile.d scripts: %w", err)
 	}
 
 	sess.Runner = proxy

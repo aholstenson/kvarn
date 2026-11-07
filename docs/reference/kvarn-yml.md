@@ -239,6 +239,15 @@ environment:
 Injected into every step. Keys must be valid POSIX environment variable names;
 values may not contain NUL or newline.
 
+kvarn also sets two variables in every step, for directories outside the
+workspace:
+
+- `KVARN_ATTACHMENTS_DIR` is `/home/kvarn/attachments`, where the files sent
+  with the job are (see `kvarn jobs start --attach` in the
+  [CLI reference](cli.md#kvarn-jobs-start-project-prompt)).
+- `KVARN_SCRATCH_DIR` is `/home/kvarn/scratch`, for throwaway output such as
+  converted files or rendered images. Nothing in it becomes part of the change.
+
 ## `secrets`
 
 ```yaml

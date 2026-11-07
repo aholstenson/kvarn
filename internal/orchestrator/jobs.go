@@ -85,14 +85,24 @@ func (s *Service) RetryJob(ctx context.Context, req *v1.RetryJobRequest) (*v1.Re
 		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
 	}
 
+	// The attachments travel for the same reason: they are part of what was
+	// asked for. Their content is read back and submitted again, so the retry
+	// stores its own reference to it and keeps it whatever happens to the
+	// session it retries.
+	attachments, err := loadAttachments(ctx, s.sessionMgr, sess.Attachments, nil)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err.Error()).WithCause(err)
+	}
+
 	p := startJobParams{
-		project:    sess.ProjectName,
-		prompt:     prompt,
-		mode:       sess.Mode,
-		modeSpec:   modeSpec,
-		metadata:   sess.Metadata,
-		validation: validation,
-		procedure:  kvarnv1connect.OrchestratorServiceRetryJobProcedure,
+		project:     sess.ProjectName,
+		prompt:      prompt,
+		mode:        sess.Mode,
+		modeSpec:    modeSpec,
+		metadata:    sess.Metadata,
+		validation:  validation,
+		attachments: attachments,
+		procedure:   kvarnv1connect.OrchestratorServiceRetryJobProcedure,
 	}
 	if sess.Continuation {
 		p.prRef = sess.PRRef

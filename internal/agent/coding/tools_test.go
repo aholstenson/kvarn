@@ -222,6 +222,31 @@ var _ = Describe("CodingToolkit", func() {
 			Expect(output.Lines[0].Hash).To(Equal("cedar"))
 		})
 
+		DescribeTable("reads the attachments and scratch directories with that directory as the root",
+			func(path, wantRoot string) {
+				var got string
+				runner.readFileFunc = func(_ context.Context, req *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
+					got = req.WorkingDir
+					Expect(req.Path).To(Equal(path))
+					return &v1.ReadFileResponse{}, nil
+				}
+
+				_, err := tools["read_file"].Execute(ctx, &coding.ReadFileInput{Path: path})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got).To(Equal(wantRoot))
+			},
+			Entry("an attachment", "/home/kvarn/attachments/spec.md", sandbox.AttachmentsDir),
+			Entry("a scratch file", "/home/kvarn/scratch/out/page-1.txt", sandbox.ScratchDir),
+			Entry("a relative path", "spec.md", "/home/kvarn/workspace"),
+			Entry("an absolute workspace path", "/home/kvarn/workspace/main.go", "/home/kvarn/workspace"),
+			// Cleaned before it is matched, so it cannot be sent with a root
+			// it climbs out of; the runner then refuses it as outside the
+			// workspace.
+			Entry("a path that climbs out of a root", "/home/kvarn/attachments/../.profile", "/home/kvarn/workspace"),
+			Entry("a name that only starts like a root", "/home/kvarn/attachments-old/a.txt", "/home/kvarn/workspace"),
+			Entry("the root itself", "/home/kvarn/scratch", "/home/kvarn/workspace"),
+		)
+
 		It("bounds a read that asks for no particular window", func() {
 			runner.readFileFunc = func(_ context.Context, req *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
 				Expect(req.StartLine).To(Equal(int32(1)))

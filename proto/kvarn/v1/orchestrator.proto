@@ -65,6 +65,60 @@ message StartJobRequest {
   // always run too. They follow the same rules as the kvarn.yml steps and run
   // only when the mode runs validation.
   Validation validation = 9;
+
+  // Optional files the run needs: screenshots, specifications, logs, data.
+  // They are stored with the session, so they wait in the backlog with the
+  // prompt and travel with a retry. A continuation gets only the attachments
+  // its own request carries, never those of the job that opened the pull
+  // request.
+  //
+  // At most 20 attachments, 10 MiB each and 32 MiB together. Not a place for
+  // secrets: anyone who can read the session can see the names, and the agent
+  // reads the contents.
+  repeated Attachment attachments = 10;
+}
+
+// AttachmentDelivery says where an attachment goes in a run. A file in the
+// VM is at /home/kvarn/attachments/<name>, outside the repository. A file in
+// the prompt is part of the first message to the agent's model.
+enum AttachmentDelivery {
+  // The VM always, and also the prompt when the file is an image or a PDF
+  // that the agent's model accepts. Text stays in the VM, where the agent
+  // reads it in windows. This choice never fails a submission or a run.
+  ATTACHMENT_DELIVERY_UNSPECIFIED = 0;
+  // Only a file in the VM. The task message names its path.
+  ATTACHMENT_DELIVERY_VM = 1;
+  // Only the first message. The file must be an image, a PDF, or text of at
+  // most 256 KiB, and the agent's model must accept it. A submission that
+  // breaks either rule is refused with INVALID_ARGUMENT. If the model
+  // configuration changes before the run and the model no longer accepts
+  // the file, the run fails before its VM boots.
+  ATTACHMENT_DELIVERY_PROMPT = 2;
+  // Both the VM and the first message, with the rules of PROMPT.
+  ATTACHMENT_DELIVERY_BOTH = 3;
+}
+
+// Attachment is one file sent with a job.
+message Attachment {
+  // The file name the agent sees. A single path element: no "/", "\", NUL or
+  // control characters, not "." or "..", at most 255 bytes, and unique within
+  // the job.
+  string name = 1;
+  // Optional MIME type. When empty, kvarn detects it from the content. When
+  // set, it must agree with the content for images and PDFs.
+  string media_type = 2;
+  bytes data = 3;
+  AttachmentDelivery delivery = 4;
+}
+
+// AttachmentInfo describes a stored attachment without its content.
+message AttachmentInfo {
+  string name = 1;
+  string media_type = 2;
+  int64 size = 3;
+  // Hex SHA-256 of the content.
+  string sha256 = 4;
+  AttachmentDelivery delivery = 5;
 }
 
 // Validation is the wire form of the `validation:` block in kvarn.yml. A
@@ -190,6 +244,9 @@ message GetSessionResponse {
   bool continuation = 19;
   // The annotations the submission carried; see StartJobRequest.metadata.
   map<string, string> metadata = 20;
+  // The files the submission carried, without their content; see
+  // StartJobRequest.attachments.
+  repeated AttachmentInfo attachments = 21;
 }
 
 // GetSessionResultRequest asks for what a run produced in writing.

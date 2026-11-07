@@ -145,6 +145,7 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 		MergeTarget:  mergeTarget,
 		Checkpointer: checkpointer,
 		Progress:     progress,
+		ViewModel:    models.Classes[ModelMain],
 	})
 	systemPrompt := mode.SystemPrompt(agentCtx.ProjectName, agentCtx.RepoURL, agentCtx.Branch, agentCtx.RepoContext, subAgents, agentCtx.PullRequest)
 	if mergeTarget != nil {
@@ -190,7 +191,7 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 	if agentCtx.Cost != nil {
 		sessCtx = llms.WithMetrics(sessCtx, agentCtx.Cost.Recorder())
 	}
-	sess, err := c.start(sessCtx, llms.NewMessage(llms.RoleUser, llms.NewTextPart(agentCtx.Prompt)))
+	sess, err := c.start(sessCtx, firstMessage(agentCtx.Prompt, agentCtx.PromptAttachments))
 	if err != nil {
 		return nil, err
 	}

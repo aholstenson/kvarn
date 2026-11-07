@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -45,6 +46,11 @@ type CodingToolkit struct {
 	checkpointer agent.Checkpointer
 	merge        *mergeState
 
+	// viewModel is the model of the agent these tools serve. view_file checks
+	// a file against it before it adds the file to the conversation. Nil
+	// skips the check.
+	viewModel llms.Model
+
 	// progress receives what each sub-agent run does. Nil when nobody watches.
 	progress *SubAgentProgress
 	// runsMu guards runs, which counts the runs started per sub-agent name so
@@ -83,6 +89,9 @@ type CodingToolkitOpts struct {
 	// Progress receives the events of every sub-agent run. Nil keeps the runs
 	// silent.
 	Progress *SubAgentProgress
+	// ViewModel is the model of the agent the tools serve, which view_file
+	// checks a file against. Nil skips the check.
+	ViewModel llms.Model
 }
 
 // SubAgentProgress is where a sub-agent run reports what it does. A sub-agent
@@ -129,6 +138,7 @@ func NewCodingToolkitWithOpts(opts CodingToolkitOpts) *CodingToolkit {
 		checkpointer: opts.Checkpointer,
 		merge:        &mergeState{},
 		progress:     opts.Progress,
+		viewModel:    opts.ViewModel,
 		runs:         make(map[string]int),
 	}
 }
@@ -193,6 +203,7 @@ func (t *CodingToolkit) Tools() []llms.ToolDef {
 	tools := []llms.ToolDef{
 		llms.NewToolDef(&execCommandTool{toolkit: t}),
 		llms.NewToolDef(&readFileTool{toolkit: t}),
+		llms.NewToolDef(&viewFileTool{toolkit: t}),
 		llms.NewToolDef(&editFileTool{toolkit: t}),
 		llms.NewToolDef(&writeFileTool{toolkit: t}),
 		llms.NewToolDef(&listFilesTool{toolkit: t}),
@@ -226,6 +237,7 @@ func (t *CodingToolkit) ReadOnlyTools() []llms.ToolDef {
 	tools := []llms.ToolDef{
 		llms.NewToolDef(&execCommandTool{toolkit: t}),
 		llms.NewToolDef(&readFileTool{toolkit: t}),
+		llms.NewToolDef(&viewFileTool{toolkit: t}),
 		llms.NewToolDef(&listFilesTool{toolkit: t}),
 		llms.NewToolDef(&searchFilesTool{toolkit: t}),
 		llms.NewToolDef(&addTaskTool{toolkit: t}),
@@ -386,7 +398,7 @@ func (t *execCommandTool) Render(o *ExecCommandOutput) llms.ToolResult {
 const defaultReadLines = 2000
 
 type ReadFileInput struct {
-	Path      string `json:"path" jsonschema:"description=Path to the file. Relative to the workspace root; an absolute path inside the workspace also works."`
+	Path      string `json:"path" jsonschema:"description=Path to the file. Relative to the workspace root; an absolute path inside the workspace, the attachments directory or the scratch directory also works."`
 	StartLine int    `json:"start_line,omitempty" jsonschema:"description=1-indexed start line. Omit or set to 0 to start at the top of the file."`
 	EndLine   int    `json:"end_line,omitempty" jsonschema:"description=1-indexed inclusive end line. Omit or set to 0 for the rest of the window."`
 }
@@ -427,7 +439,7 @@ func (t *readFileTool) Execute(ctx context.Context, input *ReadFileInput) (*Read
 	start, end := readWindow(input.StartLine, input.EndLine)
 
 	resp, err := t.toolkit.runner.ReadFile(ctx, &v1.ReadFileRequest{
-		WorkingDir: t.toolkit.workingDir,
+		WorkingDir: t.toolkit.readRoot(input.Path),
 		Path:       input.Path,
 		StartLine:  int32(start),
 		EndLine:    int32(end),
@@ -446,6 +458,29 @@ func (t *readFileTool) Execute(ctx context.Context, input *ReadFileInput) (*Read
 		out.Lines[i] = TaggedLineView{Line: l.Line, Hash: l.Hash, Content: l.Content}
 	}
 	return out, nil
+}
+
+// extraReadRoots are the directories outside the workspace that read_file
+// reads: the files the requester sent, and the scratch directory the agent
+// writes throwaway output to. Edits keep the workspace as their only root, so
+// the agent can read both but changes only the repository.
+var extraReadRoots = []string{sandbox.AttachmentsDir, sandbox.ScratchDir}
+
+// readRoot returns the working directory a read of p is sent with. The runner
+// refuses a path outside the working directory it is given, so an absolute
+// path inside one of extraReadRoots is sent with that root instead of the
+// workspace. The path is cleaned first, so "../" cannot climb out of a root
+// and still be sent with it; the runner checks the path again either way.
+func (tk *CodingToolkit) readRoot(p string) string {
+	if path.IsAbs(p) {
+		clean := path.Clean(p)
+		for _, root := range extraReadRoots {
+			if strings.HasPrefix(clean, root+"/") {
+				return root
+			}
+		}
+	}
+	return tk.workingDir
 }
 
 // readWindow resolves the window a read actually asks the runner for. An
@@ -1368,6 +1403,7 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 		SessionID:  subSessionID,
 		Skills:     t.toolkit.skills,
 		ReadOnly:   t.readOnly,
+		Model:      model,
 	}
 
 	maxOut := cfg.MaxOutputTokens

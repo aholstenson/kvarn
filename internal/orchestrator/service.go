@@ -25,6 +25,7 @@ import (
 	"github.com/aholstenson/kvarn/internal/agent/coding"
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
+	"github.com/aholstenson/kvarn/internal/attachment"
 	"github.com/aholstenson/kvarn/internal/config/apikey"
 	"github.com/aholstenson/kvarn/internal/config/credential"
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
@@ -788,6 +789,10 @@ type startJobParams struct {
 	// validationJSON is validation as it is stored on the session. startJob
 	// sets it from validation, so both arms store and compare the same text.
 	validationJSON string
+	// attachments are the files the submission carries. startJob replaces
+	// them with the checked form from attachment.Prepare, so both arms store
+	// and compare the resolved media types.
+	attachments []attachment.File
 	// procedure names the RPC on whose behalf the submission is authorized, for
 	// the audit log that records a denial.
 	procedure string
@@ -839,6 +844,14 @@ func (s *Service) startJob(ctx context.Context, p startJobParams) (*submissionRe
 	}
 	if err := validateMetadata(p.metadata); err != nil {
 		return nil, invalidArgument(err)
+	}
+	attachments, err := attachment.Prepare(p.attachments)
+	if err != nil {
+		return nil, invalidArgument(err)
+	}
+	p.attachments = attachments
+	if err := s.checkPromptAttachments(ctx, attachments); err != nil {
+		return nil, err
 	}
 
 	// The mode is checked here but not necessarily settled: a project defines
@@ -963,6 +976,7 @@ func (s *Service) startFresh(
 		Priority:       jobPriority(proj, choice.name),
 		IdempotencyKey: p.idempotencyKey,
 		Metadata:       p.metadata,
+		Attachments:    p.attachments,
 	})
 	// Two copies of one retried request can both get past the lookup above; the
 	// store's uniqueness constraint is what decides between them, and the loser
@@ -1011,7 +1025,8 @@ func (s *Service) findClaimedSession(ctx context.Context, project, key string) (
 // is part of what was submitted: two requests naming the same inline mode but
 // defining it differently are two different jobs, and collapsing them into one
 // would silently drop the second. The validation steps a submission added are
-// compared for the same reason: they decide when the run is done.
+// compared for the same reason: they decide when the run is done, and so are
+// the attachments, by digest: a different file is a different job.
 //
 // Metadata is deliberately not compared. It annotates the work rather than
 // describing it, and a caller that regenerates a trace id between two sends of
@@ -1021,7 +1036,7 @@ func (s *Service) findClaimedSession(ctx context.Context, project, key string) (
 func sameSubmission(claimed *session.Session, p startJobParams, mode, modeSpecJSON, startFrom, claimedStartFrom string) error {
 	if claimed.Prompt == p.prompt && claimed.Mode == mode &&
 		claimed.ModeSpecJSON == modeSpecJSON && claimed.ValidationJSON == p.validationJSON &&
-		claimedStartFrom == startFrom {
+		claimedStartFrom == startFrom && sameAttachments(claimed.Attachments, p.attachments) {
 		return nil
 	}
 	return connect.Errorf(connect.CodeAlreadyExists,
@@ -1033,6 +1048,10 @@ func (s *Service) StartJob(ctx context.Context, msg *v1.StartJobRequest) (*v1.St
 	if err != nil {
 		return nil, invalidArgument(err)
 	}
+	attachments, err := attachmentsFromProto(msg.GetAttachments())
+	if err != nil {
+		return nil, invalidArgument(err)
+	}
 	p := startJobParams{
 		project:        msg.Project,
 		prompt:         msg.Prompt,
@@ -1041,6 +1060,7 @@ func (s *Service) StartJob(ctx context.Context, msg *v1.StartJobRequest) (*v1.St
 		idempotencyKey: msg.IdempotencyKey,
 		metadata:       msg.GetMetadata(),
 		validation:     validation,
+		attachments:    attachments,
 		procedure:      kvarnv1connect.OrchestratorServiceStartJobProcedure,
 	}
 	// An unset start_from is the project's default branch. A set-but-empty one
@@ -1107,6 +1127,10 @@ type jobSpec struct {
 	// operator's comment header and body footer can name them. The agent never
 	// sees it and nothing about the run depends on it.
 	metadata map[string]string
+	// attachments describe the files the submission carried. Their content is
+	// read from the store just before the VM boots, so a job waiting in the
+	// backlog holds no bytes in memory.
+	attachments []session.Attachment
 	// agentContext holds the pieces a context pack can be built from. Which of
 	// them the agent actually sees is the mode's `context` axis, applied inside
 	// the run.
@@ -1359,6 +1383,17 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		s.failRun(termCtx, rootCtx, sessionID, err)
 		return
 	}
+	// Which attachments go into the first message is settled before the VM
+	// boots, so a file the model refuses fails the run while that is cheap,
+	// and the task message can say where each file is. A continuation lists
+	// only its own request's files, which are the only ones its session holds.
+	promptAttachments, err := s.planPromptAttachments(ctx, spec.attachments)
+	if err != nil {
+		log.Error("attachments cannot go into the prompt", "error", err)
+		s.failRun(termCtx, rootCtx, sessionID, err)
+		return
+	}
+	spec.agentContext.Attachments = attachmentRefs(spec.attachments, promptAttachments)
 	agentPrompt := mode.BuildPrompt(spec.agentContext)
 
 	// Settle what this run's pull request, commit and comments will say. Both
@@ -1509,6 +1544,16 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		createOpts.Network.SecretInjector = egressproxy.NewPlaceholderInjector(managedSecrets(managed), log)
 	}
 
+	// The attachments' content is read only now, just before the VM boots, so
+	// a job that waited in the backlog held none of it in memory.
+	vmAttachments, err := loadAttachments(ctx, s.sessionMgr, spec.attachments,
+		func(f attachment.File) bool { return f.Delivery.InVM() })
+	if err != nil {
+		log.Error("failed to read attachments", "error", err)
+		s.failRun(termCtx, rootCtx, sessionID, err)
+		return
+	}
+
 	// Boot VM, transfer files, configure firewall/tools/container.
 	create := s.sandboxFactory
 	if create == nil {
@@ -1538,6 +1583,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		ProjectID:     cache.ProjectID(proj.RepoURL),
 		Namespace:     s.cacheNamespace,
 		Secrets:       secretEnv,
+		Attachments:   vmAttachments,
 		OnEvent:       s.makeEventAdapter(ctx, sessionID),
 	})
 	if err != nil {
@@ -1597,6 +1643,8 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 		PullRequest: prBehavior.PullRequest,
 		Cost:        tracker,
 		MergeTarget: mergeTarget,
+		// Only the files the plan chose; the task message says which they are.
+		PromptAttachments: promptAttachments,
 		OnProgress: func(event agent.ProgressEvent) {
 			switch e := event.(type) {
 			case agent.ProgressTurn:
@@ -2427,6 +2475,7 @@ func sessionToProto(sess *session.Session) *v1.GetSessionResponse {
 		Priority:        int32(sess.Priority),
 		Attempts:        int32(sess.Attempts),
 		Metadata:        sess.Metadata,
+		Attachments:     attachmentInfosToProto(sess.Attachments),
 	}
 }
 

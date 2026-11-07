@@ -6,6 +6,7 @@ import (
 
 	"github.com/aholstenson/kvarn/internal/agent/cost"
 	"github.com/aholstenson/kvarn/internal/agent/repocontext"
+	"github.com/aholstenson/kvarn/internal/attachment"
 	forgeconfig "github.com/aholstenson/kvarn/internal/config/forge"
 	"github.com/aholstenson/kvarn/internal/project"
 	"github.com/aholstenson/kvarn/internal/sandbox"
@@ -191,6 +192,22 @@ type Context struct {
 	// for the result to go.
 	MergeTarget  *MergeTarget
 	Checkpointer Checkpointer
+	// PromptAttachments are the files that go into the first message, as
+	// PromptAttachmentPlanner chose them. The task message in Prompt already
+	// lists them.
+	PromptAttachments []attachment.File
+}
+
+// PromptAttachmentPlanner is implemented by an agent that can put files into
+// the first message to its model. Only the agent knows which model a run
+// uses, so only the agent can tell whether the model accepts a file.
+type PromptAttachmentPlanner interface {
+	// PlanPromptAttachments returns the files from candidates that go into
+	// the first message. A file whose delivery asks for the prompt is always
+	// in the result, or the call fails naming it, because the submitter asked
+	// for it. A file with automatic delivery is in the result only when the
+	// model accepts it. It makes no call to the model.
+	PlanPromptAttachments(ctx context.Context, candidates []attachment.File) ([]attachment.File, error)
 }
 
 // MergeTarget is the branch a run may merge, and the exact commit of it that was
