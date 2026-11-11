@@ -3,6 +3,7 @@ package coding
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -210,6 +211,7 @@ type agentSession interface {
 	Step(ctx context.Context) (llms.StepInfo, bool, error)
 	Result() (llms.Result, error)
 	Messages() []*llms.Message
+	Inject(msgs ...*llms.Message)
 }
 
 // codingConversation drives an llms session across one or more agent turns.
@@ -234,6 +236,11 @@ type codingConversation struct {
 
 	// validator carries what prompt checks remember between attempts.
 	validator validatorState
+
+	// blocks is the content policy recovery of the main loop. It lives as
+	// long as the conversation, so the steer limit covers the whole job and
+	// not each validation pass.
+	blocks blockRecovery
 }
 
 // turnState is what the conversation remembers about the model call currently
@@ -442,13 +449,18 @@ func (c *codingConversation) Run(ctx context.Context, followup string) (string, 
 	}
 
 	for {
-		_, done, err := c.sess.Step(ctx)
+		info, done, err := c.sess.Step(ctx)
 		if err != nil {
 			if c.agentCtx.Cost != nil {
 				c.agentCtx.Cost.CheckBudget()
 			}
-			return "", err
+			// A failed step reports the steps that completed before it.
+			if err := c.recoverFromBlock(ctx, &c.blocks, c.sess, info.Step+1, err); err != nil {
+				return "", err
+			}
+			continue
 		}
+		c.blocks.stepped()
 		if done {
 			break
 		}
@@ -459,6 +471,10 @@ func (c *codingConversation) Run(ctx context.Context, followup string) (string, 
 
 	result, err := c.sess.Result()
 	if err != nil {
+		var refusal *llms.RefusalError
+		if errors.As(err, &refusal) {
+			return "", refusalError(err)
+		}
 		return "", err
 	}
 	if textResult, ok := result.(llms.TextResult); ok {

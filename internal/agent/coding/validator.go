@@ -204,9 +204,14 @@ func (c *codingConversation) ValidatePrompt(ctx context.Context, check agent.Pro
 	// one more round, here. The failed turn leaves the conversation as it was,
 	// so the check continues where it stopped, and the coding agent is not
 	// sent round again for a problem that is not in its change.
+	//
+	// A content policy block gets the same recovery as in the main loop. The
+	// coding agent cannot fix a block either, so one that does not clear stops
+	// validation with an error that says why.
 	retried := false
+	var blocks blockRecovery
 	for {
-		_, done, stepErr := sess.Step(ctx)
+		info, done, stepErr := sess.Step(ctx)
 		if stepErr != nil {
 			c.checkBudget()
 			if llms.IsRetryable(stepErr) && !retried && ctx.Err() == nil {
@@ -214,20 +219,33 @@ func (c *codingConversation) ValidatePrompt(ctx context.Context, check agent.Pro
 				slog.Warn("the validator model is unavailable; trying the check once more", "step", check.Step.Name, "error", stepErr)
 				continue
 			}
-			return sandbox.PromptVerdict{}, timedOut(fmt.Errorf("validator: %w", stepErr))
+			err := c.recoverFromBlock(ctx, &blocks, sess, info.Step+1, stepErr)
+			if err == nil {
+				slog.Warn("the content filter blocked the validator; trying the check again", "step", check.Step.Name, "error", stepErr)
+				continue
+			}
+			return sandbox.PromptVerdict{}, timedOut(fmt.Errorf("validator: %w", err))
 		}
+		blocks.stepped()
 		if done {
 			break
 		}
 	}
 	c.checkBudget()
 
+	// The verdict is one call with no steps to steer between, so a block gets
+	// only the retry.
 	verdict, err := c.requestVerdict(ctx, model, cfg, sess.Messages())
-	if err != nil && llms.IsRetryable(err) && ctx.Err() == nil {
-		slog.Warn("the validator model is unavailable; asking for the verdict once more", "step", check.Step.Name, "error", err)
+	if err != nil && (llms.IsRetryable(err) || llms.IsContentPolicy(err)) && ctx.Err() == nil {
+		slog.Warn("the validator could not give a verdict; asking once more", "step", check.Step.Name, "error", err)
 		verdict, err = c.requestVerdict(ctx, model, cfg, sess.Messages())
 	}
 	if err != nil {
+		var policy *llms.ContentPolicyError
+		if errors.As(err, &policy) {
+			err = fmt.Errorf("%w: the model provider's content filter blocked the validator's verdict, also after a retry: %w",
+				agent.ErrRefused, policy)
+		}
 		return sandbox.PromptVerdict{}, timedOut(err)
 	}
 	findings := cleanFindings(verdict.Findings)

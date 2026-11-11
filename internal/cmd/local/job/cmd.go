@@ -640,6 +640,11 @@ func makeProgressCallback(renderer *taskui.Renderer, toolCount *int) (func(agent
 		case agent.ProgressTurn:
 			switch e.Phase {
 			case agent.TurnStarted:
+				// A call that the content filter blocked never ends. The
+				// call that replaces it starts here, so close the old one.
+				if prev := turns[e.AgentID]; prev != nil {
+					renderer.SetStatus(prev, taskui.StatusFailed, "(no reply)")
+				}
 				item := renderer.AddItem(turnLabel(e.AgentID, e.Step))
 				renderer.SetStatus(item, taskui.StatusRunning, e.Model)
 				turns[e.AgentID] = item

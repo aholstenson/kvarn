@@ -173,6 +173,8 @@ func (f *fakeSession) Messages() []*llms.Message {
 	return append(msgs, llms.NewMessage(llms.RoleAssistant, llms.NewTextPart(f.reply)))
 }
 
+func (f *fakeSession) Inject(...*llms.Message) {}
+
 var _ = Describe("conversation followup", func() {
 	var (
 		conv     *codingConversation
