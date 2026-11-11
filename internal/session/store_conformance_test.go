@@ -1027,6 +1027,179 @@ func DescribeStore(name string, newStore func() session.Store) bool {
 			}
 		})
 
+		Describe("deliveries", func() {
+			newDelivery := func(id string) *session.Delivery {
+				return &session.Delivery{
+					SessionID:     id,
+					Plan:          []byte(`{"push":{"branch":"kvarn/` + id + `"}}`),
+					Attempts:      2,
+					NextAttemptAt: base.Add(5 * time.Minute),
+					Deadline:      base.Add(24 * time.Hour),
+					LastError:     "forge returned 503",
+				}
+			}
+
+			It("round-trips every field", func() {
+				Expect(store.CreateSession(ctx, makeSession("s1", "p", session.StateSubmitting, base))).To(Succeed())
+				before := time.Now().Add(-time.Second)
+				d := newDelivery("s1")
+				Expect(store.SaveDelivery(ctx, d)).To(Succeed())
+				Expect(d.CreatedAt).NotTo(BeZero(), "the first save sets CreatedAt")
+				Expect(d.UpdatedAt).NotTo(BeZero())
+
+				list, err := store.ListDeliveries(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(list).To(HaveLen(1))
+				got := list[0]
+				Expect(got.SessionID).To(Equal("s1"))
+				Expect(got.Plan).To(MatchJSON(`{"push":{"branch":"kvarn/s1"}}`))
+				Expect(got.Attempts).To(Equal(2))
+				Expect(got.NextAttemptAt.Equal(base.Add(5 * time.Minute))).To(BeTrue())
+				Expect(got.Deadline.Equal(base.Add(24 * time.Hour))).To(BeTrue())
+				Expect(got.LastError).To(Equal("forge returned 503"))
+				Expect(got.CreatedAt).To(BeTemporally(">", before))
+				Expect(got.CreatedAt.Equal(d.CreatedAt)).To(BeTrue())
+				Expect(got.UpdatedAt.Equal(d.UpdatedAt)).To(BeTrue())
+			})
+
+			It("keeps a CreatedAt the caller set on the first save", func() {
+				Expect(store.CreateSession(ctx, makeSession("s1", "p", session.StateSubmitting, base))).To(Succeed())
+				d := newDelivery("s1")
+				d.CreatedAt = base
+				Expect(store.SaveDelivery(ctx, d)).To(Succeed())
+
+				list, err := store.ListDeliveries(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(list).To(HaveLen(1))
+				Expect(list[0].CreatedAt.Equal(base)).To(BeTrue())
+			})
+
+			It("replaces the fields on a second save but keeps CreatedAt", func() {
+				Expect(store.CreateSession(ctx, makeSession("s1", "p", session.StateSubmitting, base))).To(Succeed())
+				d := newDelivery("s1")
+				Expect(store.SaveDelivery(ctx, d)).To(Succeed())
+				firstCreated, firstUpdated := d.CreatedAt, d.UpdatedAt
+
+				time.Sleep(2 * time.Millisecond)
+				again := &session.Delivery{
+					SessionID:     "s1",
+					Plan:          []byte(`{"push":{"done":true}}`),
+					Attempts:      3,
+					NextAttemptAt: base.Add(10 * time.Minute),
+					Deadline:      base.Add(48 * time.Hour),
+					// A later CreatedAt does not move the stored one.
+					CreatedAt: base.Add(time.Hour),
+				}
+				Expect(store.SaveDelivery(ctx, again)).To(Succeed())
+				Expect(again.CreatedAt.Equal(firstCreated)).To(BeTrue())
+
+				list, err := store.ListDeliveries(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(list).To(HaveLen(1))
+				got := list[0]
+				Expect(got.Plan).To(MatchJSON(`{"push":{"done":true}}`))
+				Expect(got.Attempts).To(Equal(3))
+				Expect(got.NextAttemptAt.Equal(base.Add(10 * time.Minute))).To(BeTrue())
+				Expect(got.Deadline.Equal(base.Add(48 * time.Hour))).To(BeTrue())
+				Expect(got.LastError).To(BeEmpty())
+				Expect(got.CreatedAt.Equal(firstCreated)).To(BeTrue())
+				Expect(got.UpdatedAt).To(BeTemporally(">", firstUpdated))
+			})
+
+			It("refuses a delivery for a session that does not exist", func() {
+				err := store.SaveDelivery(ctx, newDelivery("ghost"))
+				Expect(err).To(MatchError(ContainSubstring("not found")))
+
+				list, err := store.ListDeliveries(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(list).To(BeEmpty())
+			})
+
+			It("deletes a delivery, and deleting a missing one is not an error", func() {
+				Expect(store.CreateSession(ctx, makeSession("s1", "p", session.StateSubmitting, base))).To(Succeed())
+				Expect(store.SaveDelivery(ctx, newDelivery("s1"))).To(Succeed())
+
+				Expect(store.DeleteDelivery(ctx, "s1")).To(Succeed())
+				list, err := store.ListDeliveries(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(list).To(BeEmpty())
+
+				Expect(store.DeleteDelivery(ctx, "s1")).To(Succeed())
+				Expect(store.DeleteDelivery(ctx, "never")).To(Succeed())
+			})
+
+			It("lists the oldest delivery first, then by session id", func() {
+				for _, id := range []string{"a", "b", "c"} {
+					Expect(store.CreateSession(ctx, makeSession(id, "p", session.StateSubmitting, base))).To(Succeed())
+				}
+				c := newDelivery("c")
+				c.CreatedAt = base
+				b := newDelivery("b")
+				b.CreatedAt = base.Add(time.Minute)
+				a := newDelivery("a")
+				a.CreatedAt = base.Add(time.Minute)
+				for _, d := range []*session.Delivery{b, a, c} {
+					Expect(store.SaveDelivery(ctx, d)).To(Succeed())
+				}
+
+				list, err := store.ListDeliveries(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				ids := make([]string, len(list))
+				for i, d := range list {
+					ids[i] = d.SessionID
+				}
+				Expect(ids).To(Equal([]string{"c", "a", "b"}))
+			})
+
+			It("keeps startup reconciliation away from a session with a delivery", func() {
+				delivering := makeSession("delivering", "p", session.StateSubmitting, base)
+				stranded := makeSession("stranded", "p", session.StateSubmitting, base)
+				for _, s := range []*session.Session{delivering, stranded} {
+					Expect(store.CreateSession(ctx, s)).To(Succeed())
+				}
+				Expect(store.SaveDelivery(ctx, newDelivery("delivering"))).To(Succeed())
+
+				res, err := store.ReconcileStartup(ctx, session.ReconcileOpts{
+					RequeueMessage: "requeued", FailError: "orchestrator restarted",
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res.Requeued).To(BeEmpty())
+				Expect(res.Failed).To(ConsistOf("stranded"))
+
+				got, err := store.GetSession(ctx, "delivering")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got.State).To(Equal(session.StateSubmitting))
+				Expect(got.Error).To(BeEmpty())
+				evs, err := store.ListEvents(ctx, "delivering", 0, 0)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(evs).To(BeEmpty())
+
+				list, err := store.ListDeliveries(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(list).To(HaveLen(1))
+				Expect(list[0].SessionID).To(Equal("delivering"))
+			})
+
+			It("removes a delivery with the session it belongs to when that session is pruned", func() {
+				oldDone := makeSession("oldDone", "p", session.StateCompleted, base.Add(-48*time.Hour))
+				newDone := makeSession("newDone", "p", session.StateCompleted, base)
+				for _, s := range []*session.Session{oldDone, newDone} {
+					Expect(store.CreateSession(ctx, s)).To(Succeed())
+				}
+				Expect(store.SaveDelivery(ctx, newDelivery("oldDone"))).To(Succeed())
+				Expect(store.SaveDelivery(ctx, newDelivery("newDone"))).To(Succeed())
+
+				n, err := store.PruneTerminalBefore(ctx, base.Add(-24*time.Hour))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(1))
+
+				list, err := store.ListDeliveries(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(list).To(HaveLen(1))
+				Expect(list[0].SessionID).To(Equal("newDone"))
+			})
+		})
+
 		It("prunes only terminal sessions older than the cutoff and cascades events", func() {
 			oldDone := makeSession("oldDone", "p", session.StateCompleted, base.Add(-48*time.Hour))
 			newDone := makeSession("newDone", "p", session.StateCompleted, base)

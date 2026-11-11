@@ -72,40 +72,46 @@ type deliveryRequest struct {
 // has to come after the sink that opened it.
 var deliverySinkOrder = []coding.Sink{coding.SinkNewPullRequest, coding.SinkFollowUpCommit, coding.SinkPRComment}
 
-// deliver sends the run's output to each of the mode's sinks. A failure stops
-// there and is returned, which fails the run: for a mode whose only output is a
-// comment, work that never left the host is not a success, and the same rule
-// already applies to a pull request that was never opened.
-func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
+// prepareDelivery turns the run's output into a delivery plan for the mode's
+// sinks: it takes the changes out of the VM, commits them in the clone, and
+// writes down everything the publish steps will send. It returns nil when there
+// is nothing to deliver.
+//
+// Only the publish steps talk to the forge. Everything here is local, so an
+// error here fails the run at once, the same as any other failure inside it,
+// while a failure to reach the forge is something the delivery can wait out.
+func (s *Service) prepareDelivery(ctx context.Context, req deliveryRequest) (*deliveryPlan, *deliveryExtras, error) {
 	if req.mode.DeliversTo(coding.SinkNone) || len(req.mode.Deliver) == 0 {
 		req.log.Info("nothing to deliver: mode delivers to none")
-		return nil
+		return nil, nil, nil
 	}
 	if req.forgeImpl == nil {
 		req.log.Info("skipping delivery: no forge configured")
-		return nil
+		return nil, nil, nil
 	}
 	// A validation result is worth a comment on its own: a mode whose output is
 	// a verdict on someone else's branch has something to say even when the
 	// agent's last turn said nothing.
 	if req.agentResult == nil && req.valResult == nil {
 		req.log.Info("skipping delivery: no agent result")
-		return nil
+		return nil, nil, nil
 	}
 
 	// Every sink needs a forge API token, so resolve once to decide whether
-	// delivery is possible at all. The sinks below pass the source on rather
-	// than this value: by the time each one pushes or calls the API it
-	// re-resolves, which is what keeps a job longer than the credential's
-	// lifetime from failing.
+	// delivery is possible at all. The publish steps resolve the credentials
+	// again on every attempt, which is what keeps a delivery longer than the
+	// credential's lifetime from failing.
 	submitCreds, err := scm.Resolve(ctx, req.creds)
 	if err != nil {
-		return fmt.Errorf("resolve credentials for submission: %w", err)
+		return nil, nil, fmt.Errorf("resolve credentials for submission: %w", err)
 	}
 	if submitCreds.APIToken() == "" {
 		req.log.Info("skipping delivery: no token in credentials")
-		return nil
+		return nil, nil, nil
 	}
+
+	plan := &deliveryPlan{SessionID: req.sessionID, Project: req.proj.Name}
+	extras := &deliveryExtras{}
 
 	// A commit-producing sink posts its own comment carrying the summary and
 	// the work log, so an explicit pr-comment alongside one would put nearly
@@ -142,21 +148,17 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 
 		switch sink {
 		case coding.SinkNewPullRequest:
-			if err := s.submitChanges(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
-				req.proj, req.cfg, req.behavior, req.mode.Name, req.baseBranch, req.cloneURL, req.cloneDir, req.creds,
-				req.userPrompt, req.metadata, req.worklog, req.checkpoints, req.cost, req.log); err != nil {
-				return err
+			if err := s.prepareNewPullRequest(ctx, req, plan); err != nil {
+				return nil, nil, err
 			}
 			commented = true
 
 		case coding.SinkFollowUpCommit:
 			if req.pr == nil {
-				return fmt.Errorf("mode %q delivers a follow-up commit but the run has no pull request to commit onto", req.mode.Name)
+				return nil, nil, fmt.Errorf("mode %q delivers a follow-up commit but the run has no pull request to commit onto", req.mode.Name)
 			}
-			if err := s.submitFollowup(ctx, req.sessionID, req.sandbox, req.forgeImpl, req.agentResult,
-				req.proj, req.cfg, req.behavior, req.mode.Name, req.pr, req.reviser, req.cloneURL, req.cloneDir, req.creds,
-				req.userPrompt, req.metadata, req.worklog, req.checkpoints, req.cost, req.log); err != nil {
-				return err
+			if err := s.prepareFollowup(ctx, req, plan, extras); err != nil {
+				return nil, nil, err
 			}
 			commented = true
 
@@ -165,22 +167,231 @@ func (s *Service) deliver(ctx context.Context, req deliveryRequest) error {
 				req.log.Info("skipping result comment: the commit already posted one")
 				continue
 			}
-			if err := s.postResultComment(ctx, req); err != nil {
-				return err
+			if err := s.prepareResultComment(ctx, req, plan); err != nil {
+				return nil, nil, err
 			}
 		}
+	}
+	if plan.Push == nil && plan.Comment == nil {
+		return nil, nil, nil
+	}
+	return plan, extras, nil
+}
+
+// prepareNewPullRequest commits the run's changes on a new branch and plans
+// the push, the pull request and the comment that goes with it.
+func (s *Service) prepareNewPullRequest(ctx context.Context, req deliveryRequest, plan *deliveryPlan) error {
+	log := req.log
+	// Check if there are any changes. A commit the run already recorded counts:
+	// a run that only merged its base branch has an empty trailing diff and a
+	// merge commit that must still reach the forge.
+	changedFiles, err := req.sandbox.ChangedFiles(ctx)
+	if err != nil {
+		return fmt.Errorf("check changed files for submission: %w", err)
+	}
+	if len(changedFiles) == 0 && req.checkpoints == 0 {
+		log.Info("no changes to submit")
+		return nil
+	}
+
+	title := req.agentResult.Title
+	if title == "" {
+		title = "Apply agent changes"
+	}
+	body := req.agentResult.Description
+
+	s.sessionMgr.UpdateState(ctx, req.sessionID, session.StateSubmitting, "Submitting changes")
+
+	// Extract changes from VM to host clone dir.
+	if err := req.sandbox.ExtractChanges(ctx, req.cloneDir); err != nil {
+		return fmt.Errorf("extract changes from VM: %w", err)
+	}
+
+	behavior := req.behavior
+	// The commit message and PR body share one body so the PR shows the same
+	// content that lands as the merge commit. Only the run metadata differs:
+	// trailers on the commit, where tooling looks for them, and a footer on the
+	// pull request, where a reader does.
+	//
+	// The branch name is derived from the commit title for readability, with a
+	// short slice of the session id as a suffix to keep it unique and git-ref
+	// safe. If the title yields no usable slug, fall back to the session id.
+	prBranch := fmt.Sprintf("%s/%s", behavior.BranchPrefix, req.sessionID)
+	if slug := branchSlug(title); slug != "" {
+		suffix := req.sessionID
+		if len(suffix) > 8 {
+			suffix = suffix[:8]
+		}
+		prBranch = fmt.Sprintf("%s/%s-%s", behavior.BranchPrefix, slug, suffix)
+	}
+	commitMsg := title
+	if body != "" {
+		commitMsg = title + "\n\n" + body
+	}
+
+	tmplData := prTemplateData{
+		Title:       title,
+		Description: body,
+		SessionID:   req.sessionID,
+		Branch:      prBranch,
+		Mode:        req.mode.Name,
+		Metadata:    req.metadata,
+	}
+	sites := s.previewSitesFor(req.proj, req.cfg)
+	// The pull request does not exist yet, so only the sites this branch is
+	// addressed by on its own can be named here. A site addressed by `{pr}`
+	// resolves for the comment, which is rendered once there is a pull request
+	// to name.
+	withLinks := tmplData.withPreviewLinks(sites.links(prBranch, ""))
+	// Trailers render strictly because they land in the commit message, where a
+	// key the submission did not carry would leave a trailer with nothing after
+	// the colon in history nobody will rewrite.
+	commitMsg = coding.ApplyTrailers(commitMsg,
+		renderPRTemplates(behavior.PullRequest.CommitTrailers, withLinks, missingKeyError, log))
+	prBody := coding.ApplyFooter(body,
+		renderPRTemplate(behavior.PullRequest.BodyFooter, withLinks, missingKeyZero, log))
+
+	sha, err := req.forgeImpl.SCM().Commit(ctx, scm.CommitOpts{
+		RepoDir:     req.cloneDir,
+		Branch:      prBranch,
+		Message:     commitMsg,
+		AuthorName:  behavior.CommitAuthorName,
+		AuthorEmail: behavior.CommitAuthorEmail,
+	})
+	if err != nil {
+		return fmt.Errorf("commit to %s: %w", prBranch, err)
+	}
+
+	plan.Push = &pushStep{Branch: prBranch, Commit: sha}
+	plan.PullRequest = &pullRequestStep{
+		BaseBranch:  req.baseBranch,
+		Title:       title,
+		Body:        prBody,
+		Description: body,
+		Labels:      behavior.Labels,
+	}
+	// The comment carries the task and the work log, so they stay out of any
+	// squash-merge commit message.
+	plan.Comment = &commentStep{
+		Kind: commentNewPullRequest,
+		Input: &commentInput{
+			Request:  req.userPrompt,
+			Worklog:  toWorklogRecords(req.worklog),
+			Cost:     req.cost,
+			Sections: commentSectionSpecFrom(behavior.PullRequest, forgeconfig.CommentNewPullRequest),
+			Data:     tmplData,
+			Preview:  sites,
+		},
 	}
 	return nil
 }
 
-// postResultComment puts the agent's written result on the pull request. It is
-// the delivery a read-only mode uses: a review of somebody else's pull request
-// is worth nothing if it only reaches the session event log.
+// prepareFollowup commits the run's changes onto the pull request's head
+// branch and plans the push and the comment that says what was addressed. No
+// new pull request is opened.
+func (s *Service) prepareFollowup(ctx context.Context, req deliveryRequest, plan *deliveryPlan, extras *deliveryExtras) error {
+	log := req.log
+	pr := req.pr
+	// The VM cloned the PR head, so the changed set is the follow-up delta. A
+	// merge-only run has none and a merge commit waiting in the clone, so a
+	// commit already recorded counts as something to submit.
+	changedFiles, err := req.sandbox.ChangedFiles(ctx)
+	if err != nil {
+		return fmt.Errorf("check changed files for submission: %w", err)
+	}
+	if len(changedFiles) == 0 && req.checkpoints == 0 {
+		log.Info("no changes to submit")
+		return nil
+	}
+
+	s.sessionMgr.UpdateState(ctx, req.sessionID, session.StateSubmitting, "Submitting changes")
+
+	if err := req.sandbox.ExtractChanges(ctx, req.cloneDir); err != nil {
+		return fmt.Errorf("extract changes from VM: %w", err)
+	}
+
+	behavior := req.behavior
+	title := req.agentResult.Title
+	if title == "" {
+		title = "Address review feedback"
+	}
+	commitMsg := title
+	if req.agentResult.Description != "" {
+		commitMsg = title + "\n\n" + req.agentResult.Description
+	}
+	tmplData := prTemplateData{
+		Title:       title,
+		Description: req.agentResult.Description,
+		SessionID:   req.sessionID,
+		Branch:      pr.headBranch,
+		Mode:        req.mode.Name,
+		Metadata:    req.metadata,
+	}
+	sites := s.previewSitesFor(req.proj, req.cfg)
+	// The pull request is already open, so every site it addresses resolves.
+	withLinks := tmplData.withPreviewLinks(sites.links(pr.headBranch, pr.ref))
+	commitMsg = coding.ApplyTrailers(commitMsg,
+		renderPRTemplates(behavior.PullRequest.CommitTrailers, withLinks, missingKeyError, log))
+
+	// Pushing the PR's own branch name is a fast-forward of one new commit.
+	sha, err := req.forgeImpl.SCM().Commit(ctx, scm.CommitOpts{
+		RepoDir:     req.cloneDir,
+		Branch:      pr.headBranch,
+		Message:     commitMsg,
+		AuthorName:  behavior.CommitAuthorName,
+		AuthorEmail: behavior.CommitAuthorEmail,
+	})
+	if err != nil {
+		return fmt.Errorf("commit to %s: %w", pr.headBranch, err)
+	}
+
+	plan.Push = &pushStep{
+		Branch:    pr.headBranch,
+		Commit:    sha,
+		PRRef:     pr.ref,
+		PRURL:     pr.url,
+		StartHead: pr.headSHA,
+	}
+
+	// Only a commit that changed files can make the pull request's text out of
+	// date. A run that only merged its base branch adds nothing the text
+	// describes.
+	if behavior.PullRequest.UpdateOnFollowUp && req.reviser != nil && len(changedFiles) > 0 {
+		plan.Revise = &reviseStep{}
+		extras.reviser = req.reviser
+		extras.footer = func(title, description string) string {
+			data := withLinks
+			data.Title = title
+			data.Description = description
+			return renderPRTemplate(behavior.PullRequest.BodyFooter, data, missingKeyZero, log)
+		}
+	}
+
+	plan.Comment = &commentStep{
+		Kind:  commentFollowUp,
+		PRRef: pr.ref,
+		Input: &commentInput{
+			Request:  req.userPrompt,
+			Summary:  req.agentResult.Description,
+			Worklog:  toWorklogRecords(req.worklog),
+			Cost:     req.cost,
+			Sections: commentSectionSpecFrom(behavior.PullRequest, forgeconfig.CommentFollowUpCommit),
+			Data:     tmplData,
+			Preview:  sites,
+		},
+	}
+	return nil
+}
+
+// prepareResultComment plans the comment that puts the agent's written result
+// on the pull request. It is the delivery a read-only mode uses: a review of
+// somebody else's pull request is worth nothing if it only reaches the session
+// event log.
 //
 // The pull request it comments on is the one the run started from, or the one
-// an earlier sink opened — which is why the session is re-read rather than
-// assumed.
-func (s *Service) postResultComment(ctx context.Context, req deliveryRequest) error {
+// an earlier run of the session opened — which is why the session is read
+// rather than assumed.
+func (s *Service) prepareResultComment(ctx context.Context, req deliveryRequest, plan *deliveryPlan) error {
 	prRef := ""
 	if req.pr != nil {
 		prRef = req.pr.ref
@@ -223,15 +434,12 @@ func (s *Service) postResultComment(ctx context.Context, req deliveryRequest) er
 		req.log.Info("skipping result comment: the run produced nothing to say")
 		return nil
 	}
-	if err := req.forgeImpl.PostComment(ctx, forge.PostCommentOpts{
-		RepoURL:     req.cloneURL,
-		PRRef:       prRef,
-		Body:        body,
-		Credentials: req.creds,
-	}); err != nil {
-		return fmt.Errorf("post result comment on %s: %w", prRef, err)
+	plan.Comment = &commentStep{
+		Kind:     commentResult,
+		PRRef:    prRef,
+		Required: true,
+		Body:     body,
 	}
-	req.log.Info("result comment posted", "pr_ref", prRef)
 	return nil
 }
 

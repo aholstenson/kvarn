@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -21,6 +22,11 @@ import (
 	"github.com/aholstenson/kvarn/internal/scm/git"
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// defaultHTTPTimeout bounds one request to the GitHub API, from dial to the
+// last byte of the body. Without it, a connection that stops sending holds
+// a delivery forever, and a retry never gets its turn.
+const defaultHTTPTimeout = 60 * time.Second
 
 // GitHub implements the forge.Forge interface for GitHub.
 type GitHub struct {
@@ -53,7 +59,7 @@ func WithHTTPClient(client *http.Client) Option {
 func New(opts ...Option) *GitHub {
 	g := &GitHub{
 		apiBase:    "https://api.github.com",
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: defaultHTTPTimeout},
 		tokenCache: make(map[string]*cachedToken),
 	}
 	for _, o := range opts {
@@ -75,7 +81,7 @@ func (g *GitHub) ResolveCloneURL(repo string) (string, error) {
 	// Shorthand "org/repo" -> full HTTPS URL.
 	parts := strings.SplitN(repo, "/", 3)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", fmt.Errorf("invalid repo reference %q, expected \"owner/repo\"", repo)
+		return "", forge.Permanent(fmt.Errorf("invalid repo reference %q, expected \"owner/repo\"", repo))
 	}
 	return fmt.Sprintf("https://github.com/%s/%s.git", parts[0], parts[1]), nil
 }
@@ -106,7 +112,7 @@ func (g *GitHub) ResolveCredentials(ctx context.Context, config map[string]strin
 		return src, nil
 	}
 
-	return nil, errors.New("github credentials require either \"token\" or \"app_id\"+\"private_key_path\"+\"installation_id\"")
+	return nil, forge.Permanent(errors.New("github credentials require either \"token\" or \"app_id\"+\"private_key_path\"+\"installation_id\""))
 }
 
 // installationTokenSource mints GitHub App installation tokens on demand.
@@ -140,45 +146,37 @@ func (g *GitHub) getInstallationToken(ctx context.Context, appID, privateKeyPath
 	}
 	g.mu.Unlock()
 
-	// Read and parse private key.
+	// A key that cannot be read or parsed is a configuration problem, and
+	// reading it again does not fix it. The read error is formatted, not
+	// wrapped: its syscall.Errno satisfies net.Error, which forge.IsTransient
+	// would take for a network failure.
 	keyData, err := os.ReadFile(privateKeyPath)
 	if err != nil {
-		return "", fmt.Errorf("read private key %q: %w", privateKeyPath, err)
+		return "", forge.Permanent(fmt.Errorf("read private key %q: %v", privateKeyPath, err))
 	}
 
 	key, err := jwt.ParseRSAPrivateKeyFromPEM(keyData)
 	if err != nil {
-		return "", fmt.Errorf("parse RSA private key: %w", err)
+		return "", forge.Permanent(fmt.Errorf("parse RSA private key: %w", err))
 	}
 
 	// Create JWT.
 	now := time.Now()
 	jwtToken, err := g.signJWT(appID, key, now)
 	if err != nil {
-		return "", err
+		return "", forge.Permanent(err)
 	}
 
 	// Request installation access token.
-	url := fmt.Sprintf("%s/app/installations/%s/access_tokens", g.apiBase, installationID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	body, err := g.do(ctx, apiRequest{
+		op:     "create installation token",
+		method: http.MethodPost,
+		url:    fmt.Sprintf("%s/app/installations/%s/access_tokens", g.apiBase, url.PathEscape(installationID)),
+		token:  jwtToken,
+		want:   http.StatusCreated,
+	})
 	if err != nil {
-		return "", fmt.Errorf("create token request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+jwtToken)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request installation token: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read installation token response: %w", err)
-	}
-	if resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("create installation token: HTTP %d: %s", resp.StatusCode, string(body))
+		return "", err
 	}
 
 	var tokenResp struct {
@@ -186,7 +184,7 @@ func (g *GitHub) getInstallationToken(ctx context.Context, appID, privateKeyPath
 		ExpiresAt time.Time `json:"expires_at"`
 	}
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return "", fmt.Errorf("parse token response: %w", err)
+		return "", forge.Permanent(fmt.Errorf("parse token response: %w", err))
 	}
 
 	// Cache with 5-minute safety margin.
@@ -214,6 +212,139 @@ func (g *GitHub) signJWT(appID string, key *rsa.PrivateKey, now time.Time) (stri
 	return signed, nil
 }
 
+// apiRequest describes one call to the GitHub API.
+type apiRequest struct {
+	// op names the operation in the error text.
+	op     string
+	method string
+	url    string
+	// token goes in the Authorization header as a bearer token.
+	token string
+	// accept is the Accept header. Empty means the GitHub JSON media type.
+	accept string
+	// body is encoded as JSON when it is not nil.
+	body any
+	// want is the status that means success. Every other status is an error.
+	want int
+}
+
+// do sends r and returns the response body when GitHub answers with r.want.
+//
+// The errors fall into three groups, so that a caller can decide whether to
+// try again:
+//   - a request that cannot be built or a body that cannot be encoded is
+//     wrapped with forge.Permanent, because a retry builds the same request;
+//   - a failure to reach GitHub or to read its answer is returned as it is,
+//     which forge.IsTransient reports as transient;
+//   - any other status is a *forge.APIError that carries the status.
+func (g *GitHub) do(ctx context.Context, r apiRequest) ([]byte, error) {
+	var reqBody io.Reader
+	if r.body != nil {
+		data, err := json.Marshal(r.body)
+		if err != nil {
+			return nil, forge.Permanent(fmt.Errorf("%s: marshal request: %w", r.op, err))
+		}
+		reqBody = bytes.NewReader(data)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, r.method, r.url, reqBody)
+	if err != nil {
+		return nil, forge.Permanent(fmt.Errorf("%s: build request: %w", r.op, err))
+	}
+	req.Header.Set("Authorization", "Bearer "+r.token)
+	accept := r.accept
+	if accept == "" {
+		accept = "application/vnd.github+json"
+	}
+	req.Header.Set("Accept", accept)
+	if r.body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s: send request: %w", r.op, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("%s: read response: %w", r.op, err)
+	}
+	if resp.StatusCode != r.want {
+		return nil, newAPIError(r.op, resp, body, time.Now())
+	}
+	return body, nil
+}
+
+// newAPIError describes a response that was not a success. It reads the
+// rate-limit headers because GitHub answers a rate limit with 403 as well as
+// 429, and a 403 is otherwise a refusal that never changes on a retry.
+func newAPIError(op string, resp *http.Response, body []byte, now time.Time) *forge.APIError {
+	apiErr := &forge.APIError{
+		Op:         op,
+		StatusCode: resp.StatusCode,
+		Body:       string(body),
+	}
+
+	retryAfter, hasRetryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), now)
+	apiErr.RetryAfter = retryAfter
+
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+		return apiErr
+	}
+
+	exhausted := strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")) == "0"
+	if !hasRetryAfter && !exhausted {
+		return apiErr
+	}
+	apiErr.RateLimited = true
+
+	// The primary rate limit gives the time it resets instead of a delay.
+	if !hasRetryAfter {
+		if reset, err := strconv.ParseInt(strings.TrimSpace(resp.Header.Get("X-RateLimit-Reset")), 10, 64); err == nil {
+			apiErr.RetryAfter = max(time.Unix(reset, 0).Sub(now), 0)
+		}
+	}
+	return apiErr
+}
+
+// parseRetryAfter reads a Retry-After header, which is either a number of
+// seconds or an HTTP date. The second result is false when the header is
+// absent or cannot be read. A date in the past gives zero.
+func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if secs, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if secs < 0 {
+			return 0, true
+		}
+		return time.Duration(secs) * time.Second, true
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		return max(at.Sub(now), 0), true
+	}
+	return 0, false
+}
+
+// parseRepo is ParseRepoURL for the API methods. A URL that cannot be parsed
+// never can be, so the error is permanent.
+func parseRepo(repoURL string) (owner, repo string, err error) {
+	owner, repo, err = ParseRepoURL(repoURL)
+	if err != nil {
+		return "", "", forge.Permanent(err)
+	}
+	return owner, repo, nil
+}
+
+// repoAPI returns the API URL of the repository, with each name escaped so a
+// strange name cannot change the path.
+func (g *GitHub) repoAPI(owner, repo string) string {
+	return fmt.Sprintf("%s/repos/%s/%s", g.apiBase, url.PathEscape(owner), url.PathEscape(repo))
+}
+
 // maxTitleLength is GitHub's hard limit on a pull request title, counted in
 // characters. A longer title is rejected with 422, which would throw away a
 // completed run at the last step — the branch is already pushed by then, but
@@ -237,8 +368,12 @@ func clampTitle(title string) string {
 	return strings.TrimRight(string(runes[:maxTitleLength-1]), " \t\n") + "…"
 }
 
+// CreatePullRequest opens a pull request. A 422 comes back as an APIError
+// like every other refusal: GitHub uses it both for a request it cannot
+// accept and for a pull request that already exists, and only the caller
+// knows whether to look for the existing one with FindPullRequest.
 func (g *GitHub) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts) (*forge.PullRequest, error) {
-	owner, repo, err := ParseRepoURL(opts.RepoURL)
+	owner, repo, err := parseRepo(opts.RepoURL)
 	if err != nil {
 		return nil, err
 	}
@@ -247,41 +382,22 @@ func (g *GitHub) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts)
 	if err != nil {
 		return nil, err
 	}
-	token := creds.APIToken()
 
-	// Create pull request.
-	prBody := map[string]any{
-		"title": clampTitle(opts.Title),
-		"body":  opts.Body,
-		"head":  opts.HeadBranch,
-		"base":  opts.BaseBranch,
-	}
-	bodyJSON, err := json.Marshal(prBody)
+	respBody, err := g.do(ctx, apiRequest{
+		op:     "create PR",
+		method: http.MethodPost,
+		url:    g.repoAPI(owner, repo) + "/pulls",
+		token:  creds.APIToken(),
+		body: map[string]any{
+			"title": clampTitle(opts.Title),
+			"body":  opts.Body,
+			"head":  opts.HeadBranch,
+			"base":  opts.BaseBranch,
+		},
+		want: http.StatusCreated,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("marshal PR body: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls", g.apiBase, owner, repo)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyJSON))
-	if err != nil {
-		return nil, fmt.Errorf("create PR request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("send PR request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read PR response: %w", err)
-	}
-	if resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("create PR: HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, err
 	}
 
 	var prResp struct {
@@ -289,7 +405,7 @@ func (g *GitHub) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts)
 		HTMLURL string `json:"html_url"`
 	}
 	if err := json.Unmarshal(respBody, &prResp); err != nil {
-		return nil, fmt.Errorf("parse PR response: %w", err)
+		return nil, forge.Permanent(fmt.Errorf("parse PR response: %w", err))
 	}
 
 	slog.Info("pull request created",
@@ -297,16 +413,60 @@ func (g *GitHub) CreatePullRequest(ctx context.Context, opts forge.CreatePROpts)
 		"number", prResp.Number,
 	)
 
-	// Add labels if specified.
-	if len(opts.Labels) > 0 {
-		if err := g.addLabels(ctx, owner, repo, prResp.Number, opts.Labels, token); err != nil {
-			slog.Warn("failed to add labels to PR", "error", err)
-		}
-	}
-
 	return &forge.PullRequest{
 		URL: prResp.HTMLURL,
 		Ref: strconv.Itoa(prResp.Number),
+	}, nil
+}
+
+// FindPullRequest returns the newest pull request from HeadBranch in the
+// repository itself. The head filter names the repository owner, so a branch
+// with the same name on a fork does not match.
+func (g *GitHub) FindPullRequest(ctx context.Context, opts forge.FindPROpts) (*forge.PullRequest, error) {
+	owner, repo, err := parseRepo(opts.RepoURL)
+	if err != nil {
+		return nil, err
+	}
+	if opts.HeadBranch == "" {
+		return nil, forge.Permanent(errors.New("find PR: head branch is empty"))
+	}
+
+	creds, err := scm.Resolve(ctx, opts.Credentials)
+	if err != nil {
+		return nil, err
+	}
+
+	query := url.Values{}
+	query.Set("head", owner+":"+opts.HeadBranch)
+	query.Set("state", "all")
+	query.Set("sort", "created")
+	query.Set("direction", "desc")
+	query.Set("per_page", "1")
+
+	respBody, err := g.do(ctx, apiRequest{
+		op:     "find PR",
+		method: http.MethodGet,
+		url:    g.repoAPI(owner, repo) + "/pulls?" + query.Encode(),
+		token:  creds.APIToken(),
+		want:   http.StatusOK,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var prs []struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.Unmarshal(respBody, &prs); err != nil {
+		return nil, forge.Permanent(fmt.Errorf("parse PR list response: %w", err))
+	}
+	if len(prs) == 0 {
+		return nil, nil
+	}
+	return &forge.PullRequest{
+		URL: prs[0].HTMLURL,
+		Ref: strconv.Itoa(prs[0].Number),
 	}, nil
 }
 
@@ -323,7 +483,7 @@ const diffTruncationMarker = "\n…[diff truncated]\n"
 func prNumber(ref string) (int, error) {
 	n, err := strconv.Atoi(strings.TrimSpace(ref))
 	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("invalid GitHub pull request ref %q: expected a positive number", ref)
+		return 0, forge.Permanent(fmt.Errorf("invalid GitHub pull request ref %q: expected a positive number", ref))
 	}
 	return n, nil
 }
@@ -356,7 +516,7 @@ func (g *GitHub) GetPullRequest(ctx context.Context, opts forge.GetPROpts) (*for
 		} `json:"base"`
 	}
 	if err := json.Unmarshal(body, &prResp); err != nil {
-		return nil, fmt.Errorf("parse pull request response: %w", err)
+		return nil, forge.Permanent(fmt.Errorf("parse pull request response: %w", err))
 	}
 
 	// GitHub reports a merged PR as state "closed" plus merged=true; surface
@@ -401,7 +561,7 @@ func (g *GitHub) GetPullRequestDiff(ctx context.Context, opts forge.GetPROpts) (
 // given Accept header and returns the raw response body. The JSON and diff
 // representations differ only in that header.
 func (g *GitHub) getPullRequest(ctx context.Context, opts forge.GetPROpts, accept string) ([]byte, error) {
-	owner, repo, err := ParseRepoURL(opts.RepoURL)
+	owner, repo, err := parseRepo(opts.RepoURL)
 	if err != nil {
 		return nil, err
 	}
@@ -414,34 +574,19 @@ func (g *GitHub) getPullRequest(ctx context.Context, opts forge.GetPROpts, accep
 	if err != nil {
 		return nil, err
 	}
-	token := creds.APIToken()
 
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", g.apiBase, owner, repo, number)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create get PR request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", accept)
-
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("send get PR request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read get PR response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get pull request %s: HTTP %d: %s", opts.PRRef, resp.StatusCode, string(respBody))
-	}
-	return respBody, nil
+	return g.do(ctx, apiRequest{
+		op:     fmt.Sprintf("get pull request %d", number),
+		method: http.MethodGet,
+		url:    fmt.Sprintf("%s/pulls/%d", g.repoAPI(owner, repo), number),
+		token:  creds.APIToken(),
+		accept: accept,
+		want:   http.StatusOK,
+	})
 }
 
 func (g *GitHub) PostComment(ctx context.Context, opts forge.PostCommentOpts) error {
-	owner, repo, err := ParseRepoURL(opts.RepoURL)
+	owner, repo, err := parseRepo(opts.RepoURL)
 	if err != nil {
 		return err
 	}
@@ -454,45 +599,93 @@ func (g *GitHub) PostComment(ctx context.Context, opts forge.PostCommentOpts) er
 	if err != nil {
 		return err
 	}
-	token := creds.APIToken()
 
-	body := map[string]any{"body": opts.Body}
-	bodyJSON, err := json.Marshal(body)
+	_, err = g.do(ctx, apiRequest{
+		op:     "post comment",
+		method: http.MethodPost,
+		url:    fmt.Sprintf("%s/issues/%d/comments", g.repoAPI(owner, repo), number),
+		token:  creds.APIToken(),
+		body:   map[string]any{"body": opts.Body},
+		want:   http.StatusCreated,
+	})
+	return err
+}
+
+// commentsPerPage is the largest page GitHub serves, so a search for a
+// comment makes as few requests as it can.
+const commentsPerPage = 100
+
+// maxCommentPages bounds the search for a comment. A pull request with more
+// comments than this since the search started is not normal, and searching
+// all of it would cost more of the rate limit than a duplicate comment costs.
+const maxCommentPages = 20
+
+// HasComment reports whether a comment on the pull request contains
+// opts.Marker. GitHub filters on the time a comment was last changed, which
+// includes the comments created or edited at or after opts.Since.
+func (g *GitHub) HasComment(ctx context.Context, opts forge.HasCommentOpts) (bool, error) {
+	if opts.Marker == "" {
+		return false, forge.Permanent(errors.New("search comments: marker is empty"))
+	}
+	owner, repo, err := parseRepo(opts.RepoURL)
 	if err != nil {
-		return fmt.Errorf("marshal comment body: %w", err)
+		return false, err
+	}
+	number, err := prNumber(opts.PRRef)
+	if err != nil {
+		return false, err
 	}
 
-	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", g.apiBase, owner, repo, number)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyJSON))
+	creds, err := scm.Resolve(ctx, opts.Credentials)
 	if err != nil {
-		return fmt.Errorf("create comment request: %w", err)
+		return false, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("send comment request: %w", err)
+	query := url.Values{}
+	if !opts.Since.IsZero() {
+		query.Set("since", opts.Since.UTC().Format(time.RFC3339))
 	}
-	defer resp.Body.Close()
+	query.Set("per_page", strconv.Itoa(commentsPerPage))
 
-	if resp.StatusCode != http.StatusCreated {
-		respBody, err := io.ReadAll(resp.Body)
+	for page := 1; page <= maxCommentPages; page++ {
+		query.Set("page", strconv.Itoa(page))
+		respBody, err := g.do(ctx, apiRequest{
+			op:     "list comments",
+			method: http.MethodGet,
+			url:    fmt.Sprintf("%s/issues/%d/comments?%s", g.repoAPI(owner, repo), number, query.Encode()),
+			token:  creds.APIToken(),
+			want:   http.StatusOK,
+		})
 		if err != nil {
-			return fmt.Errorf("post comment: HTTP %d (read response: %v)", resp.StatusCode, err)
+			return false, err
 		}
-		return fmt.Errorf("post comment: HTTP %d: %s", resp.StatusCode, string(respBody))
+
+		var comments []struct {
+			Body string `json:"body"`
+		}
+		if err := json.Unmarshal(respBody, &comments); err != nil {
+			return false, forge.Permanent(fmt.Errorf("parse comment list response: %w", err))
+		}
+		for _, c := range comments {
+			if strings.Contains(c.Body, opts.Marker) {
+				return true, nil
+			}
+		}
+		if len(comments) < commentsPerPage {
+			return false, nil
+		}
 	}
 
-	return nil
+	slog.Warn("stopped searching pull request comments at the page limit",
+		"repo", owner+"/"+repo, "pr", number, "pages", maxCommentPages)
+	return false, nil
 }
 
 func (g *GitHub) UpdatePullRequest(ctx context.Context, opts forge.UpdatePROpts) error {
 	if opts.Title == nil && opts.Body == nil {
 		return nil
 	}
-	owner, repo, err := ParseRepoURL(opts.RepoURL)
+	owner, repo, err := parseRepo(opts.RepoURL)
 	if err != nil {
 		return err
 	}
@@ -505,7 +698,6 @@ func (g *GitHub) UpdatePullRequest(ctx context.Context, opts forge.UpdatePROpts)
 	if err != nil {
 		return err
 	}
-	token := creds.APIToken()
 
 	// Only the fields the caller set go in the request. GitHub keeps every
 	// field a PATCH leaves out, which is what lets a run that owns only the
@@ -517,67 +709,48 @@ func (g *GitHub) UpdatePullRequest(ctx context.Context, opts forge.UpdatePROpts)
 	if opts.Body != nil {
 		body["body"] = *opts.Body
 	}
-	bodyJSON, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("marshal PR update: %w", err)
-	}
 
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", g.apiBase, owner, repo, number)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, bytes.NewReader(bodyJSON))
-	if err != nil {
-		return fmt.Errorf("create PR update request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("send PR update request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("update PR: HTTP %d (read response: %v)", resp.StatusCode, err)
-		}
-		return fmt.Errorf("update PR: HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
-	return nil
+	_, err = g.do(ctx, apiRequest{
+		op:     "update PR",
+		method: http.MethodPatch,
+		url:    fmt.Sprintf("%s/pulls/%d", g.repoAPI(owner, repo), number),
+		token:  creds.APIToken(),
+		body:   body,
+		want:   http.StatusOK,
+	})
+	return err
 }
 
-func (g *GitHub) addLabels(ctx context.Context, owner, repo string, number int, labels []string, token string) error {
-	body := map[string]any{"labels": labels}
-	bodyJSON, err := json.Marshal(body)
+// AddLabels adds labels to a pull request. GitHub keeps the labels the pull
+// request already has and ignores one it has twice, so a repeated call
+// changes nothing.
+func (g *GitHub) AddLabels(ctx context.Context, opts forge.AddLabelsOpts) error {
+	if len(opts.Labels) == 0 {
+		return nil
+	}
+	owner, repo, err := parseRepo(opts.RepoURL)
+	if err != nil {
+		return err
+	}
+	number, err := prNumber(opts.PRRef)
 	if err != nil {
 		return err
 	}
 
-	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/labels", g.apiBase, owner, repo, number)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyJSON))
+	creds, err := scm.Resolve(ctx, opts.Credentials)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("add labels: HTTP %d (read response: %v)", resp.StatusCode, err)
-		}
-		return fmt.Errorf("add labels: HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	return nil
+	_, err = g.do(ctx, apiRequest{
+		op:     "add labels",
+		method: http.MethodPost,
+		url:    fmt.Sprintf("%s/issues/%d/labels", g.repoAPI(owner, repo), number),
+		token:  creds.APIToken(),
+		body:   map[string]any{"labels": opts.Labels},
+		want:   http.StatusOK,
+	})
+	return err
 }
 
 // ParseRepoURL extracts the owner and repo name from a GitHub URL.

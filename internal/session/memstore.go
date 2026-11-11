@@ -20,14 +20,19 @@ type memStore struct {
 	// blobs holds attachment content by digest, apart from the rows, the
 	// same way the SQLite store keeps it in its own table.
 	blobs map[string][]byte
+	// deliveries holds one delivery per session id. Each value is a copy,
+	// with times at microsecond precision, so the store reads back what the
+	// SQLite store does.
+	deliveries map[string]Delivery
 }
 
 // newMemStore creates an empty in-memory store.
 func newMemStore() *memStore {
 	return &memStore{
-		sessions: make(map[string]Row),
-		events:   make(map[string][]PersistedEvent),
-		blobs:    make(map[string][]byte),
+		sessions:   make(map[string]Row),
+		events:     make(map[string][]PersistedEvent),
+		blobs:      make(map[string][]byte),
+		deliveries: make(map[string]Delivery),
 	}
 }
 
@@ -427,6 +432,10 @@ func (m *memStore) ReconcileStartup(_ context.Context, opts ReconcileOpts) (Reco
 		if state.IsTerminal() || state == StatePending {
 			continue
 		}
+		// A session with a delivery resumes its delivery instead.
+		if _, ok := m.deliveries[id]; ok {
+			continue
+		}
 		sess, err := RowToSession(row)
 		if err != nil {
 			return ReconcileResult{}, err
@@ -484,6 +493,67 @@ func (m *memStore) applyTransitionLocked(sess *Session, now time.Time) (Persiste
 	return ev, nil
 }
 
+func (m *memStore) SaveDelivery(_ context.Context, d *Delivery) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.sessions[d.SessionID]; !ok {
+		return fmt.Errorf("session %q not found", d.SessionID)
+	}
+	now := microsUTC(time.Now())
+	createdAt := microsUTC(d.CreatedAt)
+	if existing, ok := m.deliveries[d.SessionID]; ok {
+		createdAt = existing.CreatedAt
+	} else if d.CreatedAt.IsZero() {
+		createdAt = now
+	}
+	stored := copyDelivery(*d)
+	if stored.Plan == nil {
+		stored.Plan = []byte{}
+	}
+	stored.NextAttemptAt = microsUTC(d.NextAttemptAt)
+	stored.Deadline = microsUTC(d.Deadline)
+	stored.CreatedAt = createdAt
+	stored.UpdatedAt = now
+	m.deliveries[d.SessionID] = stored
+	d.CreatedAt = createdAt
+	d.UpdatedAt = now
+	return nil
+}
+
+func (m *memStore) ListDeliveries(_ context.Context) ([]*Delivery, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*Delivery, 0, len(m.deliveries))
+	for _, d := range m.deliveries {
+		cp := copyDelivery(d)
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].SessionID < out[j].SessionID
+	})
+	return out, nil
+}
+
+func (m *memStore) DeleteDelivery(_ context.Context, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.deliveries, sessionID)
+	return nil
+}
+
+// copyDelivery returns d with its own copy of Plan, so neither the caller nor
+// the store can change what the other holds.
+func copyDelivery(d Delivery) Delivery {
+	d.Plan = slices.Clone(d.Plan)
+	return d
+}
+
+// microsUTC rounds t to the precision the SQLite store keeps.
+func microsUTC(t time.Time) time.Time { return FromMicros(ToMicros(t)) }
+
 func (m *memStore) PruneTerminalBefore(_ context.Context, cutoff time.Time) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -497,7 +567,8 @@ func (m *memStore) PruneTerminalBefore(_ context.Context, cutoff time.Time) (int
 			continue
 		}
 		delete(m.sessions, id)
-		delete(m.events, id) // events cascade
+		delete(m.events, id)     // events cascade
+		delete(m.deliveries, id) // and so does the delivery
 		n++
 	}
 	if n > 0 {

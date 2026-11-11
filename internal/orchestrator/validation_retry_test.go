@@ -25,7 +25,6 @@ import (
 	"github.com/aholstenson/kvarn/internal/orchestrator"
 	"github.com/aholstenson/kvarn/internal/runner"
 	"github.com/aholstenson/kvarn/internal/sandbox"
-	"github.com/aholstenson/kvarn/internal/scm"
 	"github.com/aholstenson/kvarn/internal/session"
 	"github.com/aholstenson/kvarn/internal/vm"
 )
@@ -238,7 +237,7 @@ var _ = Describe("StartJob validation retry", func() {
 		// against the commit the workspace booted at, so committing does not
 		// hide them from submission.
 		var pushed []byte
-		mockScm.onPush = func(opts scm.CommitAndPushOpts) {
+		mockScm.onPush = func(opts pushRecord) {
 			pushed, _ = os.ReadFile(filepath.Join(opts.RepoDir, "seed.txt"))
 		}
 		ag.onRun = func(attempt int, workingDir string, _ string) error {

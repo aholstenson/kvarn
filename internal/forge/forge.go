@@ -2,6 +2,7 @@ package forge
 
 import (
 	"context"
+	"time"
 
 	"github.com/aholstenson/kvarn/internal/scm"
 )
@@ -38,6 +39,46 @@ type Forge interface {
 	// UpdatePullRequest changes the title, the body, or both of an existing
 	// PR. A field left nil is not sent, so the forge keeps what it has.
 	UpdatePullRequest(ctx context.Context, opts UpdatePROpts) error
+
+	// FindPullRequest returns the newest pull request whose head is
+	// HeadBranch in the repository itself, open or not, or nil when there is
+	// none. A delivery uses it before it opens a pull request again, because
+	// a create whose answer was lost may still have opened one.
+	FindPullRequest(ctx context.Context, opts FindPROpts) (*PullRequest, error)
+
+	// AddLabels adds labels to a pull request. Labels it already has are
+	// kept, so calling it again with the same labels changes nothing.
+	AddLabels(ctx context.Context, opts AddLabelsOpts) error
+
+	// HasComment reports whether a comment on the pull request contains
+	// Marker. Only comments created or edited at or after Since are searched.
+	// A delivery uses it before it posts a comment again, because a post
+	// whose answer was lost may still have landed.
+	HasComment(ctx context.Context, opts HasCommentOpts) (bool, error)
+}
+
+// FindPROpts identifies the pull request to look for by its head branch.
+type FindPROpts struct {
+	RepoURL     string
+	HeadBranch  string
+	Credentials scm.CredentialSource
+}
+
+// AddLabelsOpts names the labels to add to a pull request.
+type AddLabelsOpts struct {
+	RepoURL     string
+	PRRef       string
+	Labels      []string
+	Credentials scm.CredentialSource
+}
+
+// HasCommentOpts describes the comment to look for.
+type HasCommentOpts struct {
+	RepoURL     string
+	PRRef       string
+	Marker      string
+	Since       time.Time
+	Credentials scm.CredentialSource
 }
 
 // CreatePROpts configures PR creation.
@@ -47,7 +88,6 @@ type CreatePROpts struct {
 	HeadBranch  string
 	Title       string
 	Body        string
-	Labels      []string
 	Credentials scm.CredentialSource
 }
 

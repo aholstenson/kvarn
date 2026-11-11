@@ -91,6 +91,15 @@ func (s *Service) cancelSession(ctx context.Context, sess *session.Session, caus
 			"session %s has already finished (%s)", sess.ID, sess.State)
 	}
 
+	// A delivery outlives its run, so it is asked first: between the run
+	// handing it over and the run deregistering, the run's own context no
+	// longer stops anything.
+	if s.deliveries.cancel(sess.ID, cause) {
+		reqid.LoggerFrom(ctx).Info("delivery cancelled",
+			"session_id", sess.ID, "project", sess.ProjectName, "reason", reason)
+		return nil
+	}
+
 	// A job still in the backlog has no context to cancel, so it is stopped
 	// where it lives: the same conditional move out of pending that the
 	// dispatcher uses to claim it. Whoever's move lands first wins, and a lost

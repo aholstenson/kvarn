@@ -34,6 +34,8 @@ Runs the orchestrator service.
 | `--projects-file`, `--forges-file`, `--credentials-file`, `--secrets-file`, `--agents-file`, `--api-keys-file`, `--orchestrator-file` | `~/.config/kvarn/…` | Override individual config file paths. |
 | `--sessions-db` | `~/.config/kvarn/sessions.db` | Session database path. |
 | `--previews-db` | `~/.config/kvarn/previews.db` | Preview database path. Only opened when `[preview]` is configured. |
+| `--jobs-dir` | `<user cache dir>/kvarn/jobs` | Clones of running jobs, and of deliveries that wait to retry. It must survive a restart for those deliveries to resume. Env: `KVARN_JOBS_DIR`. |
+| `--delivery-retry-window` | `6h` | How long a delivery to the forge keeps retrying a transient failure before the job fails. Env: `KVARN_DELIVERY_RETRY_WINDOW`. |
 | `--otel-metrics-enabled`, `--otel-exporter-endpoint`, `--otel-service-name` | off, —, `kvarn-orchestrator` | OpenTelemetry metrics export. |
 
 Scheduler flags (`--sched-*`) mirror the `[scheduler]` table and are documented

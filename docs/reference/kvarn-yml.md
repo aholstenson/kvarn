@@ -443,6 +443,16 @@ its own comment carrying the summary and work log, so an explicit `pr-comment`
 alongside one is skipped rather than posted twice. A delivery that fails, fails
 the job: work that never left the host is not a success.
 
+A delivery that fails because the forge cannot be reached, answers with a server
+error, or applies a rate limit is retried instead. The waits start at 30 seconds
+and grow to 15 minutes, for up to six hours (`--delivery-retry-window`). While a
+delivery waits, the job stays `submitting` and its message says when the next
+attempt is. The VM is already released, and a restart of the orchestrator
+resumes the delivery. Each step is done once: a retry looks for the pull request
+or the comment an earlier attempt may have created before it creates one. A
+refusal from the forge, such as a rejected push, fails the job at once. Cancel a
+job to stop a waiting delivery. A step that has already landed stays.
+
 `new-pull-request` in a run started against an existing pull request commits
 onto that pull request instead. Naming one asks for the work to land there, and
 a second pull request would only target the first one's head branch.

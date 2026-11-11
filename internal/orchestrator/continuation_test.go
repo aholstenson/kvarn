@@ -399,6 +399,22 @@ var _ = Describe("StartJob continuing a pull request", func() {
 		Expect(mockScm.pushCalls).To(Equal(0))
 	})
 
+	It("counts the push as done when the head is already the run's own commit", func() {
+		// An earlier attempt pushed and never learned that it had: the head the
+		// delivery reads is the commit it was about to push.
+		mockForgeInst.movedHeadSHA = mockCommitSHA("kvarn/add-a-helper")
+		mockForgeInst.moveHeadAfterCall = 2
+
+		resp, err := submit("test-project", "42", "rename the helper")
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(stateOf(resp.SessionId)).Should(Equal("completed"))
+		mockScm.mu.Lock()
+		defer mockScm.mu.Unlock()
+		Expect(mockScm.pushCalls).To(Equal(0))
+		Expect(mockForgeInst.commentCalls).To(Equal(1))
+	})
+
 	It("rejects a fork pull request without creating a session", func() {
 		fork := openPR()
 		fork.HeadRepo = "contributor/repo"

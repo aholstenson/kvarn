@@ -92,6 +92,22 @@ var _ = Describe("Git Forge", func() {
 		})
 	})
 
+	Describe("delivery lookups", func() {
+		It("refuses them with errors that are not retried", func() {
+			_, err := g.FindPullRequest(context.Background(), forge.FindPROpts{})
+			Expect(err).To(MatchError(ContainSubstring("not supported")))
+			Expect(forge.IsTransient(err)).To(BeFalse())
+
+			err = g.AddLabels(context.Background(), forge.AddLabelsOpts{})
+			Expect(err).To(MatchError(ContainSubstring("not supported")))
+			Expect(forge.IsTransient(err)).To(BeFalse())
+
+			_, err = g.HasComment(context.Background(), forge.HasCommentOpts{})
+			Expect(err).To(MatchError(ContainSubstring("not supported")))
+			Expect(forge.IsTransient(err)).To(BeFalse())
+		})
+	})
+
 	Describe("SCM", func() {
 		It("returns a git SCM", func() {
 			Expect(g.SCM()).NotTo(BeNil())

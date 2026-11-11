@@ -35,32 +35,68 @@ type previewLinks struct {
 func (s *Service) previewLinksFor(
 	proj *projcfg.Project, cfg *projconfig.Config, ref, pr string,
 ) previewLinks {
-	if proj == nil || cfg == nil || ref == "" || !cfg.Preview.Enabled() {
-		return previewLinks{}
+	return s.previewSitesFor(proj, cfg).links(ref, pr)
+}
+
+// previewSites is what resolving preview addresses needs: the site patterns the
+// branch declares and the domain the operator configured. It is kept apart
+// from the addresses themselves because a delivery resolves them later than it
+// reads the configuration — a new pull request's number exists only once the
+// pull request does, and a delivery can resume after the process that read
+// the configuration has gone.
+type previewSites struct {
+	Domain string        `json:"domain"`
+	Sites  []previewSite `json:"sites"`
+}
+
+// previewSite is one declared site, with its host pattern not yet expanded.
+type previewSite struct {
+	Name string `json:"name"`
+	Host string `json:"host"`
+	Port uint16 `json:"port"`
+}
+
+// previewSitesFor reads the preview sites a ref can be addressed by, or nil
+// when no preview address can be formed for the project at all.
+func (s *Service) previewSitesFor(proj *projcfg.Project, cfg *projconfig.Config) *previewSites {
+	if proj == nil || cfg == nil || !cfg.Preview.Enabled() {
+		return nil
 	}
 	domain, err := s.previewDomain(proj)
 	if err != nil {
-		return previewLinks{}
+		return nil
 	}
-
 	names := make([]string, 0, len(cfg.Preview.Sites))
 	for name := range cfg.Preview.Sites {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
-	vars := projconfig.HostVars{Ref: ref, PR: pr}
-	sites := make([]projconfig.ResolvedSite, 0, len(names))
+	out := &previewSites{Domain: domain, Sites: make([]previewSite, 0, len(names))}
 	for _, name := range names {
 		site := cfg.Preview.Sites[name]
+		out.Sites = append(out.Sites, previewSite{Name: name, Host: site.Host, Port: site.Port})
+	}
+	return out
+}
+
+// links expands the sites for ref, and for pr when it is set. A nil receiver
+// yields no links.
+func (p *previewSites) links(ref, pr string) previewLinks {
+	if p == nil || ref == "" {
+		return previewLinks{}
+	}
+	vars := projconfig.HostVars{Ref: ref, PR: pr}
+	sites := make([]projconfig.ResolvedSite, 0, len(p.Sites))
+	for _, site := range p.Sites {
 		// A site that cannot be expanded — usually a `{pr}` pattern on a run
 		// that has not opened its pull request yet — must not take the sites
 		// that can be expanded with it.
-		host, err := projconfig.ResolveHost(site.Host, vars, domain)
+		host, err := projconfig.ResolveHost(site.Host, vars, p.Domain)
 		if err != nil {
 			continue
 		}
-		sites = append(sites, projconfig.ResolvedSite{Name: name, Port: site.Port, Host: host})
+		sites = append(sites, projconfig.ResolvedSite{Name: site.Name, Port: site.Port, Host: host})
 	}
 	if len(sites) == 0 {
 		return previewLinks{}

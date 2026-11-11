@@ -10,7 +10,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/aholstenson/kvarn/internal/scm"
 	scmgit "github.com/aholstenson/kvarn/internal/scm/git"
 )
 
@@ -128,7 +127,7 @@ var _ = Describe("MergeCommit", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		g := &scmgit.Git{}
-		Expect(g.CommitAndPush(ctx, scm.CommitAndPushOpts{
+		Expect(commitAndPush(ctx, g, commitPushOpts{
 			RepoDir:     cloneDir,
 			RemoteURL:   bareDir,
 			Branch:      "feature",
@@ -155,7 +154,7 @@ var _ = Describe("MergeCommit", func() {
 		Expect(os.WriteFile(filepath.Join(cloneDir, "feature.txt"), []byte("fixed\n"), 0o644)).To(Succeed())
 
 		g := &scmgit.Git{}
-		Expect(g.CommitAndPush(ctx, scm.CommitAndPushOpts{
+		Expect(commitAndPush(ctx, g, commitPushOpts{
 			RepoDir:     cloneDir,
 			RemoteURL:   bareDir,
 			Branch:      "feature",

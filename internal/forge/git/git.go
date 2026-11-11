@@ -53,22 +53,37 @@ func (g *Git) ResolveCredentials(_ context.Context, config map[string]string) (s
 	return scm.StaticCredentials(creds), nil
 }
 
+// The pull request methods below fail with a permanent error: a plain git
+// host has no pull requests, so a retry cannot succeed.
+
 func (g *Git) CreatePullRequest(_ context.Context, _ forge.CreatePROpts) (*forge.PullRequest, error) {
-	return nil, errors.New("pull request creation is not supported by the git forge")
+	return nil, forge.Permanent(errors.New("pull request creation is not supported by the git forge"))
 }
 
 func (g *Git) GetPullRequest(_ context.Context, _ forge.GetPROpts) (*forge.PullRequestDetails, error) {
-	return nil, errors.New("reading pull requests is not supported by the git forge")
+	return nil, forge.Permanent(errors.New("reading pull requests is not supported by the git forge"))
 }
 
 func (g *Git) GetPullRequestDiff(_ context.Context, _ forge.GetPROpts) (string, error) {
-	return "", errors.New("reading pull request diffs is not supported by the git forge")
+	return "", forge.Permanent(errors.New("reading pull request diffs is not supported by the git forge"))
 }
 
 func (g *Git) PostComment(_ context.Context, _ forge.PostCommentOpts) error {
-	return errors.New("posting comments is not supported by the git forge")
+	return forge.Permanent(errors.New("posting comments is not supported by the git forge"))
 }
 
 func (g *Git) UpdatePullRequest(_ context.Context, _ forge.UpdatePROpts) error {
-	return errors.New("updating pull requests is not supported by the git forge")
+	return forge.Permanent(errors.New("updating pull requests is not supported by the git forge"))
+}
+
+func (g *Git) FindPullRequest(_ context.Context, _ forge.FindPROpts) (*forge.PullRequest, error) {
+	return nil, forge.Permanent(errors.New("finding pull requests is not supported by the git forge"))
+}
+
+func (g *Git) AddLabels(_ context.Context, _ forge.AddLabelsOpts) error {
+	return forge.Permanent(errors.New("adding labels is not supported by the git forge"))
+}
+
+func (g *Git) HasComment(_ context.Context, _ forge.HasCommentOpts) (bool, error) {
+	return false, forge.Permanent(errors.New("reading comments is not supported by the git forge"))
 }

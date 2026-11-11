@@ -142,7 +142,7 @@ var _ = Describe("Git SCM", func() {
 		Expect(err).To(HaveOccurred())
 	})
 
-	Describe("CommitAndPush", func() {
+	Describe("Commit and Push", func() {
 		var cloneDir string
 
 		BeforeEach(func() {
@@ -159,7 +159,7 @@ var _ = Describe("Git SCM", func() {
 			// Write a new file to simulate ExtractChanges dirtying the worktree.
 			Expect(os.WriteFile(filepath.Join(cloneDir, "new-file.txt"), []byte("new content\n"), 0644)).To(Succeed())
 
-			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
+			err := commitAndPush(context.Background(), g, commitPushOpts{
 				RepoDir:     cloneDir,
 				RemoteURL:   bareDir,
 				Branch:      "kvarn/test-session",
@@ -190,7 +190,7 @@ var _ = Describe("Git SCM", func() {
 			// Add a new file and also remove hello.txt to test deletions.
 			Expect(os.WriteFile(filepath.Join(cloneDir, "added.txt"), []byte("added\n"), 0644)).To(Succeed())
 
-			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
+			err := commitAndPush(context.Background(), g, commitPushOpts{
 				RepoDir:     cloneDir,
 				RemoteURL:   bareDir,
 				Branch:      "kvarn/modify-test",
@@ -221,7 +221,7 @@ var _ = Describe("Git SCM", func() {
 		It("sets the correct commit author", func() {
 			Expect(os.WriteFile(filepath.Join(cloneDir, "author-test.txt"), []byte("test\n"), 0644)).To(Succeed())
 
-			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
+			err := commitAndPush(context.Background(), g, commitPushOpts{
 				RepoDir:     cloneDir,
 				RemoteURL:   bareDir,
 				Branch:      "kvarn/author-test",
@@ -246,7 +246,7 @@ var _ = Describe("Git SCM", func() {
 		It("pushes without committing when nothing is staged", func() {
 			head := runGit(cloneDir, "rev-parse", "HEAD")
 
-			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
+			err := commitAndPush(context.Background(), g, commitPushOpts{
 				RepoDir:     cloneDir,
 				RemoteURL:   bareDir,
 				Branch:      "kvarn/empty",
@@ -262,8 +262,81 @@ var _ = Describe("Git SCM", func() {
 			Expect(runGit(bareDir, "rev-parse", "refs/heads/kvarn/empty")).To(Equal(head))
 		})
 
+		It("returns the commit the branch points at", func() {
+			Expect(os.WriteFile(filepath.Join(cloneDir, "sha.txt"), []byte("x\n"), 0o644)).To(Succeed())
+
+			sha, err := g.Commit(context.Background(), scm.CommitOpts{
+				RepoDir:     cloneDir,
+				Branch:      "kvarn/sha",
+				Message:     "sha commit",
+				AuthorName:  "kvarn",
+				AuthorEmail: "kvarn@noreply",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sha).To(Equal(runGit(cloneDir, "rev-parse", "refs/heads/kvarn/sha")))
+		})
+
+		It("pushes the same commit again without an error", func() {
+			Expect(os.WriteFile(filepath.Join(cloneDir, "again.txt"), []byte("x\n"), 0o644)).To(Succeed())
+			Expect(commitAndPush(context.Background(), g, commitPushOpts{
+				RepoDir:     cloneDir,
+				RemoteURL:   bareDir,
+				Branch:      "kvarn/again",
+				Message:     "again",
+				AuthorName:  "kvarn",
+				AuthorEmail: "kvarn@noreply",
+			})).To(Succeed())
+
+			// A delivery repeats a push whose result it never learned, so a push
+			// that already landed must succeed again rather than fail the retry.
+			Expect(g.Push(context.Background(), scm.PushOpts{
+				RepoDir:   cloneDir,
+				RemoteURL: bareDir,
+				Branch:    "kvarn/again",
+			})).To(Succeed())
+		})
+
+		It("reports a rejected push as permanent", func() {
+			branch := runGit(cloneDir, "rev-parse", "--abbrev-ref", "HEAD")
+			Expect(os.WriteFile(filepath.Join(cloneDir, "ours.txt"), []byte("ours\n"), 0o644)).To(Succeed())
+			_, err := g.Commit(context.Background(), scm.CommitOpts{
+				RepoDir:     cloneDir,
+				Branch:      branch,
+				Message:     "ours",
+				AuthorName:  "kvarn",
+				AuthorEmail: "kvarn@noreply",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Somebody else moves the remote branch first.
+			otherDir := filepath.Join(tmpDir, "other")
+			runGit(tmpDir, "clone", bareDir, otherDir)
+			Expect(os.WriteFile(filepath.Join(otherDir, "theirs.txt"), []byte("theirs\n"), 0o644)).To(Succeed())
+			runGit(otherDir, "add", "-A")
+			runGit(otherDir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "theirs")
+			runGit(otherDir, "push", "origin", "HEAD")
+
+			err = g.Push(context.Background(), scm.PushOpts{
+				RepoDir:   cloneDir,
+				RemoteURL: bareDir,
+				Branch:    branch,
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(scmgit.IsTransientPushError(err)).To(BeFalse())
+		})
+
+		It("reports a push to an unreachable remote as transient", func() {
+			err := g.Push(context.Background(), scm.PushOpts{
+				RepoDir:   cloneDir,
+				RemoteURL: "https://127.0.0.1:1/nothing.git",
+				Branch:    runGit(cloneDir, "rev-parse", "--abbrev-ref", "HEAD"),
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(scmgit.IsTransientPushError(err)).To(BeTrue())
+		})
+
 		It("returns error for missing repo dir", func() {
-			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
+			err := commitAndPush(context.Background(), g, commitPushOpts{
 				RemoteURL: bareDir,
 				Branch:    "kvarn/test",
 				Message:   "test",
@@ -273,7 +346,7 @@ var _ = Describe("Git SCM", func() {
 		})
 
 		It("returns error for missing branch", func() {
-			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
+			err := commitAndPush(context.Background(), g, commitPushOpts{
 				RepoDir:   cloneDir,
 				RemoteURL: bareDir,
 				Message:   "test",
@@ -283,7 +356,7 @@ var _ = Describe("Git SCM", func() {
 		})
 
 		It("returns error for missing message", func() {
-			err := g.CommitAndPush(context.Background(), scm.CommitAndPushOpts{
+			err := commitAndPush(context.Background(), g, commitPushOpts{
 				RepoDir:   cloneDir,
 				RemoteURL: bareDir,
 				Branch:    "kvarn/test",
@@ -293,3 +366,28 @@ var _ = Describe("Git SCM", func() {
 		})
 	})
 })
+
+// commitPushOpts is what a delivery passes to Commit and then to Push.
+type commitPushOpts struct {
+	RepoDir     string
+	RemoteURL   string
+	Branch      string
+	Message     string
+	AuthorName  string
+	AuthorEmail string
+}
+
+// commitAndPush commits the worktree and pushes the branch, the way a delivery
+// does with its two steps.
+func commitAndPush(ctx context.Context, g *scmgit.Git, o commitPushOpts) error {
+	if _, err := g.Commit(ctx, scm.CommitOpts{
+		RepoDir:     o.RepoDir,
+		Branch:      o.Branch,
+		Message:     o.Message,
+		AuthorName:  o.AuthorName,
+		AuthorEmail: o.AuthorEmail,
+	}); err != nil {
+		return err
+	}
+	return g.Push(ctx, scm.PushOpts{RepoDir: o.RepoDir, RemoteURL: o.RemoteURL, Branch: o.Branch})
+}

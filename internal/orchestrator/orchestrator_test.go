@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -264,10 +265,15 @@ type mockSCM struct {
 	lastCloneOpts scm.CloneOpts
 	pushCalls     int
 	pushErr       error
-	lastPushOpts  scm.CommitAndPushOpts
+	// pushErrs are returned by the first pushes, one each, before pushErr
+	// applies; a nil entry is a push that succeeds.
+	pushErrs     []error
+	lastPushOpts pushRecord
 	// onPush observes the push while the repository directory still exists;
-	// the orchestrator removes it once the run finishes.
-	onPush func(scm.CommitAndPushOpts)
+	// the orchestrator removes it once the delivery finishes.
+	onPush func(pushRecord)
+	// messages is the commit message per branch, as committed.
+	messages map[string]string
 	// Tokens as resolved at the moment of each operation, which is how a real
 	// SCM reads them.
 	lastCloneToken string
@@ -307,7 +313,29 @@ func (m *mockSCM) Clone(ctx context.Context, opts scm.CloneOpts) error {
 	return nil
 }
 
-func (m *mockSCM) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) error {
+// pushRecord is one push as the mock saw it, with the message of the commit
+// it carried.
+type pushRecord struct {
+	RepoDir   string
+	RemoteURL string
+	Branch    string
+	Message   string
+}
+
+// mockCommitSHA is the commit the mock reports for a branch.
+func mockCommitSHA(branch string) string { return "commit-" + branch }
+
+func (m *mockSCM) Commit(_ context.Context, opts scm.CommitOpts) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.messages == nil {
+		m.messages = make(map[string]string)
+	}
+	m.messages[opts.Branch] = opts.Message
+	return mockCommitSHA(opts.Branch), nil
+}
+
+func (m *mockSCM) Push(ctx context.Context, opts scm.PushOpts) error {
 	creds, err := scm.Resolve(ctx, opts.Credentials)
 	if err != nil {
 		return err
@@ -315,10 +343,20 @@ func (m *mockSCM) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pushCalls++
-	m.lastPushOpts = opts
+	m.lastPushOpts = pushRecord{
+		RepoDir:   opts.RepoDir,
+		RemoteURL: opts.RemoteURL,
+		Branch:    opts.Branch,
+		Message:   m.messages[opts.Branch],
+	}
 	m.lastPushToken = creds.APIToken()
 	if m.onPush != nil {
-		m.onPush(opts)
+		m.onPush(m.lastPushOpts)
+	}
+	if len(m.pushErrs) > 0 {
+		next := m.pushErrs[0]
+		m.pushErrs = m.pushErrs[1:]
+		return next
 	}
 	return m.pushErr
 }
@@ -355,6 +393,68 @@ type mockForge struct {
 	updateCalls    int
 	updateErr      error
 	lastUpdateOpts forge.UpdatePROpts
+
+	// prErrs are returned by the first creates, one each, before prErr
+	// applies. prLandsOnErr makes a failed create open the pull request
+	// anyway, the way a create whose answer was lost does.
+	prErrs       []error
+	prLandsOnErr bool
+	// opened is the pull request the forge holds for the delivery branch.
+	opened    *forge.PullRequest
+	findCalls int
+
+	labelCalls int
+	labelErr   error
+	lastLabels []string
+
+	// commentErrs are returned by the first posts, one each, before
+	// commentErr applies. commentLandsOnErr makes a failed post land anyway.
+	commentErrs       []error
+	commentLandsOnErr bool
+	// comments are the bodies the forge holds.
+	comments        []string
+	hasCommentCalls int
+}
+
+// popErr returns the first queued error, or fallback once the queue is empty.
+func popErr(queue *[]error, fallback error) error {
+	if len(*queue) > 0 {
+		next := (*queue)[0]
+		*queue = (*queue)[1:]
+		return next
+	}
+	return fallback
+}
+
+func (m *mockForge) FindPullRequest(_ context.Context, _ forge.FindPROpts) (*forge.PullRequest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.findCalls++
+	if m.opened == nil {
+		return nil, nil
+	}
+	cp := *m.opened
+	return &cp, nil
+}
+
+func (m *mockForge) AddLabels(_ context.Context, opts forge.AddLabelsOpts) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.labelCalls++
+	m.lastLabels = opts.Labels
+	return m.labelErr
+}
+
+func (m *mockForge) HasComment(_ context.Context, opts forge.HasCommentOpts) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hasCommentCalls++
+	for _, body := range m.comments {
+		if strings.Contains(body, opts.Marker) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *mockForge) SCM() scm.SCM { return m.scmImpl }
@@ -395,16 +495,23 @@ func (m *mockForge) CreatePullRequest(ctx context.Context, opts forge.CreatePROp
 	if err != nil {
 		return nil, err
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.prCalls++
 	m.lastPROpts = opts
 	m.lastPRToken = creds.APIToken()
-	if m.prErr != nil {
-		return nil, m.prErr
-	}
-	return &forge.PullRequest{
+	pr := &forge.PullRequest{
 		URL: "https://github.com/test/repo/pull/1",
 		Ref: "1",
-	}, nil
+	}
+	if err := popErr(&m.prErrs, m.prErr); err != nil {
+		if m.prLandsOnErr {
+			m.opened = pr
+		}
+		return nil, err
+	}
+	m.opened = pr
+	return pr, nil
 }
 
 func (m *mockForge) GetPullRequest(_ context.Context, opts forge.GetPROpts) (*forge.PullRequestDetails, error) {
@@ -433,9 +540,15 @@ func (m *mockForge) GetPullRequestDiff(_ context.Context, _ forge.GetPROpts) (st
 }
 
 func (m *mockForge) PostComment(_ context.Context, opts forge.PostCommentOpts) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.commentCalls++
 	m.lastCommentOpts = opts
-	return m.commentErr
+	err := popErr(&m.commentErrs, m.commentErr)
+	if err == nil || m.commentLandsOnErr {
+		m.comments = append(m.comments, opts.Body)
+	}
+	return err
 }
 
 // UpdatePullRequest records the update and applies it to the stored pull
@@ -1293,8 +1406,8 @@ var _ = Describe("StartJob submission flow", func() {
 		Expect(mockForgeInst.lastPRToken).NotTo(Equal(mockScm.lastCloneToken))
 	})
 
-	It("fails the session when the push fails", func() {
-		mockScm.pushErr = stderrors.New("remote rejected")
+	It("fails the session when the forge rejects the push", func() {
+		mockScm.pushErr = stderrors.New("! [remote rejected] main -> main (pre-receive hook declined)")
 
 		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",
@@ -1319,8 +1432,8 @@ var _ = Describe("StartJob submission flow", func() {
 		Expect(mockForgeInst.prCalls).To(BeZero())
 	})
 
-	It("fails the session when pull request creation fails", func() {
-		mockForgeInst.prErr = stderrors.New("forge unavailable")
+	It("fails the session when the forge refuses to create the pull request", func() {
+		mockForgeInst.prErr = &forge.APIError{Op: "create PR", StatusCode: 403, Body: "forge unavailable"}
 
 		resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 			Project: "test-project",

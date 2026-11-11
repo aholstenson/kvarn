@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -63,6 +64,9 @@ type Cmd struct {
 	NoLocalSocket    bool   `help:"Do not serve the host-local control socket." env:"KVARN_NO_LOCAL_SOCKET"`
 	Model            string `help:"LLM model alias for the coding agent." default:"coding-agent"`
 	OrchestratorFile string `help:"Path to orchestrator TOML file (host-level settings, e.g. scheduler pool)." default:""`
+
+	JobsDir             string        `help:"Directory for job clones and for deliveries that wait to retry. It must survive a restart for those deliveries to resume. Defaults to <user cache dir>/kvarn/jobs." env:"KVARN_JOBS_DIR" default:""`
+	DeliveryRetryWindow time.Duration `help:"How long a delivery to the forge keeps retrying a transient failure before the job fails." env:"KVARN_DELIVERY_RETRY_WINDOW" default:"6h"`
 
 	SchedCPUs           uint    `name:"sched-cpus" help:"Total vCPUs in the admission pool. 0 = file / runtime.NumCPU()." env:"KVARN_SCHED_CPUS" default:"0"`
 	SchedMemory         string  `help:"Total admission-pool memory (e.g. 32G). Empty = file / 75% of host total." env:"KVARN_SCHED_MEMORY" default:""`
@@ -511,6 +515,18 @@ func (c *Cmd) Run() error {
 	}
 	defer instruments.Close()
 
+	jobsDir := c.JobsDir
+	if jobsDir == "" {
+		cacheDir, err := os.UserCacheDir()
+		if err != nil {
+			return fmt.Errorf("determine user cache dir: %w", err)
+		}
+		// Next to the repository mirrors, so a clone taken from a mirror can
+		// share its objects, and on the disk the scheduler's guard watches.
+		jobsDir = filepath.Join(cacheDir, "kvarn", "jobs")
+	}
+	slog.Info("jobs directory", "dir", jobsDir, "delivery_retry_window", c.DeliveryRetryWindow)
+
 	return run(ctx, serveOpts{
 		Addr:           c.Addr,
 		LocalSocket:    c.localSocketPath(),
@@ -547,6 +563,8 @@ func (c *Cmd) Run() error {
 		PreviewStore:        previewStore,
 		PreviewPolicy:       previewPolicy,
 		PreviewSnapshots:    previewSnapshots,
+		JobsDir:             jobsDir,
+		DeliveryRetryWindow: c.DeliveryRetryWindow,
 	})
 }
 

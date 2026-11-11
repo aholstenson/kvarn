@@ -213,9 +213,21 @@ type Store interface {
 	// ReconcileStartup settles every session a dead orchestrator left behind.
 	// Restartable states return to the backlog with their attempt count
 	// incremented; everything else non-terminal fails. Pending sessions are
-	// left alone — they never left the backlog. Called once at startup, since
-	// the VMs these sessions referenced are gone either way.
+	// left alone — they never left the backlog — and so are sessions with a
+	// Delivery, which resume their delivery instead. Called once at startup,
+	// since the VMs these sessions referenced are gone either way.
 	ReconcileStartup(ctx context.Context, opts ReconcileOpts) (ReconcileResult, error)
+
+	// SaveDelivery inserts the delivery for d.SessionID, or replaces the one
+	// already stored. It returns an error when the session does not exist.
+	// CreatedAt is kept from the first save; UpdatedAt is set on every save.
+	SaveDelivery(ctx context.Context, d *Delivery) error
+	// ListDeliveries returns every stored delivery, oldest first.
+	ListDeliveries(ctx context.Context) ([]*Delivery, error)
+	// DeleteDelivery removes the delivery for a session. Removing one that
+	// does not exist is not an error. Pruning a session removes its delivery
+	// with it.
+	DeleteDelivery(ctx context.Context, sessionID string) error
 	// PruneTerminalBefore deletes terminal sessions whose created_at is before
 	// cutoff; their events cascade. Attachment content that no remaining
 	// session refers to is deleted with them. Returns the number of sessions

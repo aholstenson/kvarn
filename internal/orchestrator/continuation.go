@@ -109,6 +109,13 @@ func (s *Service) startContinuation(
 			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("check running sessions: %w", err).Error())
 		}
 		if len(active) > 0 {
+			// A session whose delivery waits for the forge has no run any
+			// more, so "running" would send the requester looking for one.
+			if s.deliveries.owns(active[0].ID) {
+				return nil, connect.Errorf(connect.CodeFailedPrecondition,
+					"session %s is still delivering to pull request %s; cancel it or wait for the delivery to finish",
+					active[0].ID, pr.Ref)
+			}
 			return nil, connect.Errorf(connect.CodeFailedPrecondition,
 				"session %s is already running for pull request %s", active[0].ID, pr.Ref)
 		}

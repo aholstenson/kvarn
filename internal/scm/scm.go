@@ -62,18 +62,24 @@ type CloneOpts struct {
 	Depth       int // 0 = full, >0 = shallow
 }
 
-// CommitAndPushOpts configures a commit-and-push operation on a host-side clone.
-type CommitAndPushOpts struct {
+// CommitOpts configures a commit on a host-side clone.
+type CommitOpts struct {
+	RepoDir     string // host-side clone directory
+	Branch      string // branch to create at the current commit and commit onto
+	Message     string // commit message
+	AuthorName  string
+	AuthorEmail string
+}
+
+// PushOpts configures a push of one branch from a host-side clone.
+type PushOpts struct {
 	RepoDir string // host-side clone directory
 	// RemoteURL is the push target, stated explicitly rather than read back
 	// off the clone's "origin". Clone deliberately leaves no remote behind, so
 	// there is nothing to read back; naming the target here is also what lets
 	// a clone taken from a local mirror still push to the real forge.
 	RemoteURL   string
-	Branch      string // new branch name to create and push
-	Message     string // commit message
-	AuthorName  string
-	AuthorEmail string
+	Branch      string // branch to push, under the same name on the remote
 	Credentials CredentialSource
 }
 
@@ -94,5 +100,12 @@ func (c *Credentials) APIToken() string {
 // SCM abstracts source code management operations.
 type SCM interface {
 	Clone(ctx context.Context, opts CloneOpts) error
-	CommitAndPush(ctx context.Context, opts CommitAndPushOpts) error
+	// Commit records the clone's worktree as a commit on Branch and returns
+	// the commit Branch then points at. When nothing is left to commit, the
+	// branch is created at the commit already checked out, so the commits a
+	// run has already recorded are still delivered.
+	Commit(ctx context.Context, opts CommitOpts) (string, error)
+	// Push sends Branch to the remote. Pushing a commit the remote branch
+	// already points at changes nothing, so a push can be repeated safely.
+	Push(ctx context.Context, opts PushOpts) error
 }

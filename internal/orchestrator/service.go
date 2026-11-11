@@ -432,6 +432,11 @@ type Service struct {
 	runningMu sync.Mutex
 	running   map[string]runningJob
 
+	// deliveries owns every run's delivery to the forge once the run has
+	// prepared it, including the ones that wait out a forge outage after their
+	// run has ended. See deliveryworker.go.
+	deliveries *deliveryWorker
+
 	// dispatcher moves work from the durable backlog into that pipeline. It is
 	// always present and its loop is started by the constructor: a service
 	// whose submissions only reach a table nothing drains cannot run a job at
@@ -474,6 +479,14 @@ func (s *Service) previewSnapshotID(ctx context.Context, p *preview.Preview) (sn
 }
 
 type ServiceOpts struct {
+	// JobsDir holds the clones of running jobs and of deliveries that wait for
+	// another attempt. It has to survive a restart for a waiting delivery to
+	// resume. Empty uses a new temporary directory.
+	JobsDir string
+	// DeliveryRetryWindow is how long a delivery keeps retrying a transient
+	// failure. Zero uses DefaultDeliveryRetryWindow.
+	DeliveryRetryWindow time.Duration
+
 	Provider            vm.Provider
 	CreateOpts          vm.CreateOpts
 	ProjectStore        project.Store
@@ -534,6 +547,7 @@ func NewService(p vm.Provider, createOpts vm.CreateOpts) *Service {
 	s.previews.auto = newAutoStarter(s.resolvePreviewHost, s.previews.now)
 	s.previews.prState = s.previewPRState
 	s.previews.snapshotIDs = s.previewSnapshotID
+	s.startDeliveries("", 0)
 	s.startDispatcher(DispatchPolicy{})
 	return s
 }
@@ -594,8 +608,27 @@ func NewServiceWithOpts(opts ServiceOpts) *Service {
 	s.previews.prState = s.previewPRState
 	s.previews.snapshots = opts.PreviewSnapshots
 	s.previews.snapshotIDs = s.previewSnapshotID
+	s.startDeliveries(opts.JobsDir, opts.DeliveryRetryWindow)
 	s.startDispatcher(opts.Dispatch)
 	return s
+}
+
+// startDeliveries builds the delivery worker and resumes the deliveries a
+// previous process left stored. It runs before the dispatcher starts, so a
+// delivery is owned again before anything new can run.
+func (s *Service) startDeliveries(dir string, window time.Duration) {
+	w, err := newDeliveryWorker(s, dir, window)
+	if err != nil && dir != "" {
+		// A delivery still works from a temporary directory; it only cannot
+		// resume after a restart. That is better than refusing every job.
+		slog.Error("jobs directory unusable; using a temporary one", "dir", dir, "error", err)
+		w, err = newDeliveryWorker(s, "", window)
+	}
+	if err != nil {
+		panic(fmt.Sprintf("orchestrator: create jobs directory: %v", err))
+	}
+	s.deliveries = w
+	w.resume()
 }
 
 // startDispatcher builds the backlog dispatcher and starts its loop on the
@@ -656,6 +689,11 @@ func (s *Service) Shutdown(ctx context.Context) {
 	case <-ctx.Done():
 		slog.Warn("shutdown deadline reached; some jobs may still be running")
 	}
+
+	// A delivery that waits for its next attempt stays stored and resumes in
+	// the next process. Waiting for its goroutine is what keeps it from writing
+	// to a session store the caller is about to close.
+	s.deliveries.wait(ctx)
 }
 
 // checkBacklogDepth refuses a submission the durable backlog cannot take. This
@@ -1238,6 +1276,9 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	}
 
 	jobStart := time.Now()
+	// handedOff records that the delivery continues after this run has ended,
+	// so the session is not final yet and the delivery records its own end.
+	handedOff := false
 	defer func() {
 		outcome := "success"
 		// Inspect the persisted state rather than threading a flag through every
@@ -1253,8 +1294,12 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 				outcome = "cancelled"
 			default:
 				// Non-terminal here means the goroutine returned without
-				// recording an outcome, which shutdown does to in-flight jobs.
+				// recording an outcome, which shutdown does to in-flight jobs,
+				// or that its delivery is waiting to try again.
 				outcome = "cancelled"
+				if handedOff {
+					outcome = "delivery_retrying"
+				}
 			}
 		}
 		s.instruments.RecordJobEnd(ctx, proj.Name, coding.MetricsModeLabel(modeName), outcome, time.Since(jobStart).Seconds())
@@ -1309,8 +1354,10 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	}
 	forgeCfg, forgeImpl, creds, cloneURL := fr.cfg, fr.impl, fr.creds, fr.cloneURL
 
-	// Clone repo first so we can read kvarn.yml before booting the VM.
-	cloneDir, err := os.MkdirTemp("", "kvarn-clone-*")
+	// Clone repo first so we can read kvarn.yml before booting the VM. The
+	// clone is made in the jobs directory because a delivery that has to wait
+	// for the forge keeps it, and moving it there is then a rename.
+	cloneDir, err := s.deliveries.newCloneDir()
 	if err != nil {
 		log.Error("failed to create temp dir", "error", err)
 		s.failRun(termCtx, rootCtx, sessionID, fmt.Errorf("create temp dir: %w", err))
@@ -1934,7 +1981,7 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	if userPrompt == "" {
 		userPrompt = agentPrompt
 	}
-	submitErr := s.deliver(ctx, deliveryRequest{
+	plan, extras, prepareErr := s.prepareDelivery(ctx, deliveryRequest{
 		mode:        mode,
 		sessionID:   sessionID,
 		sandbox:     sess,
@@ -1965,33 +2012,52 @@ func (s *Service) runJob(rootCtx context.Context, cancelJob context.CancelCauseF
 	// its partial snapshot above; this one captures any tail work, and the
 	// CostEvent gives watchers a clear end-of-run summary. It is emitted before
 	// the outcome is decided so a run that spent money and then failed to
-	// submit still reports what it spent.
-	finalReport := tracker.Snapshot()
-	s.sessionMgr.UpdateCost(termCtx, sessionID, finalReport)
-	s.sessionMgr.EmitEvent(termCtx, sessionID, session.CostEvent{
-		SessionID: sessionID,
-		Kind:      session.CostUpdateFinal,
-		Report:    finalReport,
-		Limit:     cost.Limit{MaxUSD: costLimits.MaxCostUSD, WarnFraction: costLimits.WarnThreshold},
-	})
+	// submit still reports what it spent. A delivery's first attempt can still
+	// spend — revising a pull request's text is a model call — so with a
+	// delivery the record waits for that attempt.
+	recordFinalCost := func() {
+		finalReport := tracker.Snapshot()
+		s.sessionMgr.UpdateCost(termCtx, sessionID, finalReport)
+		s.sessionMgr.EmitEvent(termCtx, sessionID, session.CostEvent{
+			SessionID: sessionID,
+			Kind:      session.CostUpdateFinal,
+			Report:    finalReport,
+			Limit:     cost.Limit{MaxUSD: costLimits.MaxCostUSD, WarnFraction: costLimits.WarnThreshold},
+		})
+	}
 
 	// A run whose work never reached the forge is not a success: reporting it as
 	// completed with an empty pull_request_url hides the failure from anyone
 	// listing sessions.
-	if submitErr != nil {
-		log.Error("failed to submit changes", "error", submitErr)
-		s.failRun(termCtx, rootCtx, sessionID, submitErr)
+	if prepareErr != nil {
+		recordFinalCost()
+		log.Error("failed to submit changes", "error", prepareErr)
+		s.failRun(termCtx, rootCtx, sessionID, prepareErr)
 		return
 	}
 
-	// The verdict has been delivered, so the run can now report what it found.
+	if plan == nil {
+		recordFinalCost()
+		// The verdict has been delivered, so the run can now report what it
+		// found.
+		if requiredFailed {
+			s.sessionMgr.Fail(termCtx, sessionID, errors.New("required validation steps failed"))
+			return
+		}
+		log.Info("job completed successfully")
+		s.sessionMgr.UpdateState(termCtx, sessionID, session.StateCompleted, "Completed")
+		return
+	}
+
 	if requiredFailed {
-		s.sessionMgr.Fail(termCtx, sessionID, errors.New("required validation steps failed"))
-		return
+		plan.FailAfter = "required validation steps failed"
 	}
-
-	log.Info("job completed successfully")
-	s.sessionMgr.UpdateState(termCtx, sessionID, session.StateCompleted, "Completed")
+	// Everything the delivery needs is in the clone and the plan now, so the VM
+	// goes back to the pool before the forge is asked for anything.
+	sess.Close()
+	extras.settle = recordFinalCost
+	extras.jobCtx = rootCtx
+	handedOff = s.deliveries.start(plan, cloneDir, extras, log)
 }
 
 // formatBytes renders a byte count using GiB/MiB units, matching the way kvarn.yml
@@ -2042,309 +2108,6 @@ func branchSlug(title string) string {
 		s = strings.Trim(s, "-")
 	}
 	return s
-}
-
-// submitChanges extracts changes from the VM, commits, pushes, and creates a PR.
-// Everything up to and including PR creation is fatal to the run: without it
-// the agent's work exists only inside a VM that is about to be torn down.
-func (s *Service) submitChanges(
-	ctx context.Context,
-	sessionID string,
-	sess Sandbox,
-	forgeImpl forge.Forge,
-	agentResult *agent.Result,
-	proj *project.Project,
-	cfg *projconfig.Config,
-	behavior forgeconfig.Behavior,
-	modeName string,
-	branch string,
-	cloneURL string,
-	cloneDir string,
-	creds scm.CredentialSource,
-	prompt string,
-	metadata map[string]string,
-	worklog []worklogEntry,
-	checkpoints int,
-	costReport cost.Report,
-	log *slog.Logger,
-) error {
-	// Check if there are any changes. A commit the run already recorded counts:
-	// a run that only merged its base branch has an empty trailing diff and a
-	// merge commit that must still reach the forge.
-	changedFiles, err := sess.ChangedFiles(ctx)
-	if err != nil {
-		return fmt.Errorf("check changed files for submission: %w", err)
-	}
-	if len(changedFiles) == 0 && checkpoints == 0 {
-		log.Info("no changes to submit")
-		return nil
-	}
-
-	title := agentResult.Title
-	if title == "" {
-		title = "Apply agent changes"
-	}
-	body := agentResult.Description
-
-	s.sessionMgr.UpdateState(ctx, sessionID, session.StateSubmitting, "Submitting changes")
-
-	// Extract changes from VM to host clone dir.
-	if err := sess.ExtractChanges(ctx, cloneDir); err != nil {
-		return fmt.Errorf("extract changes from VM: %w", err)
-	}
-
-	prefix := behavior.BranchPrefix
-	authorName := behavior.CommitAuthorName
-	authorEmail := behavior.CommitAuthorEmail
-	labels := behavior.Labels
-
-	// Commit and push. The commit message and PR body share one body so the
-	// PR shows the same content that lands as the merge commit. Only the run
-	// metadata differs: trailers on the commit, where tooling looks for them,
-	// and a footer on the pull request, where a reader does.
-	//
-	// The branch name is derived from the commit title for readability, with a
-	// short slice of the session id as a suffix to keep it unique and git-ref
-	// safe. If the title yields no usable slug, fall back to the session id.
-	prBranch := fmt.Sprintf("%s/%s", prefix, sessionID)
-	if slug := branchSlug(title); slug != "" {
-		suffix := sessionID
-		if len(suffix) > 8 {
-			suffix = suffix[:8]
-		}
-		prBranch = fmt.Sprintf("%s/%s-%s", prefix, slug, suffix)
-	}
-	commitMsg := title
-	if body != "" {
-		commitMsg = title + "\n\n" + body
-	}
-
-	tmplData := prTemplateData{
-		Title:       title,
-		Description: body,
-		SessionID:   sessionID,
-		Branch:      prBranch,
-		Mode:        modeName,
-		Metadata:    metadata,
-	}
-	// The pull request does not exist yet, so only the sites this branch is
-	// addressed by on its own can be named here. A site addressed by `{pr}`
-	// resolves for the comment below, once there is a pull request to name.
-	tmplData = tmplData.withPreviewLinks(s.previewLinksFor(proj, cfg, prBranch, ""))
-	// Trailers render strictly because they land in the commit message, where a
-	// key the submission did not carry would leave a trailer with nothing after
-	// the colon in history nobody will rewrite.
-	commitMsg = coding.ApplyTrailers(commitMsg,
-		renderPRTemplates(behavior.PullRequest.CommitTrailers, tmplData, missingKeyError, log))
-	prBody := coding.ApplyFooter(body,
-		renderPRTemplate(behavior.PullRequest.BodyFooter, tmplData, missingKeyZero, log))
-
-	if err := forgeImpl.SCM().CommitAndPush(ctx, scm.CommitAndPushOpts{
-		RepoDir:     cloneDir,
-		RemoteURL:   cloneURL,
-		Branch:      prBranch,
-		Message:     commitMsg,
-		AuthorName:  authorName,
-		AuthorEmail: authorEmail,
-		Credentials: creds,
-	}); err != nil {
-		return fmt.Errorf("commit and push to %s: %w", prBranch, err)
-	}
-	s.recordMirrorPush(ctx, proj, cloneURL, cloneDir, prBranch, log)
-
-	pr, err := forgeImpl.CreatePullRequest(ctx, forge.CreatePROpts{
-		RepoURL:     cloneURL,
-		BaseBranch:  branch,
-		HeadBranch:  prBranch,
-		Title:       title,
-		Body:        prBody,
-		Labels:      labels,
-		Credentials: creds,
-	})
-	if err != nil {
-		return fmt.Errorf("create pull request for %s: %w", prBranch, err)
-	}
-
-	log.Info("pull request created", "url", pr.URL, "ref", pr.Ref)
-	// Persist the PR identity on the session (and broadcast a
-	// PullRequestEvent) so GetSession returns it after the run, not just live
-	// watchers. The ref is what a later feedback run is looked up by. The
-	// pull request already exists on the forge at this point, so this write
-	// runs uncancellable: losing the ref to a shutdown would leave the run
-	// with no record of what it opened.
-	s.sessionMgr.SetPullRequest(context.WithoutCancel(ctx), sessionID, pr.URL, pr.Ref, prBranch)
-	// The text kvarn wrote is what makes the pull request its own to revise on
-	// a later follow-up. Losing it would only make that follow-up leave the
-	// text alone, so a failure is a warning rather than a failed run.
-	if err := s.sessionMgr.SetPullRequestWritten(context.WithoutCancel(ctx), sessionID, session.PullRequestText{
-		Title:       title,
-		Body:        prBody,
-		Description: body,
-	}); err != nil {
-		log.Warn("failed to record the pull request text", "error", err)
-	}
-
-	// Post task + work log as a PR comment so it stays out of any
-	// squash-merge commit message. Configuration that turns off every section
-	// leaves nothing to say, and an empty comment is worse than none.
-	//
-	// The pull request exists now, so the comment can carry a preview address
-	// formed from it — including one nothing has started, which an `auto_start`
-	// route boots when a reviewer follows the link.
-	commentData := tmplData.withPreviewLinks(s.previewLinksFor(proj, cfg, prBranch, pr.Ref))
-	commentBody := formatWorklogComment(prompt, worklog,
-		sectionsFrom(behavior.PullRequest, forgeconfig.CommentNewPullRequest, commentData, log), costReport)
-	if commentBody == "" {
-		log.Info("skipping task/work-log comment: every section is turned off")
-		return nil
-	}
-	if err := forgeImpl.PostComment(ctx, forge.PostCommentOpts{
-		RepoURL:     cloneURL,
-		PRRef:       pr.Ref,
-		Body:        commentBody,
-		Credentials: creds,
-	}); err != nil {
-		// The PR exists and carries the change; a missing comment is cosmetic.
-		log.Warn("failed to post task/work-log comment", "error", err)
-	}
-	return nil
-}
-
-// submitFollowup extracts changes from the VM and pushes them as a follow-up
-// commit onto the pull request's existing head branch. No new PR is opened and
-// the PR's title and body are left alone; what was addressed goes into a
-// comment instead.
-func (s *Service) submitFollowup(
-	ctx context.Context,
-	sessionID string,
-	sess Sandbox,
-	forgeImpl forge.Forge,
-	agentResult *agent.Result,
-	proj *project.Project,
-	cfg *projconfig.Config,
-	behavior forgeconfig.Behavior,
-	modeName string,
-	pr *prTarget,
-	reviser agent.PullRequestReviser,
-	cloneURL string,
-	cloneDir string,
-	creds scm.CredentialSource,
-	feedback string,
-	metadata map[string]string,
-	worklog []worklogEntry,
-	checkpoints int,
-	costReport cost.Report,
-	log *slog.Logger,
-) error {
-	// The VM cloned the PR head, so the changed set is the follow-up delta. A
-	// merge-only run has none and a merge commit waiting in the clone, so a
-	// commit already recorded counts as something to submit.
-	changedFiles, err := sess.ChangedFiles(ctx)
-	if err != nil {
-		return fmt.Errorf("check changed files for submission: %w", err)
-	}
-	if len(changedFiles) == 0 && checkpoints == 0 {
-		log.Info("no changes to submit")
-		return nil
-	}
-
-	s.sessionMgr.UpdateState(ctx, sessionID, session.StateSubmitting, "Submitting changes")
-
-	// Re-check the head before doing any work: the run started from a snapshot
-	// of the branch, and pushing on top of someone else's newer commit would
-	// silently revert it.
-	current, err := forgeImpl.GetPullRequest(ctx, forge.GetPROpts{
-		RepoURL:     cloneURL,
-		PRRef:       pr.ref,
-		Credentials: creds,
-	})
-	if err != nil {
-		return fmt.Errorf("re-read pull request %s: %w", pr.ref, err)
-	}
-	if current.HeadSHA != pr.headSHA {
-		return fmt.Errorf("pull request %s moved during the run (head %s -> %s); not pushing",
-			pr.ref, pr.headSHA, current.HeadSHA)
-	}
-
-	if err := sess.ExtractChanges(ctx, cloneDir); err != nil {
-		return fmt.Errorf("extract changes from VM: %w", err)
-	}
-
-	title := agentResult.Title
-	if title == "" {
-		title = "Address review feedback"
-	}
-	commitMsg := title
-	if agentResult.Description != "" {
-		commitMsg = title + "\n\n" + agentResult.Description
-	}
-	tmplData := prTemplateData{
-		Title:       title,
-		Description: agentResult.Description,
-		SessionID:   sessionID,
-		Branch:      pr.headBranch,
-		Mode:        modeName,
-		Metadata:    metadata,
-	}
-	// The pull request is already open, so every site it addresses resolves.
-	tmplData = tmplData.withPreviewLinks(s.previewLinksFor(proj, cfg, pr.headBranch, pr.ref))
-	commitMsg = coding.ApplyTrailers(commitMsg,
-		renderPRTemplates(behavior.PullRequest.CommitTrailers, tmplData, missingKeyError, log))
-
-	// Pushing the PR's own branch name is a fast-forward of one new commit.
-	if err := forgeImpl.SCM().CommitAndPush(ctx, scm.CommitAndPushOpts{
-		RepoDir:     cloneDir,
-		RemoteURL:   cloneURL,
-		Branch:      pr.headBranch,
-		Message:     commitMsg,
-		AuthorName:  behavior.CommitAuthorName,
-		AuthorEmail: behavior.CommitAuthorEmail,
-		Credentials: creds,
-	}); err != nil {
-		return fmt.Errorf("commit and push to %s: %w", pr.headBranch, err)
-	}
-	s.recordMirrorPush(ctx, proj, cloneURL, cloneDir, pr.headBranch, log)
-
-	log.Info("follow-up commit pushed", "branch", pr.headBranch, "url", pr.url)
-
-	// Only a commit that changed files can make the pull request's text out of
-	// date. A run that only merged its base branch adds nothing the text
-	// describes.
-	var prNote string
-	if behavior.PullRequest.UpdateOnFollowUp && reviser != nil && len(changedFiles) > 0 {
-		prNote = s.revisePullRequestText(ctx, prRevision{
-			sessionID: sessionID,
-			project:   proj.Name,
-			pr:        pr,
-			forgeImpl: forgeImpl,
-			cloneURL:  cloneURL,
-			creds:     creds,
-			reviser:   reviser,
-			footer: func(title, description string) string {
-				data := tmplData
-				data.Title = title
-				data.Description = description
-				return renderPRTemplate(behavior.PullRequest.BodyFooter, data, missingKeyZero, log)
-			},
-			log: log,
-		})
-	}
-
-	commentBody := formatFollowupComment(feedback, agentResult.Description, prNote, worklog,
-		sectionsFrom(behavior.PullRequest, forgeconfig.CommentFollowUpCommit, tmplData, log), costReport)
-	if commentBody == "" {
-		log.Info("skipping follow-up comment: every section is turned off")
-		return nil
-	}
-	if err := forgeImpl.PostComment(ctx, forge.PostCommentOpts{
-		RepoURL:     cloneURL,
-		PRRef:       pr.ref,
-		Body:        commentBody,
-		Credentials: creds,
-	}); err != nil {
-		log.Warn("failed to post follow-up comment", "error", err)
-	}
-	return nil
 }
 
 // makeEventAdapter translates sandbox Events to session state updates.

@@ -79,7 +79,7 @@ func MergeCommit(ctx context.Context, opts MergeCommitOpts) (string, error) {
 	// commit-tree rather than commit, because commit would refuse to record a
 	// second parent that the repository has no MERGE_HEAD for. The object ids
 	// are git's own output or have been through rev-parse, so they are safe as
-	// options; the message goes on stdin, as in CommitAndPush, so an agent-written
+	// options; the message goes on stdin, as in Commit, so an agent-written
 	// body never has to survive argv.
 	out, err := Run(ctx, Cmd{
 		Dir: opts.RepoDir,
@@ -100,7 +100,7 @@ func MergeCommit(ctx context.Context, opts MergeCommitOpts) (string, error) {
 		return "", fmt.Errorf("commit-tree returned %q, want an object id", sha)
 	}
 
-	// A ref write rather than `git reset`, for the same reason CommitAndPush
+	// A ref write rather than `git reset`, for the same reason Commit
 	// uses one: the index and worktree already hold the merge result and must
 	// not be touched.
 	if _, err := Run(ctx, Cmd{

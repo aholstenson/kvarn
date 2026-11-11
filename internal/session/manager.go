@@ -221,6 +221,18 @@ func (m *manager) ExpirePending(ctx context.Context, cutoff time.Time, reason st
 	return m.store.ExpirePending(ctx, cutoff, reason)
 }
 
+func (m *manager) SaveDelivery(ctx context.Context, d *Delivery) error {
+	return m.store.SaveDelivery(ctx, d)
+}
+
+func (m *manager) ListDeliveries(ctx context.Context) ([]*Delivery, error) {
+	return m.store.ListDeliveries(ctx)
+}
+
+func (m *manager) DeleteDelivery(ctx context.Context, sessionID string) error {
+	return m.store.DeleteDelivery(ctx, sessionID)
+}
+
 func (m *manager) List(ctx context.Context, filter SessionFilter) ([]*Session, error) {
 	return m.store.ListSessions(ctx, filter)
 }

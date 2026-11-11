@@ -102,7 +102,9 @@ func TerminalStates() []State {
 // in a VM that no longer does, so a silent retry would recharge the cap and
 // throw away the reasoning. StateSubmitting is the one that must never come
 // back: a push may have landed and a pull request may exist without its URL
-// having reached the store, and requeueing would open a second one.
+// having reached the store, and requeueing would open a second one. A
+// submitting session that has a stored Delivery is not failed either: its
+// delivery records which steps landed, so it resumes instead.
 //
 // StatePending is deliberately absent. It is where a requeue lands, not
 // something to requeue from — a pending session never left the backlog, so
@@ -612,4 +614,12 @@ type Manager interface {
 	// change, reporting false when the run had already advanced past the
 	// states it is safe to re-run from.
 	RequeueRun(ctx context.Context, id string, opts RequeueOpts) (bool, error)
+
+	// SaveDelivery stores the delivery for a session, replacing any earlier
+	// one. See Store.SaveDelivery.
+	SaveDelivery(ctx context.Context, d *Delivery) error
+	// ListDeliveries returns every stored delivery, oldest first.
+	ListDeliveries(ctx context.Context) ([]*Delivery, error)
+	// DeleteDelivery removes the delivery for a session, if there is one.
+	DeleteDelivery(ctx context.Context, sessionID string) error
 }

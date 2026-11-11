@@ -344,7 +344,7 @@ modes:
 		})
 
 		It("fails the run when the comment cannot be posted", func() {
-			mockForgeInst.commentErr = fmt.Errorf("forge unavailable")
+			mockForgeInst.commentErr = &forge.APIError{Op: "post comment", StatusCode: 403, Body: "forge unavailable"}
 			startService()
 			resp, err := client.StartJob(context.Background(), &v1.StartJobRequest{
 				Project:   "test-project",

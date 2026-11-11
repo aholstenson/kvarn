@@ -637,9 +637,15 @@ func (s *Store) ReconcileStartup(ctx context.Context, opts session.ReconcileOpts
 		// the backlog this reconciliation feeds, and touching them would charge
 		// an attempt for a restart they sat out.
 		placeholders, stateArgs := terminalStates()
+		// Sessions with a delivery are excluded too: the run is over, but the
+		// delivery resumes from its stored plan, and failing the session here
+		// would abandon output that is still on its way to the forge.
 		stateArgs = append(stateArgs, string(session.StatePending))
 		stale, err := querySessions(ctx, tx,
-			`SELECT `+sessionColumns+` FROM sessions WHERE state NOT IN (`+placeholders+`, ?) ORDER BY id`,
+			`SELECT `+sessionColumns+` FROM sessions
+			  WHERE state NOT IN (`+placeholders+`, ?)
+			    AND id NOT IN (SELECT session_id FROM deliveries)
+			  ORDER BY id`,
 			stateArgs...)
 		if err != nil {
 			return err
@@ -738,6 +744,89 @@ func applyTransition(ctx context.Context, tx *sql.Tx, sess *session.Session, now
 	}, nil
 }
 
+// SaveDelivery inserts or replaces the delivery for d.SessionID. The upsert
+// keeps created_at from the first save, so the order of ListDeliveries does not
+// change when a delivery is rescheduled. d.CreatedAt and d.UpdatedAt are set to
+// the stored values.
+func (s *Store) SaveDelivery(ctx context.Context, d *session.Delivery) error {
+	now := time.Now().UTC()
+	createdAt := d.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	plan := d.Plan
+	if plan == nil {
+		// The column is NOT NULL, and an empty plan is still a plan.
+		plan = []byte{}
+	}
+	var storedCreated int64
+	err := retryBusy(func() error {
+		return s.db.QueryRowContext(ctx,
+			`INSERT INTO deliveries
+			   (session_id, plan, attempts, next_attempt_at, deadline, last_error, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT (session_id) DO UPDATE SET
+			   plan = excluded.plan,
+			   attempts = excluded.attempts,
+			   next_attempt_at = excluded.next_attempt_at,
+			   deadline = excluded.deadline,
+			   last_error = excluded.last_error,
+			   updated_at = excluded.updated_at
+			 RETURNING created_at`,
+			d.SessionID, plan, d.Attempts, session.ToMicros(d.NextAttemptAt),
+			session.ToMicros(d.Deadline), d.LastError, session.ToMicros(createdAt),
+			session.ToMicros(now),
+		).Scan(&storedCreated)
+	})
+	if isForeignKeyViolation(err) {
+		return fmt.Errorf("session %q not found", d.SessionID)
+	}
+	if err != nil {
+		return fmt.Errorf("save delivery: %w", err)
+	}
+	d.CreatedAt = session.FromMicros(storedCreated)
+	d.UpdatedAt = session.FromMicros(session.ToMicros(now))
+	return nil
+}
+
+func (s *Store) ListDeliveries(ctx context.Context) ([]*session.Delivery, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT session_id, plan, attempts, next_attempt_at, deadline, last_error, created_at, updated_at
+		   FROM deliveries ORDER BY created_at ASC, session_id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list deliveries: %w", err)
+	}
+	defer rows.Close()
+	var out []*session.Delivery
+	for rows.Next() {
+		var (
+			d                                    session.Delivery
+			nextAt, deadline, created, updatedAt int64
+		)
+		if err := rows.Scan(&d.SessionID, &d.Plan, &d.Attempts, &nextAt, &deadline,
+			&d.LastError, &created, &updatedAt); err != nil {
+			return nil, fmt.Errorf("scan delivery: %w", err)
+		}
+		d.NextAttemptAt = session.FromMicros(nextAt)
+		d.Deadline = session.FromMicros(deadline)
+		d.CreatedAt = session.FromMicros(created)
+		d.UpdatedAt = session.FromMicros(updatedAt)
+		out = append(out, &d)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteDelivery(ctx context.Context, sessionID string) error {
+	err := retryBusy(func() error {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM deliveries WHERE session_id = ?`, sessionID)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("delete delivery: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) PruneTerminalBefore(ctx context.Context, cutoff time.Time) (int, error) {
 	var n int64
 	placeholders, args := terminalStates()
@@ -798,6 +887,17 @@ func isUniqueViolation(err error) bool {
 	var serr *modernc.Error
 	if errors.As(err, &serr) {
 		return serr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+	}
+	return false
+}
+
+// isForeignKeyViolation reports whether err is a FOREIGN KEY violation. The
+// only foreign key a delivery write can trip is the one to its session, so a
+// caller reads this as "that session does not exist".
+func isForeignKeyViolation(err error) bool {
+	var serr *modernc.Error
+	if errors.As(err, &serr) {
+		return serr.Code() == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY
 	}
 	return false
 }

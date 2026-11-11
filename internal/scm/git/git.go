@@ -82,7 +82,7 @@ func (g *Git) Clone(ctx context.Context, opts scm.CloneOpts) error {
 //
 // Nothing downstream wants the remote either: the VM never fetches or pushes,
 // changes come back through ExtractChanges, and the host-side push names its
-// target explicitly via CommitAndPushOpts.RemoteURL. With no remote there is no
+// target explicitly via PushOpts.RemoteURL. With no remote there is no
 // field a credential can hide in, which is a stronger guarantee than sanitizing
 // one.
 func SanitizeClone(ctx context.Context, dir string) error {
@@ -99,18 +99,15 @@ func SanitizeClone(ctx context.Context, dir string) error {
 	return nil
 }
 
-func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) error {
+func (g *Git) Commit(ctx context.Context, opts scm.CommitOpts) (string, error) {
 	if opts.RepoDir == "" {
-		return errors.New("repo dir is required")
+		return "", errors.New("repo dir is required")
 	}
 	if opts.Branch == "" {
-		return errors.New("branch is required")
+		return "", errors.New("branch is required")
 	}
 	if opts.Message == "" {
-		return errors.New("commit message is required")
-	}
-	if opts.RemoteURL == "" {
-		return errors.New("remote URL is required")
+		return "", errors.New("commit message is required")
 	}
 
 	branchRef := "refs/heads/" + opts.Branch
@@ -120,30 +117,24 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 	// index, and the worktree here is deliberately dirty: it holds the files
 	// ExtractChanges copied out of the VM, which are the entire point of the
 	// commit about to be made.
-	head, err := Run(ctx, Cmd{
-		Dir:      opts.RepoDir,
-		Sub:      "rev-parse",
-		Flags:    []string{"--verify"},
-		Operands: []string{"HEAD"},
-	})
+	headSHA, err := revParse(ctx, opts.RepoDir, "HEAD")
 	if err != nil {
-		return fmt.Errorf("resolve HEAD: %w", err)
+		return "", fmt.Errorf("resolve HEAD: %w", err)
 	}
-	headSHA := strings.TrimSpace(head)
 
 	if _, err := Run(ctx, Cmd{
 		Dir:      opts.RepoDir,
 		Sub:      "update-ref",
 		Operands: []string{branchRef, headSHA},
 	}); err != nil {
-		return fmt.Errorf("create branch ref: %w", err)
+		return "", fmt.Errorf("create branch ref: %w", err)
 	}
 	if _, err := Run(ctx, Cmd{
 		Dir:      opts.RepoDir,
 		Sub:      "symbolic-ref",
 		Operands: []string{"HEAD", branchRef},
 	}); err != nil {
-		return fmt.Errorf("update HEAD: %w", err)
+		return "", fmt.Errorf("update HEAD: %w", err)
 	}
 
 	if _, err := Run(ctx, Cmd{
@@ -151,13 +142,13 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 		Sub:   "add",
 		Flags: []string{"-A"},
 	}); err != nil {
-		return fmt.Errorf("stage changes: %w", err)
+		return "", fmt.Errorf("stage changes: %w", err)
 	}
 
 	// A run can arrive here with commits already recorded and nothing left over
 	// — a job that only merged its base branch, whose merge commit MergeCommit
 	// has already made. Committing an empty tree change on top would add a
-	// commit saying nothing, and refusing to push would drop the merge.
+	// commit saying nothing, and refusing to deliver would drop the merge.
 	staged, err := Run(ctx, Cmd{
 		Dir:      opts.RepoDir,
 		Sub:      "diff",
@@ -165,38 +156,55 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 		Operands: []string{"HEAD"},
 	})
 	if err != nil {
-		return fmt.Errorf("check staged changes: %w", err)
+		return "", fmt.Errorf("check staged changes: %w", err)
 	}
 
 	if strings.TrimSpace(staged) == "" {
-		slog.Info("nothing staged; pushing the commits already recorded", "branch", opts.Branch)
-	} else {
-		// Identity comes from -c rather than global config, which the orchestrator
-		// host may not have at all. The message arrives on stdin so an agent-written
-		// body of arbitrary length and shape never has to survive argv.
-		if _, err := Run(ctx, Cmd{
-			Dir: opts.RepoDir,
-			Config: []string{
-				"user.name=" + opts.AuthorName,
-				"user.email=" + opts.AuthorEmail,
-				"commit.gpgsign=false",
-			},
-			Sub:   "commit",
-			Flags: []string{"--no-verify", "-F", "-"},
-			Stdin: opts.Message,
-		}); err != nil {
-			return fmt.Errorf("commit: %w", err)
-		}
-
-		slog.Info("committed changes",
-			"branch", opts.Branch,
-			"author", opts.AuthorName,
-		)
+		slog.Info("nothing staged; delivering the commits already recorded", "branch", opts.Branch)
+		return headSHA, nil
 	}
 
+	// Identity comes from -c rather than global config, which the orchestrator
+	// host may not have at all. The message arrives on stdin so an agent-written
+	// body of arbitrary length and shape never has to survive argv.
+	if _, err := Run(ctx, Cmd{
+		Dir: opts.RepoDir,
+		Config: []string{
+			"user.name=" + opts.AuthorName,
+			"user.email=" + opts.AuthorEmail,
+			"commit.gpgsign=false",
+		},
+		Sub:   "commit",
+		Flags: []string{"--no-verify", "-F", "-"},
+		Stdin: opts.Message,
+	}); err != nil {
+		return "", fmt.Errorf("commit: %w", err)
+	}
+
+	sha, err := revParse(ctx, opts.RepoDir, "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("resolve new commit: %w", err)
+	}
+	slog.Info("committed changes", "branch", opts.Branch, "author", opts.AuthorName, "commit", sha)
+	return sha, nil
+}
+
+func (g *Git) Push(ctx context.Context, opts scm.PushOpts) error {
+	if opts.RepoDir == "" {
+		return errors.New("repo dir is required")
+	}
+	if opts.Branch == "" {
+		return errors.New("branch is required")
+	}
+	if opts.RemoteURL == "" {
+		return errors.New("remote URL is required")
+	}
+
+	branchRef := "refs/heads/" + opts.Branch
+
 	// Resolved here rather than reused from clone time: the job between the two
-	// can outlive a short-lived token, and this is the last moment before the
-	// network call.
+	// can outlive a short-lived token, and a delivery that waits out a forge
+	// outage can outlive it by hours.
 	auth, err := ResolveAuth(ctx, opts.RemoteURL, opts.Credentials)
 	if err != nil {
 		return fmt.Errorf("configure push auth: %w", err)
@@ -215,6 +223,62 @@ func (g *Git) CommitAndPush(ctx context.Context, opts scm.CommitAndPushOpts) err
 
 	slog.Info("pushed branch", "branch", opts.Branch)
 	return nil
+}
+
+// revParse resolves rev to a full commit SHA.
+func revParse(ctx context.Context, dir, rev string) (string, error) {
+	out, err := Run(ctx, Cmd{
+		Dir:      dir,
+		Sub:      "rev-parse",
+		Flags:    []string{"--verify"},
+		Operands: []string{rev + "^{commit}"},
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// pushPermanentSignatures are push failures that fail the same way on every
+// attempt: the remote decided against the push, or against the credentials.
+var pushPermanentSignatures = []string{
+	"[rejected]",
+	"non-fast-forward",
+	"fetch first",
+	"Updates were rejected",
+	"Authentication failed",
+	"Permission denied",
+	"Permission to ",
+	"Repository not found",
+	"repository not found",
+	"protected branch",
+	"pre-receive hook declined",
+	"remote rejected",
+	"Invalid username or password",
+	"The requested URL returned error: 401",
+	"The requested URL returned error: 403",
+	"The requested URL returned error: 404",
+}
+
+// IsTransientPushError reports whether a failed Push can succeed when it is
+// repeated. A push the remote rejected, or credentials it refused, fail the
+// same way again. Every other failure is taken as transient: the network and
+// the forge fail in many ways git reports differently, and taking an unknown
+// failure as permanent would throw away work a later attempt could deliver.
+func IsTransientPushError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	msg := err.Error()
+	for _, sig := range pushPermanentSignatures {
+		if strings.Contains(msg, sig) {
+			return false
+		}
+	}
+	return true
 }
 
 // RedactURL renders a remote URL for a log line with any embedded credential

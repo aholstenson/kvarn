@@ -17,6 +17,8 @@ type Instruments struct {
 	JobsStarted     metric.Int64Counter
 	JobsCompleted   metric.Int64Counter
 	JobDuration     metric.Float64Histogram
+	Deliveries      metric.Int64Counter
+	DeliveryAttempt metric.Int64Histogram
 	AuthAttempts    metric.Int64Counter
 	AdmissionWait   metric.Float64Histogram
 	AdmissionDenies metric.Int64Counter
@@ -86,6 +88,14 @@ func NewInstruments(m metric.Meter, sessions SessionCounter, sched SchedulerSamp
 		metric.WithDescription("End-to-end runJob duration"),
 		metric.WithUnit("s")); err != nil {
 		return nil, fmt.Errorf("job.duration: %w", err)
+	}
+	if ins.Deliveries, err = m.Int64Counter("kvarn.deliveries.completed",
+		metric.WithDescription("Deliveries of a run's output to the forge that reached an end")); err != nil {
+		return nil, fmt.Errorf("deliveries.completed: %w", err)
+	}
+	if ins.DeliveryAttempt, err = m.Int64Histogram("kvarn.delivery.attempts",
+		metric.WithDescription("Attempts a delivery took before it reached an end")); err != nil {
+		return nil, fmt.Errorf("delivery.attempts: %w", err)
 	}
 	if ins.AuthAttempts, err = m.Int64Counter("kvarn.auth.attempts",
 		metric.WithDescription("API key authentication attempts")); err != nil {
@@ -217,6 +227,17 @@ func (i *Instruments) RecordJobEnd(ctx context.Context, project, mode, outcome s
 	)
 	i.JobsCompleted.Add(ctx, 1, attrs)
 	i.JobDuration.Record(ctx, durationSeconds, attrs)
+}
+
+// RecordDeliveryEnd bumps kvarn.deliveries.completed and records how many
+// attempts the delivery took; nil-safe.
+func (i *Instruments) RecordDeliveryEnd(ctx context.Context, project, outcome string, attempts int) {
+	if i == nil {
+		return
+	}
+	attrs := metric.WithAttributes(attrStr("project", project), attrStr("outcome", outcome))
+	i.Deliveries.Add(ctx, 1, attrs)
+	i.DeliveryAttempt.Record(ctx, int64(attempts), attrs)
 }
 
 // RecordAuth bumps kvarn.auth.attempts; nil-safe.
