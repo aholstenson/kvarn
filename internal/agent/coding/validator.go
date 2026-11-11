@@ -207,9 +207,11 @@ func (c *codingConversation) ValidatePrompt(ctx context.Context, check agent.Pro
 	//
 	// A content policy block gets the same recovery as in the main loop. The
 	// coding agent cannot fix a block either, so one that does not clear stops
-	// validation with an error that says why.
+	// validation with an error that says why. So does a model call that fails
+	// after it has started to respond.
 	retried := false
 	var blocks blockRecovery
+	var interrupts interruptRecovery
 	for {
 		info, done, stepErr := sess.Step(ctx)
 		if stepErr != nil {
@@ -219,14 +221,23 @@ func (c *codingConversation) ValidatePrompt(ctx context.Context, check agent.Pro
 				slog.Warn("the validator model is unavailable; trying the check once more", "step", check.Step.Name, "error", stepErr)
 				continue
 			}
-			err := c.recoverFromBlock(ctx, &blocks, sess, info.Step+1, stepErr)
+			if llms.IsContentPolicy(stepErr) {
+				err := c.recoverFromBlock(ctx, &blocks, sess, info.Step+1, stepErr)
+				if err == nil {
+					slog.Warn("the content filter blocked the validator; trying the check again", "step", check.Step.Name, "error", stepErr)
+					continue
+				}
+				return sandbox.PromptVerdict{}, timedOut(fmt.Errorf("validator: %w", err))
+			}
+			err := c.recoverFromInterrupt(ctx, &interrupts, info.Step+1, stepErr)
 			if err == nil {
-				slog.Warn("the content filter blocked the validator; trying the check again", "step", check.Step.Name, "error", stepErr)
+				slog.Warn("the validator model failed after it had started to respond; trying the step again", "step", check.Step.Name, "error", stepErr)
 				continue
 			}
 			return sandbox.PromptVerdict{}, timedOut(fmt.Errorf("validator: %w", err))
 		}
 		blocks.stepped()
+		interrupts.stepped()
 		if done {
 			break
 		}

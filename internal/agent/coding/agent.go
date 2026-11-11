@@ -448,6 +448,7 @@ func (c *codingConversation) Run(ctx context.Context, followup string) (string, 
 		c.sess = sess
 	}
 
+	var interrupts interruptRecovery
 	for {
 		info, done, err := c.sess.Step(ctx)
 		if err != nil {
@@ -455,12 +456,19 @@ func (c *codingConversation) Run(ctx context.Context, followup string) (string, 
 				c.agentCtx.Cost.CheckBudget()
 			}
 			// A failed step reports the steps that completed before it.
-			if err := c.recoverFromBlock(ctx, &c.blocks, c.sess, info.Step+1, err); err != nil {
+			failedStep := info.Step + 1
+			if llms.IsContentPolicy(err) {
+				err = c.recoverFromBlock(ctx, &c.blocks, c.sess, failedStep, err)
+			} else {
+				err = c.recoverFromInterrupt(ctx, &interrupts, failedStep, err)
+			}
+			if err != nil {
 				return "", err
 			}
 			continue
 		}
 		c.blocks.stepped()
+		interrupts.stepped()
 		if done {
 			break
 		}
