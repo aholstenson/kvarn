@@ -454,7 +454,8 @@ func (s *Session) addCloser(fn func()) {
 }
 
 // Start boots a VM, transfers files, configures firewall/tools/container,
-// runs setup steps, and returns a ready Session.
+// runs setup steps, and returns a ready Session. A VM that does not start, or
+// whose runner does not register, is replaced with a new one (see bootVM).
 func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	workingDir := opts.WorkingDir
 	if workingDir == "" {
@@ -474,23 +475,12 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	}()
 
 	// Set up dispatch registry for runner communication.
-	token, err := generateToken()
-	if err != nil {
-		return nil, fmt.Errorf("generate token: %w", err)
-	}
-
 	registry := opts.Registry
 	handler := opts.BridgeHandler
 	if registry == nil {
 		registry = dispatch.NewRegistry()
 		handler = dispatch.NewHandler(registry)
 	}
-
-	pr, err := registry.Register(token)
-	if err != nil {
-		return nil, fmt.Errorf("register token: %w", err)
-	}
-	sess.addCloser(func() { registry.Remove(token) })
 
 	// Resolve dependencies once and reuse for firewall hosts and installation.
 	var deps []project.ResolvedDep
@@ -509,6 +499,7 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	// user config.
 	var cacheLayers []cache.Layer
 	if opts.CacheProvider != nil && opts.ProjectID != "" && opts.Config != nil {
+		var err error
 		cacheLayers, err = cache.DeriveLayers(
 			opts.SourceDir, deps, cacheToolLookup,
 			opts.Config.Cache, opts.ProjectID, opts.Namespace,
@@ -522,17 +513,6 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	emit(opts, ProvisioningEvent{})
 
 	createOpts := opts.CreateOpts
-	createOpts.Token = token
-	// The console is the guest's only voice once the runner stops answering, so
-	// it is retained as well as emitted: the tail is what a lost bridge is
-	// reported with, and the debug log is where the whole stream can be read
-	// back when the tail is not enough.
-	console := NewConsoleTail()
-	createOpts.OnConsoleOutput = func(output string) {
-		console.Add(output)
-		slog.Debug("guest console", "output", strings.TrimRight(output, "\n"))
-		emit(opts, ConsoleOutputEvent{Output: output})
-	}
 	if opts.Config != nil {
 		createOpts.DiskSizeBytes = opts.Config.DiskSizeBytes()
 		createOpts.CPUs = opts.Config.CPUs()
@@ -582,47 +562,22 @@ func Start(ctx context.Context, opts Opts) (_ *Session, retErr error) {
 	// before invoking sandbox.Start, leaving it nil when no bearer secrets
 	// are configured.
 
-	instance, runnerConn, err := opts.Provider.Create(ctx, createOpts)
+	booted, err := bootVM(ctx, opts, createOpts, registry, handler)
 	if err != nil {
-		return nil, fmt.Errorf("create VM: %w", err)
+		return nil, err
 	}
+	for _, closer := range booted.closers {
+		sess.addCloser(closer)
+	}
+	instance, pr := booted.instance, booted.runner
 	sess.dialGuest = instance.DialGuest
-	sess.addCloser(func() {
-		slog.Info("destroying VM", "vm_id", instance.ID)
-		destroyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if destroyErr := opts.Provider.Destroy(destroyCtx, instance.ID); destroyErr != nil {
-			slog.Error("failed to destroy VM", "vm_id", instance.ID, "error", destroyErr)
-		}
-	})
-
-	// Bridge is reachable only over the provider-supplied transport so that
-	// nothing outside the guest can talk to it. Each provider must hand us a
-	// listener (vsock today; future remote providers must design an
-	// authenticated transport rather than fall back to an open TCP socket).
-	if runnerConn == nil || runnerConn.Listener == nil {
-		return nil, errors.New("provider did not supply a runner listener; bridge cannot be served safely")
-	}
-	bridgeListener := dispatch.WrapListener(runnerConn.Listener, runnerConn.ExpectedPeerCID)
-	go dispatch.Serve(bridgeListener, handler)
-	sess.addCloser(func() { bridgeListener.Close() })
-
-	// Wait for runner to register.
-	registerCtx, registerCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer registerCancel()
-
-	select {
-	case <-pr.DoneCh:
-	case <-registerCtx.Done():
-		return nil, errors.New("timed out waiting for runner to connect")
-	}
 
 	sess.VmInfo = pr.VmInfo
 	emit(opts, ProvisionedEvent{VmInfo: pr.VmInfo})
 
 	// Build proxy for sending commands to the runner.
 	proxy := NewBridgeProxy(pr.CommandCh, pr.ResultCh, pr.OutputCh, pr)
-	proxy.AttachConsole(console)
+	proxy.AttachConsole(booted.console)
 	sess.bareProxy = proxy
 
 	// Establish trust in the egress proxy before anything below it opens a
