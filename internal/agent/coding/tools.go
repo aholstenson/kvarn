@@ -1367,6 +1367,9 @@ func (t *spawnAgentTool) Execute(ctx context.Context, input *SpawnAgentInput) (*
 	if !ok {
 		return nil, fmt.Errorf("unknown sub-agent %q", input.Name)
 	}
+	if t.readOnly && sub.Edits {
+		return nil, fmt.Errorf("sub-agent %q changes files and this run is read-only", sub.Name)
+	}
 
 	model, ok := t.toolkit.agentModels[sub.Name]
 	if !ok {

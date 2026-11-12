@@ -211,6 +211,29 @@ var _ = Describe("spawn_agent", func() {
 			Expect(names).NotTo(HaveKey("edit_file"))
 			Expect(names).NotTo(HaveKey("write_file"))
 		})
+
+		It("refuses to spawn a sub-agent that edits when the parent is read-only", func() {
+			called := false
+			model := &fakeModel{
+				generate: func(context.Context, ...llms.GenerateOption) (llms.Result, error) {
+					called = true
+					return llms.TextResult{Text: "done"}, nil
+				},
+			}
+			tk := buildToolkit(model, coding.SubAgents{coding.Worker.Name: coding.Worker})
+			var spawn llms.ToolDef
+			for _, t := range tk.ReadOnlyTools() {
+				if t.Name() == "spawn_agent" {
+					spawn = t
+				}
+			}
+			Expect(spawn).NotTo(BeNil())
+
+			_, err := spawn.Execute(ctx, &coding.SpawnAgentInput{Name: coding.Worker.Name, Prompt: "go"})
+			Expect(err).To(MatchError(ContainSubstring("read-only")))
+			Expect(called).To(BeFalse())
+			Expect(runner.createCalls).To(BeEmpty())
+		})
 	})
 
 	It("numbers the runs of each sub-agent separately", func() {
@@ -462,6 +485,7 @@ var _ = Describe("Model classes", func() {
 			coding.Explore.Name:       string(coding.ClassFast),
 			coding.Plan.Name:          string(coding.ClassReasoning),
 			coding.General.Name:       string(coding.ClassBalanced),
+			coding.Worker.Name:        string(coding.ClassFast),
 			coding.ValidatorAgentName: string(coding.ClassReasoning),
 		}))
 	})
@@ -556,6 +580,75 @@ var _ = Describe("SubAgent definitions", func() {
 
 		It("is registered as a built-in sub-agent", func() {
 			Expect(coding.BuiltinSubAgents()).To(HaveKeyWithValue(coding.General.Name, coding.General))
+		})
+	})
+
+	Describe("Worker", func() {
+		toolNames := func(readOnly bool) map[string]bool {
+			deps := coding.SubAgentDeps{
+				Runner:     &mockRunner{},
+				WorkingDir: "/home/kvarn/workspace",
+				SessionID:  "sub-sess",
+				ReadOnly:   readOnly,
+			}
+			names := map[string]bool{}
+			for _, t := range coding.Worker.Tools(deps) {
+				names[t.Name()] = true
+			}
+			return names
+		}
+
+		It("runs on the fast class", func() {
+			Expect(coding.Worker.Class).To(Equal(coding.ClassFast))
+		})
+
+		It("exposes the shell and the edit tools", func() {
+			names := toolNames(false)
+			Expect(names).To(HaveKey("exec_command"))
+			Expect(names).To(HaveKey("read_file"))
+			Expect(names).To(HaveKey("edit_file"))
+			Expect(names).To(HaveKey("write_file"))
+		})
+
+		It("leaves out the edit tools in a read-only run", func() {
+			names := toolNames(true)
+			Expect(names).NotTo(HaveKey("edit_file"))
+			Expect(names).NotTo(HaveKey("write_file"))
+		})
+
+		It("cannot spawn sub-agents or merge", func() {
+			names := toolNames(false)
+			Expect(names).NotTo(HaveKey("spawn_agent"))
+			Expect(names).NotTo(HaveKey("merge_branch"))
+			Expect(names).NotTo(HaveKey("finish_merge"))
+		})
+
+		It("is registered as a built-in sub-agent", func() {
+			Expect(coding.BuiltinSubAgents()).To(HaveKeyWithValue(coding.Worker.Name, coding.Worker))
+		})
+	})
+
+	Describe("the sub-agents of a read-only run", func() {
+		It("leaves out every sub-agent that edits and keeps the rest", func() {
+			readOnly := coding.BuiltinSubAgents().ReadOnly()
+			Expect(readOnly).NotTo(HaveKey(coding.Worker.Name))
+			Expect(readOnly).To(HaveKey(coding.Explore.Name))
+			Expect(readOnly).To(HaveKey(coding.Plan.Name))
+			Expect(readOnly).To(HaveKey(coding.General.Name))
+		})
+	})
+
+	Describe("the worker guidance in the parent prompt", func() {
+		It("is present when the worker is offered", func() {
+			prompt := coding.ModeImplement.SystemPrompt("proj", "url", "main", nil, coding.BuiltinSubAgents(), forgeconfig.Content{})
+			Expect(prompt).To(ContainSubstring("give it to the worker sub-agent"))
+			Expect(prompt).To(ContainSubstring("Treat a worker's report as a claim"))
+		})
+
+		It("is absent when the worker is not offered", func() {
+			prompt := coding.ModeReview.SystemPrompt("proj", "url", "main", nil, coding.BuiltinSubAgents().ReadOnly(), forgeconfig.Content{})
+			Expect(prompt).To(ContainSubstring("<available_sub_agents>"))
+			Expect(prompt).NotTo(ContainSubstring("worker"))
 		})
 	})
 

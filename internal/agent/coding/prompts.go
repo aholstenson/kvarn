@@ -310,8 +310,19 @@ func appendContextBlocks(sb *strings.Builder, rc *repocontext.RepoContext, subAg
 			fmt.Fprintf(sb, "  <sub_agent>\n    <name>%s</name>\n    <description>%s</description>\n  </sub_agent>\n", sub.Name, sub.Description)
 		}
 		sb.WriteString("</available_sub_agents>")
+		if _, ok := subAgents[Worker.Name]; ok {
+			sb.WriteString("\n\n")
+			sb.WriteString(workerGuidance)
+		}
 	}
 }
+
+// workerGuidance tells the parent how to use the worker sub-agent. A weaker
+// model is only worth its lower cost when the parent gives it an exact task and
+// checks the result, so the prompt says both.
+const workerGuidance = `When you know exactly what a change must be and it is mostly mechanical — the same edit in many places, a rename, call sites or tests to update to a known spec — give it to the worker sub-agent instead of making each edit yourself. In the prompt, name the files, the change to make in each, and the check to run. Keep changes that need design judgment for yourself or for general-purpose.
+
+Treat a worker's report as a claim, not a result. Read the diff of the files it changed, or run the check yourself, before you build on it. If the worker reports that it stopped or did not finish, do not spawn it again with the same prompt: make the change yourself or give it to general-purpose.`
 
 // Shared body sections. The mode-specific bodies are assembled below by
 // concatenating an intro with these standard blocks. Keep them in one place

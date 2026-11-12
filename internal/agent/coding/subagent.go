@@ -25,6 +25,10 @@ type SubAgent struct {
 	// the definition states what kind of work this is and leaves how much model
 	// to spend on it to configuration.
 	Class Class
+	// Edits marks a sub-agent whose job is to change files. A read-only run
+	// does not offer it, because without edit tools it could do nothing its
+	// description promises.
+	Edits bool
 }
 
 // BuiltinSubAgents returns the sub-agents every coding-agent run registers.
@@ -33,7 +37,20 @@ func BuiltinSubAgents() SubAgents {
 		Explore.Name: Explore,
 		Plan.Name:    Plan,
 		General.Name: General,
+		Worker.Name:  Worker,
 	}
+}
+
+// ReadOnly returns the sub-agents a read-only run may offer: every one that
+// is not there to change files.
+func (s SubAgents) ReadOnly() SubAgents {
+	out := make(SubAgents, len(s))
+	for name, sub := range s {
+		if !sub.Edits {
+			out[name] = sub
+		}
+	}
+	return out
 }
 
 // SubAgentDeps carries everything a sub-agent's toolkit needs to construct
@@ -54,6 +71,26 @@ type SubAgentDeps struct {
 
 // SubAgents holds the registered sub-agent types keyed by Name.
 type SubAgents map[string]*SubAgent
+
+// fullTools returns the tools shared by General and Worker: the parent's own
+// tools without spawn_agent and the merge tools, and without the edit tools in
+// a read-only run.
+func fullTools(deps SubAgentDeps) []llms.ToolDef {
+	tk := &CodingToolkit{
+		runner:     deps.Runner,
+		workingDir: deps.WorkingDir,
+		sessionID:  deps.SessionID,
+		skills:     deps.Skills,
+		tasks:      NewTaskList(),
+		viewModel:  deps.Model,
+	}
+	// The toolkit has no sub-agents and no merge target, so neither
+	// spawn_agent nor the merge tools are in the set it returns.
+	if deps.ReadOnly {
+		return tk.ReadOnlyTools()
+	}
+	return tk.Tools()
+}
 
 // readOnlyTools returns the read-only tools shared by Explore and Plan.
 func readOnlyTools(deps SubAgentDeps) []llms.ToolDef {

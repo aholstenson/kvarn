@@ -103,6 +103,9 @@ func (a *CodingAgent) Start(ctx context.Context, agentCtx *agent.Context) (agent
 	}
 
 	subAgents := BuiltinSubAgents()
+	if mode.ReadOnly() {
+		subAgents = subAgents.ReadOnly()
+	}
 
 	// The merge tools are offered only when the run has both halves: a branch
 	// shipped into the guest and somewhere for the resulting commit to go. A

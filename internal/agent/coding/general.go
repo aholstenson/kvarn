@@ -40,20 +40,7 @@ Return a single written report. Start with the result, then give the evidence:
 Be concise; the parent will act on your report.`
 	},
 	Tools: func(deps SubAgentDeps) []llms.ToolDef {
-		tk := &CodingToolkit{
-			runner:     deps.Runner,
-			workingDir: deps.WorkingDir,
-			sessionID:  deps.SessionID,
-			skills:     deps.Skills,
-			tasks:      NewTaskList(),
-			viewModel:  deps.Model,
-		}
-		// The toolkit has no sub-agents and no merge target, so neither
-		// spawn_agent nor the merge tools are in the set it returns.
-		if deps.ReadOnly {
-			return tk.ReadOnlyTools()
-		}
-		return tk.Tools()
+		return fullTools(deps)
 	},
 	Class: ClassBalanced,
 }
